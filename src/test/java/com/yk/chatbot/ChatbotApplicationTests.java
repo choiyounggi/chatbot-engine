@@ -1,4 +1,4 @@
-package com.yk.linkly;
+package com.yk.chatbot;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
