@@ -1,4 +1,4 @@
-package com.yk.linkly;
+package com.yk.chatbot;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
