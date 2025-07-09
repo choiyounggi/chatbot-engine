@@ -1,2 +1,33 @@
+# 서버 포트
 server:
   port: 8080
+
+# Rasa 서버 설정
+rasa:
+  server:
+    url: http://localhost:5005
+    timeout: 5000
+
+# 날씨 API 설정
+openweathermap:
+  api:
+    key: 989dfd10c0f2a6b466ce90e69d9bcd45
+
+# 로깅 설정
+logging:
+  level:
+    com.yk.chatbot: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# Springdoc 설정
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+# Spring 설정
+spring:
+  main:
+    allow-bean-definition-overriding: true

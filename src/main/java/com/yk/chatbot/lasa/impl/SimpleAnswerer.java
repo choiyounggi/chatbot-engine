@@ -3,64 +3,91 @@ package com.yk.chatbot.lasa.impl;
 import com.yk.chatbot.dto.ChatResponse;
 import com.yk.chatbot.lasa.Answer;
 import com.yk.chatbot.lasa.SolutionResult;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 /**
- * Answer 인터페이스의 기본 구현체입니다.
- * 해결 결과를 사용자가 이해할 수 있는 응답으로 변환합니다.
+ * 간단한 응답 생성기 구현체
  */
+@Slf4j
 @Component
 public class SimpleAnswerer implements Answer {
-
-    // 템플릿의 변수 패턴 ({{variable_name}})
-    private static final Pattern TEMPLATE_PATTERN = Pattern.compile("\\{\\{([\\w_]+)\\}\\}");
 
     @Override
     public ChatResponse answer(SolutionResult result) {
         if (result == null) {
-            return ChatResponse.builder()
-                    .reply("시스템 오류가 발생했습니다.")
-                    .intent("error")
-                    .build();
+            return createErrorResponse("시스템 오류가 발생했습니다.");
         }
         
-        // 템플릿에 데이터 적용
-        String finalResponse = applyTemplateData(result.getResponseTemplate(), result.getData());
-        
-        // ChatResponse 객체 생성 및 반환
-        return ChatResponse.builder()
-                .reply(finalResponse)
-                .intent(result.getOriginalIntent())
-                .build();
+        try {
+            String responseMessage = formatResponseMessage(result);
+            
+            return ChatResponse.builder()
+                    .message(responseMessage)
+                    .intent(result.getOriginalIntent())
+                    .entities(result.getData())
+                    .confidence(result.isSuccess() ? 1.0 : 0.5)
+                    .timestamp(System.currentTimeMillis())
+                    .build();
+        } catch (Exception e) {
+            log.error("응답 생성 중 오류 발생", e);
+            return createErrorResponse("응답을 생성하는 중 오류가 발생했습니다.");
+        }
     }
     
     /**
-     * 템플릿에 데이터를 적용하여 최종 문자열을 생성합니다.
-     * 템플릿 내의 {{variable}} 형태의 변수를 데이터로 치환합니다.
-     *
-     * @param template 응답 템플릿
-     * @param data 치환될 데이터
-     * @return 데이터가 적용된 최종 문자열
+     * 응답 메시지 형식화
+     * 
+     * @param result 해결 결과
+     * @return 형식화된 메시지 문자열
      */
-    private String applyTemplateData(String template, Map<String, Object> data) {
-        if (template == null || data == null) {
-            return template;
+    private String formatResponseMessage(SolutionResult result) {
+        String template = result.getResponseTemplate();
+        
+        // 템플릿이 없는 경우 기본 응답
+        if (template == null) {
+            return "죄송합니다. 응답을 생성할 수 없습니다.";
         }
         
-        StringBuffer result = new StringBuffer();
-        Matcher matcher = TEMPLATE_PATTERN.matcher(template);
-        
-        while (matcher.find()) {
-            String variable = matcher.group(1);
-            Object value = data.getOrDefault(variable, "");
-            matcher.appendReplacement(result, value.toString());
+        // 특수 응답 형식 처리
+        switch (result.getOriginalIntent()) {
+            case "weather":
+                return String.format(template, 
+                        result.getData().getOrDefault("location", "서울"), 
+                        result.getData().getOrDefault("weather", "알 수 없음"));
+                
+            case "temperature":
+                return String.format(template, 
+                        result.getData().getOrDefault("location", "서울"), 
+                        result.getData().getOrDefault("temperature", 0));
+                
+            case "time":
+                return String.format(template, 
+                        result.getData().getOrDefault("time", 
+                                LocalDateTime.now(ZoneId.of("Asia/Seoul"))
+                                        .toString()));
+                
+            default:
+                // 일반 템플릿은 그대로 반환
+                return template;
         }
-        
-        matcher.appendTail(result);
-        return result.toString();
+    }
+    
+    /**
+     * 오류 응답 생성
+     * 
+     * @param errorMessage 오류 메시지
+     * @return 오류 응답
+     */
+    private ChatResponse createErrorResponse(String errorMessage) {
+        return ChatResponse.builder()
+                .message(errorMessage)
+                .intent("error")
+                .confidence(0.0)
+                .timestamp(System.currentTimeMillis())
+                .build();
     }
 }

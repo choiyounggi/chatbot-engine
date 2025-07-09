@@ -1,0 +1,29 @@
+version: "3.1"
+
+intents:
+  - greeting
+  - weather
+  - temperature
+  - time
+  - bye
+  - thanks
+  - help
+  - fallback
+
+entities:
+  - location
+
+slots:
+  location:
+    type: text
+    mappings:
+    - type: from_entity
+      entity: location
+
+responses:
+  utter_default:
+    - text: "죄송합니다. 이해하지 못했습니다. 다른 방식으로 질문해주세요."
+
+session_config:
+  session_expiration_time: 60
+  carry_over_slots_to_new_session: true

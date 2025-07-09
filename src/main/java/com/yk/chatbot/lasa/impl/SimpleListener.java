@@ -5,8 +5,8 @@ import com.yk.chatbot.lasa.Listen;
 import org.springframework.stereotype.Component;
 
 /**
- * Listen 인터페이스의 기본 구현체입니다.
- * 사용자 입력을 정규화하고 기본적인 전처리를 수행합니다.
+ * 간단한 리스너 구현체
+ * 사용자 입력을 전처리합니다.
  */
 @Component
 public class SimpleListener implements Listen {

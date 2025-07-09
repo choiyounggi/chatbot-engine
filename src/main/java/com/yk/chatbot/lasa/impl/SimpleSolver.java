@@ -3,109 +3,112 @@ package com.yk.chatbot.lasa.impl;
 import com.yk.chatbot.lasa.AnalysisResult;
 import com.yk.chatbot.lasa.Solve;
 import com.yk.chatbot.lasa.SolutionResult;
+import com.yk.chatbot.service.WeatherService;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.time.LocalTime;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Solve 인터페이스의 기본 구현체입니다.
- * 분석된 의도에 따라 적절한 응답 전략을 수립합니다.
+ * 간단한 문제 해결기 구현체
  */
+@Slf4j
 @Component
+@RequiredArgsConstructor
 public class SimpleSolver implements Solve {
 
-    // 의도별 응답 템플릿
-    private static final Map<String, String> responseTemplates = new HashMap<>();
+    private final WeatherService weatherService;
     
-    static {
-        responseTemplates.put("greeting", "안녕하세요! 무엇을 도와드릴까요?");
-        responseTemplates.put("weather", "현재 {{location}}의 날씨는 {{weather_status}}입니다. 기온은 {{temperature}}도 입니다.");
-        responseTemplates.put("time_query", "현재 시간은 {{current_time}}입니다.");
-        responseTemplates.put("help", "제가 도울 수 있는 것들은 다음과 같습니다: 날씨 정보 제공, 현재 시간 안내, 인사하기 등이 있습니다.");
-        responseTemplates.put("unknown", "죄송합니다. 이해하지 못했어요. 다른 방식으로 질문해 주시겠어요?");
-    }
-
+    private static final Map<String, String> RESPONSE_TEMPLATES = Map.of(
+        "greeting", "안녕하세요! 무엇을 도와드릴까요?",
+        "weather", "%s의 현재 날씨는 %s입니다.",
+        "temperature", "%s의 현재 기온은 %d°C입니다.",
+        "time", "현재 시간은 %s입니다.",
+        "bye", "안녕히 가세요! 좋은 하루 되세요!",
+        "thanks", "천만에요! 더 필요한 것이 있으면 말씀해주세요.",
+        "help", "저는 날씨, 시간 정보를 알려드리거나 간단한 대화가 가능해요. '서울 날씨 어때?'나 '지금 몇시야?' 같은 질문을 해보세요.",
+        "error", "죄송합니다. 이해하지 못했습니다. 다른 방식으로 말씀해주시겠어요?",
+        "fallback", "잘 이해하지 못했습니다. 도움이 필요하시면 '도움말'이라고 입력해주세요."
+    );
+    
     @Override
     public SolutionResult solve(AnalysisResult result) {
-        if (result == null) {
-            return createErrorSolution();
+        if (result == null || result.getIntent() == null) {
+            return createErrorResult();
         }
         
         String intent = result.getIntent();
-        Map<String, Object> data = new HashMap<>();
+        Map<String, String> entities = result.getEntities();
         
-        switch (intent) {
-            case "greeting":
-                // 간단한 인사 의도는 추가 처리 없음
-                return createSuccessSolution(intent, responseTemplates.get(intent), data);
-                
-            case "weather":
-                // 날씨 정보 조회
-                String location = result.getEntities().getOrDefault("location", "서울");
-                data.put("location", location);
-                data.put("weather_status", getWeatherForLocation(location));
-                data.put("temperature", getTemperatureForLocation(location));
-                return createSuccessSolution(intent, responseTemplates.get(intent), data);
-                
-            case "time_query":
-                // 현재 시간 정보 제공
-                String timePeriod = result.getEntities().getOrDefault("time_period", "");
-                LocalTime now = LocalTime.now();
-                String formattedTime = now.format(DateTimeFormatter.ofPattern("HH시 mm분 ss초"));
-                data.put("current_time", formattedTime);
-                return createSuccessSolution(intent, responseTemplates.get(intent), data);
-                
-            case "help":
-                // 도움말 제공
-                return createSuccessSolution(intent, responseTemplates.get(intent), data);
-                
-            default:
-                // 알 수 없는 의도
-                return createSuccessSolution("unknown", responseTemplates.get("unknown"), data);
+        log.info("의도 처리 중: {}, 엔티티: {}", intent, entities);
+        
+        try {
+            // 의도에 따른 처리 로직
+            switch (intent) {
+                case "greeting":
+                    return createSuccessResult(intent);
+                    
+                case "weather":
+                    String location = entities.getOrDefault("location", "서울");
+                    String weather = weatherService.getWeatherForLocation(location);
+                    return createSuccessResult(intent)
+                            .addData("location", location)
+                            .addData("weather", weather);
+                    
+                case "temperature":
+                    location = entities.getOrDefault("location", "서울");
+                    int temp = weatherService.getTemperatureForLocation(location);
+                    return createSuccessResult(intent)
+                            .addData("location", location)
+                            .addData("temperature", temp);
+                    
+                case "time":
+                    String currentTime = LocalDateTime.now()
+                            .format(DateTimeFormatter.ofPattern("a h시 mm분"));
+                    return createSuccessResult(intent)
+                            .addData("time", currentTime);
+                    
+                case "bye":
+                case "thanks":
+                case "help":
+                    return createSuccessResult(intent);
+                    
+                case "error":
+                    return createErrorResult();
+                    
+                default:
+                    return createFallbackResult();
+            }
+        } catch (Exception e) {
+            log.error("의도 처리 중 오류 발생", e);
+            return createErrorResult();
         }
     }
     
-    /**
-     * 성공적인 해결 결과 객체를 생성합니다.
-     */
-    private SolutionResult createSuccessSolution(String intent, String template, Map<String, Object> data) {
+    private SolutionResult createSuccessResult(String intent) {
         return SolutionResult.builder()
                 .status("success")
                 .originalIntent(intent)
-                .responseTemplate(template)
-                .data(data)
+                .responseTemplate(RESPONSE_TEMPLATES.getOrDefault(intent, RESPONSE_TEMPLATES.get("fallback")))
                 .build();
     }
     
-    /**
-     * 오류 상태의 해결 결과 객체를 생성합니다.
-     */
-    private SolutionResult createErrorSolution() {
+    private SolutionResult createErrorResult() {
         return SolutionResult.builder()
                 .status("error")
-                .originalIntent("unknown")
-                .responseTemplate("시스템 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+                .originalIntent("error")
+                .responseTemplate(RESPONSE_TEMPLATES.get("error"))
                 .build();
     }
     
-    /**
-     * 지정된 위치의 날씨 정보를 가져옵니다.
-     * 실제 구현에서는 외부 API를 호출하거나 데이터베이스 조회 등을 수행합니다.
-     */
-    private String getWeatherForLocation(String location) {
-        // 실제 구현에서는 날씨 API 호출
-        return "맑음";
-    }
-    
-    /**
-     * 지정된 위치의 온도를 가져옵니다.
-     * 실제 구현에서는 외부 API를 호출하거나 데이터베이스 조회 등을 수행합니다.
-     */
-    private int getTemperatureForLocation(String location) {
-        // 실제 구현에서는 날씨 API 호출
-        return 23;
+    private SolutionResult createFallbackResult() {
+        return SolutionResult.builder()
+                .status("fallback")
+                .originalIntent("fallback")
+                .responseTemplate(RESPONSE_TEMPLATES.get("fallback"))
+                .build();
     }
 }

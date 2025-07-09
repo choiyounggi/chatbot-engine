@@ -1,25 +1,30 @@
 package com.yk.chatbot.lasa;
 
+import lombok.AllArgsConstructor;
 import lombok.Builder;
-import lombok.Getter;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 
 import java.util.HashMap;
 import java.util.Map;
 
 /**
- * 문제 해결 결과를 담는 클래스입니다.
- * 해결 상태, 결과 데이터, 응답 템플릿 등을 포함합니다.
+ * 문제 해결 결과 클래스
+ * 분석된 의도에 따른 비즈니스 로직 수행 결과를 저장합니다.
  */
-@Getter
+@Data
 @Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class SolutionResult {
+    
     /**
-     * 해결 상태 (성공, 실패, 부분 성공 등)
+     * 처리 상태 (success, error, etc.)
      */
     private String status;
     
     /**
-     * 응답에 사용할 데이터
+     * 응답 생성에 필요한 데이터
      */
     @Builder.Default
     private Map<String, Object> data = new HashMap<>();
@@ -30,24 +35,25 @@ public class SolutionResult {
     private String responseTemplate;
     
     /**
-     * 원본 의도 (분석 단계에서 추출된 의도)
+     * 원본 의도
      */
     private String originalIntent;
     
     /**
-     * 추가 데이터를 저장하는 헬퍼 메서드
-     * @param key 데이터 키
-     * @param value 데이터 값
-     */
-    public void addData(String key, Object value) {
-        data.put(key, value);
-    }
-    
-    /**
-     * 해결이 성공적으로 완료되었는지 확인
-     * @return 성공 여부
+     * 상태가 성공인지 확인
      */
     public boolean isSuccess() {
         return "success".equals(status);
+    }
+    
+    /**
+     * 데이터 추가 헬퍼 메소드
+     */
+    public SolutionResult addData(String key, Object value) {
+        if (data == null) {
+            data = new HashMap<>();
+        }
+        data.put(key, value);
+        return this;
     }
 }

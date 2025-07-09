@@ -36,3 +36,29 @@ out/
 ### VS Code ###
 .vscode/
 /gradlew.bat
+
+### Rasa Server ###
+# 가상 환경
+rasaServer/venv/
+rasaServer/.venv/
+
+# Rasa 모델 및 캐시 파일
+rasaServer/models/
+rasaServer/.rasa/
+rasaServer/__pycache__/
+rasaServer/**/__pycache__/
+
+# 로그 파일
+rasaServer/logs/
+*.log
+
+# 모델 파일
+rasaServer/*.tar.gz
+
+# 임시 파일
+rasaServer/.DS_Store
+rasaServer/events.db
+rasaServer/rasa.db
+
+# 개인 인증 정보
+rasaServer/.env

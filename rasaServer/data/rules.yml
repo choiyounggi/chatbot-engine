@@ -1,0 +1,22 @@
+version: "3.1"
+
+rules:
+- rule: Say hello anytime the user says hello
+  steps:
+  - intent: greeting
+  - action: utter_default
+
+- rule: Say goodbye anytime the user says goodbye
+  steps:
+  - intent: bye
+  - action: utter_default
+
+- rule: Thank you anytime the user says thank you
+  steps:
+  - intent: thanks
+  - action: utter_default
+
+- rule: Help anytime the user asks for help
+  steps:
+  - intent: help
+  - action: utter_default

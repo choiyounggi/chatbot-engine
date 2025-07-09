@@ -1,0 +1,13 @@
+# 이 파일은 Rasa 서버의 외부 엔드포인트 구성을 정의합니다
+
+# 트래커 저장소 설정
+tracker_store:
+  type: InMemoryTrackerStore
+
+# 액션 서버 설정 (필요한 경우 주석 해제)
+# action_endpoint:
+#   url: "http://localhost:5055/webhook"
+
+# NLG 서버 설정 (필요한 경우 주석 해제)
+# nlg:
+#   url: "http://localhost:5055/nlg"
