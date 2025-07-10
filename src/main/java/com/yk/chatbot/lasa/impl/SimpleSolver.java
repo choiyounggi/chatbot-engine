@@ -61,6 +61,51 @@ public class SimpleSolver implements Solve {
         "fallback", "잘 이해하지 못했습니다. 도움이 필요하시면 '도움말'이라고 입력해주세요."
     );
     
+    // 위치 키워드 목록 - 메시지에서 위치 정보 추출 시 사용
+    private static final String[] LOCATION_KEYWORDS = {
+        // 특별시/광역시
+        "서울", "부산", "인천", "대구", "광주", "대전", "울산", "세종",
+        "서울특별시", "부산광역시", "인천광역시", "대구광역시", "광주광역시", "대전광역시", "울산광역시", "세종특별자치시",
+        
+        // 도
+        "경기", "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주",
+        "경기도", "강원도", "충청북도", "충청남도", "전라북도", "전라남도", "경상북도", "경상남도", "제주도", "제주특별자치도",
+        
+        // 주요 도시
+        "수원", "성남", "안양", "안산", "고양", "용인", "청주", "천안", "전주", "포항", "창원",
+        "김해", "평택", "강릉", "원주", "춘천", "속초", "여수", "순천", "목포", "경주", "구미",
+        "거제", "양산", "진주", "파주", "의정부", "남양주", "화성", "시흥", "광명", "하남", "군포",
+        "오산", "이천", "안성", "광주", "파주", "김포", "구리", "여주", "양주", "동두천", "과천",
+        "의왕", "포천", "양평", "동해", "태백", "삼척", "정선", "홍천", "횡성", "영월", "평창",
+        "정읍", "남원", "김제", "익산", "완주", "진안", "무주", "장수", "임실", "순창", "고창", "부안",
+        "나주", "광양", "담양", "곡성", "구례", "고흥", "보성", "화순", "장흥", "강진", "해남",
+        "영암", "무안", "함평", "영광", "장성", "완도", "진도", "신안",
+        "영덕", "울진", "문경", "예천", "안동", "영양", "영주", "봉화", "울릉", "의성", "청송", "영천",
+        "경산", "청도", "고령", "성주", "칠곡", "김천", "군위", "사천", "밀양", "의령", "함안",
+        "창녕", "고성", "남해", "하동", "산청", "함양", "거창", "합천", "통영"
+    };
+    
+    /**
+     * 사용자 메시지에서 위치 정보를 추출합니다
+     * @param message 사용자 메시지
+     * @return 추출된 위치명 또는 기본값 "서울"
+     */
+    private String extractLocationFromMessage(String message) {
+        if (message == null || message.isEmpty()) {
+            return "서울";
+        }
+        
+        for (String keyword : LOCATION_KEYWORDS) {
+            if (message.contains(keyword)) {
+                log.info("메시지에서 위치 키워드 추출 성공: {}", keyword);
+                return keyword;
+            }
+        }
+        
+        log.info("메시지에서 위치를 찾을 수 없어 기본값 사용");
+        return "서울";
+    }
+    
     @Override
     public SolutionResult solve(AnalysisResult result) {
         if (result == null || result.getIntent() == null) {
@@ -103,21 +148,7 @@ public class SimpleSolver implements Solve {
                         log.warn("날씨 요청에서 지역 엔티티를 찾을 수 없습니다. 원본 메시지: '{}'", result.getOriginalMessage());
                         
                         // 메시지에서 직접 위치 키워드 찾기 (백업 방법)
-                        String message = result.getOriginalMessage();
-                        if (message.contains("서울")) location = "서울";
-                        else if (message.contains("부산")) location = "부산";
-                        else if (message.contains("대구")) location = "대구";
-                        else if (message.contains("인천")) location = "인천";
-                        else if (message.contains("광주")) location = "광주";
-                        else if (message.contains("대전")) location = "대전";
-                        else if (message.contains("울산")) location = "울산";
-                        else if (message.contains("제주")) location = "제주";
-                        
-                        if (!location.equals("서울")) {
-                            log.info("메시지에서 직접 위치 키워드 추출: {}", location);
-                        } else {
-                            log.info("지역 정보 없음, 기본 위치(서울) 사용");
-                        }
+                        location = extractLocationFromMessage(result.getOriginalMessage());
                     }
                     
                     log.info("날씨 정보 요청 처리: 최종 위치 = {}", location);
@@ -149,21 +180,7 @@ public class SimpleSolver implements Solve {
                         log.warn("기온 요청에서 지역 엔티티를 찾을 수 없습니다. 원본 메시지: '{}'", result.getOriginalMessage());
                         
                         // 메시지에서 직접 위치 키워드 찾기 (백업 방법)
-                        String message = result.getOriginalMessage();
-                        if (message.contains("서울")) location = "서울";
-                        else if (message.contains("부산")) location = "부산";
-                        else if (message.contains("대구")) location = "대구";
-                        else if (message.contains("인천")) location = "인천";
-                        else if (message.contains("광주")) location = "광주";
-                        else if (message.contains("대전")) location = "대전";
-                        else if (message.contains("울산")) location = "울산";
-                        else if (message.contains("제주")) location = "제주";
-                        
-                        if (!location.equals("서울")) {
-                            log.info("메시지에서 직접 위치 키워드 추출: {}", location);
-                        } else {
-                            log.info("지역 정보 없음, 기본 위치(서울) 사용");
-                        }
+                        location = extractLocationFromMessage(result.getOriginalMessage());
                     }
                     
                     log.info("기온 정보 요청 처리: 최종 위치 = {}", location);

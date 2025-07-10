@@ -62,6 +62,45 @@ nlu:
 - intent: weather
   examples: |
     - [서울](location) 날씨 어때요?
+    - [부산](location) 날씨가 어떤가요?
+    - 오늘 [인천](location) 날씨 알려줘
+    - 지금 [대구](location) 날씨가 어떤지 궁금해요
+    - [대전](location) 오늘 날씨 어때?
+    - [광주](location) 지금 날씨는요?
+    - [울산](location)은 날씨가 어떤가요?
+    - [세종](location) 오늘 날씨 정보 주세요
+    - [제주](location) 날씨는 어떤가요?
+    - 오늘 [서울](location)에 비가 오나요?
+    - [부산](location)에 지금 눈이 오나요?
+    - [인천](location) 오늘 맑음?
+    - 지금 [대구](location)에 구름 많이 끼었어요?
+    - [대전](location) 날씨 정보를 알려주세요
+    - [광주](location) 현재 날씨는 어때요?
+    - [울산](location)에 비 올 확률이 있나요?
+    - [세종](location)은 오늘 맑은가요?
+    - [제주](location)에 지금 비가 와요?
+    - 오늘 [수원](location) 날씨 어때요?
+    - [성남](location) 현재 날씨를 알려줘
+    - [안양](location)에 비가 오나요?
+    - [안산](location) 날씨 정보 부탁해요
+    - [고양](location)은 지금 날씨가 어때요?
+    - [용인](location) 오늘 날씨 어떤가요?
+    - [청주](location) 현재 날씨는?
+    - [천안](location) 날씨 정보 주세요
+    - 지금 [전주](location)에 비가 와요?
+    - [포항](location) 오늘 날씨가 어떤지 알려줘
+    - [창원](location) 현재 날씨 정보
+    - 오늘 [김해](location) 날씨는 어때요?
+    - [평택](location) 지금 날씨가 어떤가요?
+    - [강릉](location) 날씨 알려줘
+    - [거제](location)에 태풍 왔어요?
+    - [양산](location) 오늘 날씨 정보 알려줘
+    - [원주](location) 날씨는 어때요?
+    - [춘천](location) 지금 비와요?
+    - 오늘 [속초](location) 날씨 어때요?
+    - [여수](location) 날씨가 어떤가요?
+    - [순천](location) 날씨 알려줘요
+    - [서울](location) 날씨 알려줘
     - [부산](location) 날씨 알려줘
     - [인천](location)의 오늘 날씨가 궁금해요
     - 지금 [대구](location) 날씨는 어떤가요?
@@ -251,6 +290,29 @@ nlu:
     - 현재 기온 알려주세요
     - 밖에 나가면 추울까요?
     - 현재 체감 온도는 어때요?
+    - [제주](location)는 몇 도에요?
+    - 현재 [수원](location) 기온 알려줘
+    - [성남](location) 온도가 어때요?
+    - [안양](location)은 지금 기온이 어떤가요?
+    - [고양](location) 온도 알려줄래?
+    - [용인](location)이 지금 몇 도에요?
+    - [경기도](location) 현재 기온은요?
+    - [강원도](location) 지금 온도가 어떤지 알려줘
+    - [충청북도](location) 기온이 어때요?
+    - [충청남도](location) 현재 몇 도인가요?
+    - [전라북도](location) 기온 알려줘
+    - [전라도](location) 지금 온도가 어떤가요?
+    - [경상북도](location) 현재 기온은요?
+    - [경상남도](location) 지금 몇 도에요?
+    - [제주도](location) 온도 알려줄래요?
+    - 현재 [경기](location) 지역 기온이 어떤가요?
+    - [강원](location) 온도가 몇 도인지 알려줘
+    - [충북](location) 지금 몇 도에요?
+    - [충남](location) 현재 기온이 어때요?
+    - [전북](location) 온도 알려주세요
+    - [전남](location) 지금 기온이 어떤지 궁금해요
+    - [경북](location) 현재 몇 도인가요?
+    - [경남](location) 지금 온도가 어때요?
 
 - intent: time
   examples: |
