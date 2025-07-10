@@ -23,6 +23,35 @@ slots:
 responses:
   utter_default:
     - text: "죄송합니다. 이해하지 못했습니다. 다른 방식으로 질문해주세요."
+  
+  utter_greeting:
+    - text: "안녕하세요! 무엇을 도와드릴까요?"
+    - text: "반갑습니다! 날씨, 시간 등을 물어보실 수 있어요."
+    - text: "안녕하세요! 오늘 하루도 힘내세요."
+  
+  utter_bye:
+    - text: "안녕히 가세요!"
+    - text: "다음에 또 이용해 주세요."
+    - text: "좋은 하루 되세요!"
+  
+  utter_thanks:
+    - text: "천만에요! 다른 질문이 있으신가요?"
+    - text: "도움이 되어 기쁩니다."
+    - text: "별 말씀을요, 언제든 물어보세요."
+  
+  utter_help:
+    - text: "저는 날씨, 온도, 현재 시간 등을 알려드릴 수 있어요. 예를 들어 '서울 날씨 어때?' 또는 '지금 몇 시야?'라고 물어보세요."
+    - text: "다음과 같은 질문을 할 수 있습니다: 1) 지역 날씨 확인 2) 현재 시간 확인 3) 지역 온도 확인"
+
+actions:
+  - action_weather_info
+  - action_temperature_info
+  - action_current_time
+  - utter_default
+  - utter_greeting
+  - utter_bye
+  - utter_thanks
+  - utter_help
 
 session_config:
   session_expiration_time: 60

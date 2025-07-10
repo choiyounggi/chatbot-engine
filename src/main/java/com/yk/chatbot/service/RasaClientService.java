@@ -53,7 +53,9 @@ public class RasaClientService {
                 requestBody.put("sender", senderId);
             }
 
+            log.info("Rasa 서버 요청: {}", message);
             JsonNode response = sendRequest(modelEndpoint, requestBody);
+            log.info("Rasa 응답 수신: {}", response.toString());
 
             // 응답 파싱
             String intent = response.has("intent") && response.get("intent").has("name")
@@ -66,17 +68,37 @@ public class RasaClientService {
 
             Map<String, Object> entities = new HashMap<>();
             if (response.has("entities") && response.get("entities").isArray()) {
-                response.get("entities").forEach(entity -> {
-                    String entityName = entity.get("entity").asText();
-                    String entityValue = entity.get("value").asText();
-                    entities.put(entityName, entityValue);
-                });
+                JsonNode entitiesNode = response.get("entities");
+                log.info("엔티티 추출 시작: 총 {} 개의 엔티티 발견", entitiesNode.size());
+                
+                for (JsonNode entity : entitiesNode) {
+                    if (entity.has("entity") && entity.has("value")) {
+                        String entityName = entity.get("entity").asText();
+                        String entityValue = entity.get("value").asText();
+                        
+                        // 엔티티 값이 비어있지 않은 경우만 처리
+                        if (entityValue != null && !entityValue.trim().isEmpty()) {
+                            entities.put(entityName, entityValue);
+                            log.info("엔티티 추출: {}={}", entityName, entityValue);
+                        } else {
+                            log.warn("빈 엔티티 값 발견: {}", entityName);
+                        }
+                    } else {
+                        log.warn("유효하지 않은 엔티티 형식: {}", entity);
+                    }
+                }
+            } else {
+                log.warn("엔티티 필드가 없거나 배열이 아님: {}", response);
             }
 
             result.put("intent", intent);
             result.put("confidence", confidence);
             result.put("entities", entities);
             result.put("rawResponse", response);
+
+            // 최종 결과 로깅
+            log.info("분석 결과: intent={}, confidence={}, entities={}", 
+                     intent, confidence, entities);
 
             return result;
         } catch (Exception e) {

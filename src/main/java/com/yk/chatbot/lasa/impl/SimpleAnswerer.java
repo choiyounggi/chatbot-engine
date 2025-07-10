@@ -54,21 +54,42 @@ public class SimpleAnswerer implements Answer {
         
         // 특수 응답 형식 처리
         switch (result.getOriginalIntent()) {
+            case "greeting":
+                // 랜덤 인사말 사용
+                return String.format(template, 
+                        result.getData().getOrDefault("greeting", "안녕하세요! 무엇을 도와드릴까요?"));
+
             case "weather":
-                return String.format(template, 
-                        result.getData().getOrDefault("location", "서울"), 
-                        result.getData().getOrDefault("weather", "알 수 없음"));
-                
+                // 위치, 날씨 상태, 상세 설명 포함
+                String location = String.valueOf(result.getData().getOrDefault("location", "서울"));
+                String weather = String.valueOf(result.getData().getOrDefault("weather", "알 수 없음"));
+                String weatherDetail = String.valueOf(result.getData().getOrDefault("weatherDetail", ""));
+
+                // 날짜/시간 정보 추가
+                String dateTime = String.valueOf(result.getData().getOrDefault("dateTime", ""));
+                if (!dateTime.isEmpty()) {
+                    dateTime = " (" + dateTime + " 기준)";
+                }
+
+                return String.format(template, location, weather, weatherDetail) + dateTime;
+
             case "temperature":
-                return String.format(template, 
-                        result.getData().getOrDefault("location", "서울"), 
-                        result.getData().getOrDefault("temperature", 0));
-                
+                location = String.valueOf(result.getData().getOrDefault("location", "서울"));
+                String tempValue = String.valueOf(result.getData().getOrDefault("temperature", "0"));
+                int temperature = Integer.parseInt(tempValue);
+                String tempDescription = String.valueOf(result.getData().getOrDefault("tempDescription", ""));
+
+                return String.format(template, location, temperature, tempDescription);
             case "time":
                 return String.format(template, 
                         result.getData().getOrDefault("time", 
                                 LocalDateTime.now(ZoneId.of("Asia/Seoul"))
                                         .toString()));
+                
+            case "bye":
+                // 랜덤 작별 인사 사용
+                return String.format(template, 
+                        result.getData().getOrDefault("bye", "안녕히 가세요! 좋은 하루 되세요!"));
                 
             default:
                 // 일반 템플릿은 그대로 반환

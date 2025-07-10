@@ -11,7 +11,7 @@ rasa:
 # 날씨 API 설정
 openweathermap:
   api:
-    key: 989dfd10c0f2a6b466ce90e69d9bcd45
+    key: <my-api-key>
 
 # 로깅 설정
 logging:

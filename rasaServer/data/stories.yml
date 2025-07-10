@@ -4,31 +4,30 @@ stories:
 - story: greet and help
   steps:
   - intent: greeting
-  - action: utter_default
+  - action: utter_greeting
   - intent: help
-  - action: utter_default
+  - action: utter_help
 
-- story: ask weather
+- story: ask weather with location
   steps:
   - intent: weather
-  - slot_was_set:
-    - location: "서울"
+  - action: action_weather_info
 
-- story: ask temperature
+- story: ask temperature with location
   steps:
   - intent: temperature
-  - slot_was_set:
-    - location: "서울"
+  - action: action_temperature_info
 
 - story: ask time and thanks
   steps:
   - intent: time
+  - action: action_current_time
   - intent: thanks
-  - action: utter_default
+  - action: utter_thanks
 
 - story: greet and bye
   steps:
   - intent: greeting
-  - action: utter_default
+  - action: utter_greeting
   - intent: bye
-  - action: utter_default
+  - action: utter_bye

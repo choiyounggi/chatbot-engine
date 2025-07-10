@@ -4,19 +4,39 @@ rules:
 - rule: Say hello anytime the user says hello
   steps:
   - intent: greeting
-  - action: utter_default
+  - action: utter_greeting
 
 - rule: Say goodbye anytime the user says goodbye
   steps:
   - intent: bye
-  - action: utter_default
+  - action: utter_bye
 
 - rule: Thank you anytime the user says thank you
   steps:
   - intent: thanks
-  - action: utter_default
+  - action: utter_thanks
 
 - rule: Help anytime the user asks for help
   steps:
   - intent: help
+  - action: utter_help
+
+- rule: Get weather information
+  steps:
+  - intent: weather
+  - action: action_weather_info
+
+- rule: Get temperature information
+  steps:
+  - intent: temperature
+  - action: action_temperature_info
+
+- rule: Get current time
+  steps:
+  - intent: time
+  - action: action_current_time
+
+- rule: Fallback
+  steps:
+  - intent: fallback
   - action: utter_default

@@ -4,9 +4,9 @@
 tracker_store:
   type: InMemoryTrackerStore
 
-# 액션 서버 설정 (필요한 경우 주석 해제)
-# action_endpoint:
-#   url: "http://localhost:5055/webhook"
+# 액션 서버 설정 
+action_endpoint:
+  url: "http://localhost:5055/webhook"
 
 # NLG 서버 설정 (필요한 경우 주석 해제)
 # nlg:

@@ -49,4 +49,14 @@ public class AnalysisResult {
         entities.put(name, value);
         return this;
     }
+    
+    /**
+     * 특정 엔티티가 존재하는지 확인하는 메소드
+     * @param name 확인할 엔티티 이름
+     * @return 엔티티 존재 여부 (true/false)
+     */
+    public boolean hasEntity(String name) {
+        return entities != null && entities.containsKey(name) && 
+               entities.get(name) != null && !entities.get(name).trim().isEmpty();
+    }
 }

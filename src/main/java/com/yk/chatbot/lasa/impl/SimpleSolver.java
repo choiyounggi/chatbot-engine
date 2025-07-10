@@ -10,11 +10,8 @@ import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.Map;
+import java.util.*;
 
-/**
- * 간단한 문제 해결기 구현체
- */
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -22,12 +19,42 @@ public class SimpleSolver implements Solve {
 
     private final WeatherService weatherService;
     
+    // 다양한 인사말 응답 패턴 추가
+    private static final List<String> GREETING_RESPONSES = Arrays.asList(
+        "안녕하세요! 무엇을 도와드릴까요?",
+        "반갑습니다! 오늘은 어떤 도움이 필요하신가요?",
+        "안녕하세요! 좋은 하루 되고 계신가요?",
+        "어서오세요! 무엇을 알려드릴까요?",
+        "반가워요! 무엇이든 물어보세요."
+    );
+    
+    // 다양한 작별 인사 응답 패턴 추가
+    private static final List<String> BYE_RESPONSES = Arrays.asList(
+        "안녕히 가세요! 좋은 하루 되세요!",
+        "다음에 또 봐요! 좋은 시간 되세요.",
+        "이용해 주셔서 감사합니다. 또 필요하시면 언제든 불러주세요!",
+        "좋은 하루 보내세요! 다음에 또 만나요.",
+        "안녕히 계세요! 또 뵙겠습니다."
+    );
+    
+    // 더 상세한 날씨 응답 템플릿
+    private static final Map<String, String> WEATHER_DESCRIPTIONS = Map.of(
+        "맑음", "화창한 날씨입니다! 야외 활동하기 좋은 날이에요.",
+        "구름많음", "구름이 조금 있지만 나쁘지 않은 날씨입니다.",
+        "흐림", "하늘이 흐리네요. 우산을 챙기는 것이 좋을 수 있어요.",
+        "비", "비가 내리고 있어요. 외출 시 우산을 꼭 챙기세요!",
+        "소나기", "소나기가 내리고 있어요. 잠시 실내에서 대기하는 것이 좋겠습니다.",
+        "눈", "눈이 내리고 있어요. 미끄러울 수 있으니 조심하세요!",
+        "안개", "안개가 끼었네요. 운전 시 특히 주의하세요.",
+        "천둥번개", "천둥번개가 치고 있어요. 야외 활동은 위험할 수 있습니다."
+    );
+    
     private static final Map<String, String> RESPONSE_TEMPLATES = Map.of(
-        "greeting", "안녕하세요! 무엇을 도와드릴까요?",
-        "weather", "%s의 현재 날씨는 %s입니다.",
-        "temperature", "%s의 현재 기온은 %d°C입니다.",
+        "greeting", "%s", // 랜덤 인사말로 대체됨
+        "weather", "%s의 현재 날씨는 %s입니다. %s",
+        "temperature", "%s의 현재 기온은 %d°C입니다. %s",
         "time", "현재 시간은 %s입니다.",
-        "bye", "안녕히 가세요! 좋은 하루 되세요!",
+        "bye", "%s", // 랜덤 작별 인사로 대체됨
         "thanks", "천만에요! 더 필요한 것이 있으면 말씀해주세요.",
         "help", "저는 날씨, 시간 정보를 알려드리거나 간단한 대화가 가능해요. '서울 날씨 어때?'나 '지금 몇시야?' 같은 질문을 해보세요.",
         "error", "죄송합니다. 이해하지 못했습니다. 다른 방식으로 말씀해주시겠어요?",
@@ -45,25 +72,121 @@ public class SimpleSolver implements Solve {
         
         log.info("의도 처리 중: {}, 엔티티: {}", intent, entities);
         
+        // 엔티티 디버깅을 위한 상세 로깅
+        if (entities != null && !entities.isEmpty()) {
+            for (Map.Entry<String, String> entry : entities.entrySet()) {
+                log.debug("엔티티 발견 - 키: '{}', 값: '{}'", entry.getKey(), entry.getValue());
+            }
+        } else {
+            log.warn("추출된 엔티티가 없습니다. 원본 메시지: '{}'", result.getOriginalMessage());
+        }
+        
         try {
             // 의도에 따른 처리 로직
             switch (intent) {
                 case "greeting":
-                    return createSuccessResult(intent);
+                    return createSuccessResult(intent)
+                            .addData("greeting", getRandomGreeting());
                     
                 case "weather":
-                    String location = entities.getOrDefault("location", "서울");
+                    // 엔티티에서 지역 정보 추출 (지역이 없으면 기본값 "서울" 사용)
+                    String location = "서울";
+                    if (entities != null && entities.containsKey("location")) {
+                        String extractedLocation = entities.get("location").trim();
+                        if (!extractedLocation.isEmpty()) {
+                            location = extractedLocation;
+                            log.info("날씨 요청 지역 엔티티 추출 성공: {}", location);
+                        } else {
+                            log.warn("날씨 요청 지역 엔티티가 빈 문자열입니다. 원본 메시지: '{}'", result.getOriginalMessage());
+                        }
+                    } else {
+                        log.warn("날씨 요청에서 지역 엔티티를 찾을 수 없습니다. 원본 메시지: '{}'", result.getOriginalMessage());
+                        
+                        // 메시지에서 직접 위치 키워드 찾기 (백업 방법)
+                        String message = result.getOriginalMessage();
+                        if (message.contains("서울")) location = "서울";
+                        else if (message.contains("부산")) location = "부산";
+                        else if (message.contains("대구")) location = "대구";
+                        else if (message.contains("인천")) location = "인천";
+                        else if (message.contains("광주")) location = "광주";
+                        else if (message.contains("대전")) location = "대전";
+                        else if (message.contains("울산")) location = "울산";
+                        else if (message.contains("제주")) location = "제주";
+                        
+                        if (!location.equals("서울")) {
+                            log.info("메시지에서 직접 위치 키워드 추출: {}", location);
+                        } else {
+                            log.info("지역 정보 없음, 기본 위치(서울) 사용");
+                        }
+                    }
+                    
+                    log.info("날씨 정보 요청 처리: 최종 위치 = {}", location);
                     String weather = weatherService.getWeatherForLocation(location);
+                    String weatherDetail = WEATHER_DESCRIPTIONS.getOrDefault(weather, 
+                            "오늘은 " + weather + " 상태입니다.");
+                    
+                    String currentDateTime = LocalDateTime.now()
+                            .format(DateTimeFormatter.ofPattern("yyyy년 MM월 dd일 HH시 mm분"));
+                    
                     return createSuccessResult(intent)
                             .addData("location", location)
-                            .addData("weather", weather);
+                            .addData("weather", weather)
+                            .addData("weatherDetail", weatherDetail)
+                            .addData("dateTime", currentDateTime);
                     
                 case "temperature":
-                    location = entities.getOrDefault("location", "서울");
+                    // 엔티티에서 지역 정보 추출 (지역이 없으면 기본값 "서울" 사용)
+                    location = "서울";
+                    if (entities != null && entities.containsKey("location")) {
+                        String extractedLocation = entities.get("location").trim();
+                        if (!extractedLocation.isEmpty()) {
+                            location = extractedLocation;
+                            log.info("기온 요청 지역 엔티티 추출 성공: {}", location);
+                        } else {
+                            log.warn("기온 요청 지역 엔티티가 빈 문자열입니다. 원본 메시지: '{}'", result.getOriginalMessage());
+                        }
+                    } else {
+                        log.warn("기온 요청에서 지역 엔티티를 찾을 수 없습니다. 원본 메시지: '{}'", result.getOriginalMessage());
+                        
+                        // 메시지에서 직접 위치 키워드 찾기 (백업 방법)
+                        String message = result.getOriginalMessage();
+                        if (message.contains("서울")) location = "서울";
+                        else if (message.contains("부산")) location = "부산";
+                        else if (message.contains("대구")) location = "대구";
+                        else if (message.contains("인천")) location = "인천";
+                        else if (message.contains("광주")) location = "광주";
+                        else if (message.contains("대전")) location = "대전";
+                        else if (message.contains("울산")) location = "울산";
+                        else if (message.contains("제주")) location = "제주";
+                        
+                        if (!location.equals("서울")) {
+                            log.info("메시지에서 직접 위치 키워드 추출: {}", location);
+                        } else {
+                            log.info("지역 정보 없음, 기본 위치(서울) 사용");
+                        }
+                    }
+                    
+                    log.info("기온 정보 요청 처리: 최종 위치 = {}", location);
                     int temp = weatherService.getTemperatureForLocation(location);
+                    
+                    // 온도에 따른 추가 설명
+                    String tempDescription = "";
+                    if (temp <= 0) {
+                        tempDescription = "매우 춥습니다. 따뜻하게 입으세요!";
+                    } else if (temp <= 10) {
+                        tempDescription = "쌀쌀합니다. 겉옷을 챙기세요.";
+                    } else if (temp <= 20) {
+                        tempDescription = "선선한 날씨입니다.";
+                    } else if (temp <= 28) {
+                        tempDescription = "따뜻한 날씨입니다.";
+                    } else {
+                        tempDescription = "더운 날씨입니다. 시원하게 지내세요!";
+                    }
+                    
                     return createSuccessResult(intent)
                             .addData("location", location)
-                            .addData("temperature", temp);
+                            .addData("temperature", temp)
+                            .addData("tempDescription", tempDescription);
                     
                 case "time":
                     String currentTime = LocalDateTime.now()
@@ -72,6 +195,9 @@ public class SimpleSolver implements Solve {
                             .addData("time", currentTime);
                     
                 case "bye":
+                    return createSuccessResult(intent)
+                            .addData("bye", getRandomBye());
+                    
                 case "thanks":
                 case "help":
                     return createSuccessResult(intent);
@@ -86,6 +212,20 @@ public class SimpleSolver implements Solve {
             log.error("의도 처리 중 오류 발생", e);
             return createErrorResult();
         }
+    }
+    
+    /**
+     * 랜덤한 인사말을 반환합니다.
+     */
+    private String getRandomGreeting() {
+        return GREETING_RESPONSES.get(new Random().nextInt(GREETING_RESPONSES.size()));
+    }
+    
+    /**
+     * 랜덤한 작별 인사를 반환합니다.
+     */
+    private String getRandomBye() {
+        return BYE_RESPONSES.get(new Random().nextInt(BYE_RESPONSES.size()));
     }
     
     private SolutionResult createSuccessResult(String intent) {
