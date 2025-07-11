@@ -24,8 +24,14 @@ public class WeatherService {
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
     
-    @Value("${openweathermap.api.key}")
+    @Value("${weather.api.key}")
     private String apiKey;
+    
+    @Value("${weather.api.url}")
+    private String apiUrl;
+    
+    @Value("${weather.api.demo-mode:false}")
+    private boolean demoMode;
     
     private final Map<String, String> cityCoordinates = new HashMap<>();
     
@@ -137,15 +143,18 @@ public class WeatherService {
      */
     @PostConstruct
     public void init() {
-        log.info("WeatherService 초기화 완료. API 키: {}", maskApiKey(apiKey));
+        log.info("WeatherService 초기화 완료. API URL: {}, 데모 모드: {}", apiUrl, demoMode);
         
         // API 키 검증
-        if (apiKey == null || apiKey.trim().isEmpty()) {
-            log.warn("OpenWeatherMap API 키가 설정되지 않았습니다. 테스트 모드로 실행합니다.");
+        if (demoMode) {
+            log.info("날씨 서비스가 데모 모드로 실행됩니다. 실제 API 호출 없이 가상 데이터를 제공합니다.");
+        } else if (apiKey == null || apiKey.trim().isEmpty()) {
+            log.warn("Weather API 키가 설정되지 않았습니다. 테스트 모드로 실행합니다.");
         } else if ("dummy-api-key-for-tests".equals(apiKey)) {
             log.warn("테스트용 더미 API 키가 사용되고 있습니다. 테스트 모드로 실행합니다.");
         } else {
-            log.info("OpenWeatherMap API 키가 설정되었습니다. 실시간 날씨 정보를 제공합니다.");
+            log.info("Weather API 키가 설정되었습니다: {}", maskApiKey(apiKey));
+            log.info("실시간 날씨 정보를 제공합니다.");
         }
     }
     
@@ -168,25 +177,10 @@ public class WeatherService {
     public String getWeatherForLocation(String location) {
         log.info("날씨 정보 요청 위치: {}", location);
         
-        // 테스트용 API 키가 아닌지 확인 (null 체크 추가)
-        boolean isRealApiKey = apiKey != null && !apiKey.trim().isEmpty() && !"dummy-api-key-for-tests".equals(apiKey);
-        
-        // 테스트용 모의 응답 반환 (API 키가 dummy이거나 없는 경우)
-        if (!isRealApiKey) {
-            log.info("테스트 모드에서 날씨 정보 제공 (실제 API 호출 안함)");
-            LocalDateTime now = LocalDateTime.now();
-            int hour = now.getHour();
-            
-            // 시간에 따라 다양한 날씨 상태 반환 (테스트용)
-            if (hour >= 6 && hour < 12) {
-                return "맑음";
-            } else if (hour >= 12 && hour < 18) {
-                return "구름많음";
-            } else if (hour >= 18 && hour < 21) {
-                return "흐림";
-            } else {
-                return "맑음";
-            }
+        // 데모 모드이거나 API 키가 유효하지 않은 경우
+        if (demoMode || !hasValidApiKey()) {
+            log.info("데모/테스트 모드에서 날씨 정보 제공 (실제 API 호출 안함)");
+            return generateDemoWeather();
         }
         
         try {
@@ -194,11 +188,11 @@ public class WeatherService {
             String coordinates = getCoordinatesForLocation(location);
             String[] latLon = coordinates.split(",");
             String url = String.format(
-                "https://api.openweathermap.org/data/2.5/weather?lat=%s&lon=%s&appid=%s&lang=en",
-                latLon[0], latLon[1], apiKey
+                "%s?lat=%s&lon=%s&appid=%s&lang=en&units=metric",
+                apiUrl, latLon[0], latLon[1], apiKey
             );
             
-            log.debug("OpenWeatherMap API 호출: {}", url.replace(apiKey, "API_KEY_HIDDEN"));
+            log.debug("Weather API 호출: {}", url.replace(apiKey, "API_KEY_HIDDEN"));
             
             String rawResponse = restTemplate.getForObject(url, String.class);
             log.debug("API 응답 수신: {}", rawResponse);
@@ -219,6 +213,27 @@ public class WeatherService {
     }
     
     /**
+     * 데모 모드용 가상 날씨 상태 생성
+     * 
+     * @return 랜덤 날씨 상태
+     */
+    private String generateDemoWeather() {
+        LocalDateTime now = LocalDateTime.now();
+        int hour = now.getHour();
+        
+        // 시간에 따라 다양한 날씨 상태 반환 (테스트용)
+        if (hour >= 6 && hour < 12) {
+            return "맑음";
+        } else if (hour >= 12 && hour < 18) {
+            return "구름많음";
+        } else if (hour >= 18 && hour < 21) {
+            return "흐림";
+        } else {
+            return "맑음";
+        }
+    }
+    
+    /**
      * 특정 위치의 기온을 반환합니다.
      * 
      * @param location 위치명
@@ -227,26 +242,10 @@ public class WeatherService {
     public int getTemperatureForLocation(String location) {
         log.info("기온 정보 요청 위치: {}", location);
         
-        // 테스트용 API 키가 아닌지 확인 (null 체크 추가)
-        boolean isRealApiKey = apiKey != null && !apiKey.trim().isEmpty() && !"dummy-api-key-for-tests".equals(apiKey);
-        
-        // 테스트용 모의 응답 반환 (API 키가 dummy이거나 없는 경우)
-        if (!isRealApiKey) {
-            log.info("테스트 모드에서 기온 정보 제공 (실제 API 호출 안함)");
-            LocalDateTime now = LocalDateTime.now();
-            int month = now.getMonthValue();
-            int hour = now.getHour();
-            
-            // 월과 시간에 따라 다양한 온도 반환 (테스트용)
-            if (month >= 3 && month <= 5) { // 봄
-                return 15 + (hour > 12 ? 5 : 0);
-            } else if (month >= 6 && month <= 8) { // 여름
-                return 25 + (hour > 12 ? 5 : 0);
-            } else if (month >= 9 && month <= 11) { // 가을
-                return 15 + (hour > 12 ? 3 : -2);
-            } else { // 겨울
-                return 0 + (hour > 12 ? 5 : -3);
-            }
+        // 데모 모드이거나 API 키가 유효하지 않은 경우
+        if (demoMode || !hasValidApiKey()) {
+            log.info("데모/테스트 모드에서 기온 정보 제공 (실제 API 호출 안함)");
+            return generateDemoTemperature();
         }
         
         try {
@@ -254,11 +253,11 @@ public class WeatherService {
             String coordinates = getCoordinatesForLocation(location);
             String[] latLon = coordinates.split(",");
             String url = String.format(
-                "https://api.openweathermap.org/data/2.5/weather?lat=%s&lon=%s&appid=%s&units=metric",
-                latLon[0], latLon[1], apiKey
+                "%s?lat=%s&lon=%s&appid=%s&units=metric",
+                apiUrl, latLon[0], latLon[1], apiKey
             );
             
-            log.debug("OpenWeatherMap API 호출: {}", url.replace(apiKey, "API_KEY_HIDDEN"));
+            log.debug("Weather API 호출: {}", url.replace(apiKey, "API_KEY_HIDDEN"));
             
             String rawResponse = restTemplate.getForObject(url, String.class);
             log.debug("API 응답 수신: {}", rawResponse);
@@ -271,6 +270,28 @@ public class WeatherService {
         } catch (Exception e) {
             log.error("기온 정보를 가져오는 중 오류 발생: {}", e.getMessage(), e);
             return 0;
+        }
+    }
+    
+    /**
+     * 데모 모드용 가상 기온 데이터 생성
+     * 
+     * @return 계절과 시간에 맞는 기온
+     */
+    private int generateDemoTemperature() {
+        LocalDateTime now = LocalDateTime.now();
+        int month = now.getMonthValue();
+        int hour = now.getHour();
+        
+        // 월과 시간에 따라 다양한 온도 반환 (테스트용)
+        if (month >= 3 && month <= 5) { // 봄
+            return 15 + (hour > 12 ? 5 : 0);
+        } else if (month >= 6 && month <= 8) { // 여름
+            return 25 + (hour > 12 ? 5 : 0);
+        } else if (month >= 9 && month <= 11) { // 가을
+            return 15 + (hour > 12 ? 3 : -2);
+        } else { // 겨울
+            return 0 + (hour > 12 ? 5 : -3);
         }
     }
     
@@ -312,12 +333,9 @@ public class WeatherService {
             return cityCoordinates.get(location);
         }
         
-        // 테스트용 API 키가 아닌지 확인
-        boolean isRealApiKey = apiKey != null && !apiKey.trim().isEmpty() && !"dummy-api-key-for-tests".equals(apiKey);
-        
-        // API 키가 dummy일 경우 서울 좌표 반환
-        if (!isRealApiKey) {
-            log.info("API 키가 유효하지 않아 기본 위치(서울)의 좌표를 사용합니다");
+        // 데모 모드이거나 API 키가 유효하지 않은 경우 서울 좌표 반환
+        if (demoMode || !hasValidApiKey()) {
+            log.info("데모 모드이거나 API 키가 유효하지 않아 기본 위치(서울)의 좌표를 사용합니다");
             return cityCoordinates.get("서울");
         }
         

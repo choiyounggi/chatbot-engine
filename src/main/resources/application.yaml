@@ -2,23 +2,52 @@
 server:
   port: 8080
 
-# Rasa 서버 설정
-rasa:
-  server:
-    url: http://localhost:5005
-    timeout: 5000
-
-# 날씨 API 설정
-openweathermap:
-  api:
-    key: <my-api-key>
+# Spring 설정
+spring:
+  application:
+    name: chatbot-engine
+  main:
+    allow-bean-definition-overriding: true
 
 # 로깅 설정
 logging:
   level:
-    com.yk.chatbot: INFO
+    root: INFO
+    com.yk.chatbot: DEBUG
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# 챗봇 분석기 설정
+chatbot:
+  analyzer:
+    type: hybrid
+
+# Rasa 서버 설정
+rasa:
+  server:
+    url: http://localhost:5005
+    model: default
+    timeout: 5000
+
+# 날씨 API 설정
+weather:
+  api:
+    key: 989dfd10c0f2a6b466ce90e69d9bcd45
+    url: https://api.openweathermap.org/data/2.5/weather
+    demo-mode: false
+
+# KoalaNLP 설정
+koala:
+  nlp:
+    dictionary:
+      path: classpath:dictionaries/
+    min-confidence: 0.5
+
+# 응답 타임아웃 설정
+service:
+  timeout:
+    connect: 5000
+    read: 15000
 
 # Springdoc 설정
 springdoc:
@@ -26,8 +55,3 @@ springdoc:
     path: /api-docs
   swagger-ui:
     path: /swagger-ui.html
-
-# Spring 설정
-spring:
-  main:
-    allow-bean-definition-overriding: true
