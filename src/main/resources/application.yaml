@@ -32,7 +32,7 @@ rasa:
 # 날씨 API 설정
 weather:
   api:
-    key: 989dfd10c0f2a6b466ce90e69d9bcd45
+    key: <your-api-key>
     url: https://api.openweathermap.org/data/2.5/weather
     demo-mode: false
 
