@@ -13,6 +13,16 @@ java {
 	}
 }
 
+configurations {
+	compileOnly {
+		extendsFrom annotationProcessor
+	}
+}
+
+configurations.all {
+	exclude group: 'org.slf4j', module: 'slf4j-simple'
+}
+
 repositories {
 	mavenCentral()
 	maven { url "https://jitpack.io" }  // KOMORAN 라이브러리를 위한 저장소
@@ -31,6 +41,12 @@ dependencies {
 
 	// KOMORAN 형태소 분석기 - 정확한 버전 지정
 	implementation 'com.github.shin285:KOMORAN:3.3.9'
+	
+	// OpenAI API 클라이언트
+	implementation 'io.github.sashirestela:simple-openai:3.19.4'
+	implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+	implementation 'com.squareup.okhttp3:logging-interceptor:4.12.0'
+	implementation 'com.squareup.okio:okio:3.6.0'
 
 	compileOnly 'org.projectlombok:lombok'
 	annotationProcessor 'org.projectlombok:lombok'

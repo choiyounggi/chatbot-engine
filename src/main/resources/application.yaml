@@ -43,6 +43,14 @@ koala:
       path: classpath:dictionaries/
     min-confidence: 0.5
 
+# OpenAI API 설정
+openai:
+  key: <your-api-key>
+  model: gpt-4o-mini
+  enabled: true # API 키를 설정한 후 true로 변경
+  max-tokens: 200
+  temperature: 0.7
+
 # 응답 타임아웃 설정
 service:
   timeout:

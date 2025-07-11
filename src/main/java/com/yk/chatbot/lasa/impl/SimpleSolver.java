@@ -3,6 +3,7 @@ package com.yk.chatbot.lasa.impl;
 import com.yk.chatbot.lasa.AnalysisResult;
 import com.yk.chatbot.lasa.Solve;
 import com.yk.chatbot.lasa.SolutionResult;
+import com.yk.chatbot.service.OpenAIService;
 import com.yk.chatbot.service.WeatherService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -11,6 +12,7 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Component
@@ -18,6 +20,7 @@ import java.util.*;
 public class SimpleSolver implements Solve {
 
     private final WeatherService weatherService;
+    private final OpenAIService openAIService;
     
     // 다양한 인사말 응답 패턴 추가
     private static final List<String> GREETING_RESPONSES = Arrays.asList(
@@ -57,8 +60,8 @@ public class SimpleSolver implements Solve {
         "bye", "%s", // 랜덤 작별 인사로 대체됨
         "thanks", "천만에요! 더 필요한 것이 있으면 말씀해주세요.",
         "help", "저는 날씨, 시간 정보를 알려드리거나 간단한 대화가 가능해요. '서울 날씨 어때?'나 '지금 몇시야?' 같은 질문을 해보세요.",
-        "error", "죄송합니다. 이해하지 못했습니다. 다른 방식으로 말씀해주시겠어요?",
-        "fallback", "잘 이해하지 못했습니다. 도움이 필요하시면 '도움말'이라고 입력해주세요."
+        "error", "%s",
+        "fallback", "%s"
     );
     
     // 위치 키워드 목록 - 메시지에서 위치 정보 추출 시 사용
@@ -108,26 +111,17 @@ public class SimpleSolver implements Solve {
     
     @Override
     public SolutionResult solve(AnalysisResult result) {
-        if (result == null || result.getIntent() == null) {
+        if (result == null) {
             return createErrorResult();
         }
         
-        String intent = result.getIntent();
-        Map<String, String> entities = result.getEntities();
-        
-        log.info("의도 처리 중: {}, 엔티티: {}", intent, entities);
-        
-        // 엔티티 디버깅을 위한 상세 로깅
-        if (entities != null && !entities.isEmpty()) {
-            for (Map.Entry<String, String> entry : entities.entrySet()) {
-                log.debug("엔티티 발견 - 키: '{}', 값: '{}'", entry.getKey(), entry.getValue());
-            }
-        } else {
-            log.warn("추출된 엔티티가 없습니다. 원본 메시지: '{}'", result.getOriginalMessage());
-        }
-        
         try {
-            // 의도에 따른 처리 로직
+            String intent = result.getIntent();
+            Map<String, String> entities = result.getEntities();
+            String originalMessage = result.getOriginalMessage();
+            
+            log.info("의도 처리 시작: intent={}, confidence={}", intent, result.getConfidence());
+            
             switch (intent) {
                 case "greeting":
                     return createSuccessResult(intent)
@@ -137,7 +131,7 @@ public class SimpleSolver implements Solve {
                     // 엔티티에서 지역 정보 추출 (지역이 없으면 기본값 "서울" 사용)
                     String location = "서울";
                     if (entities != null && entities.containsKey("location")) {
-                        String extractedLocation = entities.get("location").trim();
+                        String extractedLocation = entities.get("location");
                         if (!extractedLocation.isEmpty()) {
                             location = extractedLocation;
                             log.info("날씨 요청 지역 엔티티 추출 성공: {}", location);
@@ -169,7 +163,7 @@ public class SimpleSolver implements Solve {
                     // 엔티티에서 지역 정보 추출 (지역이 없으면 기본값 "서울" 사용)
                     location = "서울";
                     if (entities != null && entities.containsKey("location")) {
-                        String extractedLocation = entities.get("location").trim();
+                        String extractedLocation = entities.get("location");
                         if (!extractedLocation.isEmpty()) {
                             location = extractedLocation;
                             log.info("기온 요청 지역 엔티티 추출 성공: {}", location);
@@ -220,10 +214,16 @@ public class SimpleSolver implements Solve {
                     return createSuccessResult(intent);
                     
                 case "error":
-                    return createErrorResult();
+                    // error 처리 - OpenAI 호출
+                    SolutionResult errorResult = createErrorResult();
+                    enrichWithOpenAIResponse(errorResult, originalMessage, "error");
+                    return errorResult;
                     
                 default:
-                    return createFallbackResult();
+                    // fallback 처리 - OpenAI 호출
+                    SolutionResult fallbackResult = createFallbackResult();
+                    enrichWithOpenAIResponse(fallbackResult, originalMessage, "fallback");
+                    return fallbackResult;
             }
         } catch (Exception e) {
             log.error("의도 처리 중 오류 발생", e);
@@ -257,15 +257,42 @@ public class SimpleSolver implements Solve {
         return SolutionResult.builder()
                 .status("error")
                 .originalIntent("error")
-                .responseTemplate(RESPONSE_TEMPLATES.get("error"))
-                .build();
+                .responseTemplate("%s") // OpenAI 응답으로 대체할 것이므로 단순 포맷 사용
+                .data(new HashMap<>())
+                .build()
+                .addData("fallbackResponse", "시스템 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
     }
     
     private SolutionResult createFallbackResult() {
         return SolutionResult.builder()
-                .status("fallback")
+                .status("success")
                 .originalIntent("fallback")
-                .responseTemplate(RESPONSE_TEMPLATES.get("fallback"))
-                .build();
+                .responseTemplate("%s") // OpenAI 응답으로 대체할 것이므로 단순 포맷 사용
+                .data(new HashMap<>()) // 빈 데이터맵으로 초기화
+                .build()
+                .addData("fallbackResponse", "잘 이해하지 못했습니다. 도움이 필요하시면 '도움말'이라고 입력해주세요.");
+    }
+    
+    /**
+     * SolutionResult에 OpenAI 응답을 추가합니다.
+     * 
+     * @param result 결과 객체
+     * @param userMessage 사용자 메시지
+     * @param intentType 의도 타입 (fallback 또는 error)
+     */
+    private void enrichWithOpenAIResponse(SolutionResult result, String userMessage, String intentType) {
+        try {
+            String aiResponse = openAIService.generateResponseAsync(userMessage)
+                    .get(5, TimeUnit.SECONDS); // 5초 타임아웃으로 응답 대기
+            
+            if (aiResponse != null && !aiResponse.isEmpty()) {
+                log.info("OpenAI로 {} 응답 생성: {}", intentType, aiResponse);
+                result.addData("fallbackResponse", aiResponse); // fallbackResponse 키를 공통으로 사용
+            } else {
+                log.warn("OpenAI 응답 생성 실패, 기본 {} 응답 사용", intentType);
+            }
+        } catch (Exception e) {
+            log.error("OpenAI 응답 대기 중 시간 초과 또는 오류 발생", e);
+        }
     }
 }

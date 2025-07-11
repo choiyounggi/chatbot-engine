@@ -80,6 +80,7 @@ public class SimpleAnswerer implements Answer {
                 String tempDescription = String.valueOf(result.getData().getOrDefault("tempDescription", ""));
 
                 return String.format(template, location, temperature, tempDescription);
+                
             case "time":
                 return String.format(template, 
                         result.getData().getOrDefault("time", 
@@ -90,6 +91,16 @@ public class SimpleAnswerer implements Answer {
                 // 랜덤 작별 인사 사용
                 return String.format(template, 
                         result.getData().getOrDefault("bye", "안녕히 가세요! 좋은 하루 되세요!"));
+            
+            case "fallback":
+                // OpenAI 생성 응답 또는 기본 fallback 메시지 사용
+                String fallbackResponse = String.valueOf(result.getData().getOrDefault(
+                    "fallbackResponse", 
+                    "죄송합니다. 요청을 이해하지 못했습니다. 도움이 필요하시면 '도움말'이라고 입력해주세요."
+                ));
+                
+                log.debug("Fallback 응답 생성: {}", fallbackResponse);
+                return String.format(template, fallbackResponse);
                 
             default:
                 // 일반 템플릿은 그대로 반환
