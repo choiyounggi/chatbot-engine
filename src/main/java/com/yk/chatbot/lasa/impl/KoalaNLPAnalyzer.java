@@ -2,11 +2,13 @@ package com.yk.chatbot.lasa.impl;
 
 import com.yk.chatbot.lasa.Analyze;
 import com.yk.chatbot.lasa.AnalysisResult;
+import com.yk.chatbot.service.WeatherService;
 import kr.co.shineware.nlp.komoran.constant.DEFAULT_MODEL;
 import kr.co.shineware.nlp.komoran.core.Komoran;
 import kr.co.shineware.nlp.komoran.model.KomoranResult;
 import kr.co.shineware.nlp.komoran.model.Token;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.BufferedWriter;
@@ -24,8 +26,14 @@ public class KoalaNLPAnalyzer implements Analyze {
 
     private final Komoran komoran;
     private final Map<String, Set<String>> intentKeywords = initIntentKeywords();
+    private final Set<String> cityNames;
+    private final WeatherService weatherService;
 
-    public KoalaNLPAnalyzer() {
+    @Autowired
+    public KoalaNLPAnalyzer(WeatherService weatherService) {
+        this.weatherService = weatherService;
+        this.cityNames = new HashSet<>(weatherService.getCityCoordinates().keySet());
+        
         try {
             // KOMORAN 분석기 초기화 (FULL 모델 사용)
             komoran = new Komoran(DEFAULT_MODEL.FULL);
@@ -39,8 +47,13 @@ public class KoalaNLPAnalyzer implements Analyze {
 
     private void initDictionaries() {
         try {
-            // 사용자 사전 항목 생성
-            Set<String> locations = Set.of("서울", "부산", "인천", "대구", "광주", "대전", "울산", "세종");
+            // 사용자 사전 항목 생성 - WeatherService의 모든 도시 사용
+            Set<String> locations = cityNames;
+            
+            // 제주도 추가 (제주만 있는 경우)
+            if (locations.contains("제주")) {
+                locations.add("제주도");
+            }
             
             // 임시 파일에 사용자 사전 생성
             File tempFile = File.createTempFile("komoran_user_dic", ".txt");
@@ -167,6 +180,16 @@ public class KoalaNLPAnalyzer implements Analyze {
     }
 
     private boolean isLocationName(String text) {
-        return Set.of("서울", "부산", "인천", "대구", "광주", "대전", "울산", "세종").contains(text);
+        // WeatherService의 도시 목록을 기반으로 체크
+        if (cityNames.contains(text)) {
+            return true;
+        }
+        
+        // 특별한 케이스: 제주/제주도
+        if ("제주도".equals(text) && cityNames.contains("제주")) {
+            return true;
+        }
+        
+        return false;
     }
 }

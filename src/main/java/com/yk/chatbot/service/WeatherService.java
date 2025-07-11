@@ -109,7 +109,7 @@ public class WeatherService {
         this.restTemplate = restTemplateBuilder.build();
         this.objectMapper = objectMapper;
         
-        // 한국 주요 도시 좌표 정보 (위도, 경도)
+        // 한국 특별시/광역시 (위도, 경도)
         cityCoordinates.put("서울", "37.5665,126.9780");
         cityCoordinates.put("부산", "35.1796,129.0756");
         cityCoordinates.put("인천", "37.4563,126.7052");
@@ -118,24 +118,165 @@ public class WeatherService {
         cityCoordinates.put("광주", "35.1595,126.8526");
         cityCoordinates.put("울산", "35.5384,129.3114");
         cityCoordinates.put("세종", "36.4800,127.2890");
-        cityCoordinates.put("제주", "33.4996,126.5312");
         
-        // 추가 주요 도시 및 지역
+        // 제주 관련 지역 (관광지 포함)
+        cityCoordinates.put("제주", "33.4996,126.5312");
+        cityCoordinates.put("제주도", "33.4996,126.5312");
+        cityCoordinates.put("서귀포", "33.2539,126.5602");
+        cityCoordinates.put("한라산", "33.3617,126.5292");
+        cityCoordinates.put("성산일출봉", "33.4587,126.9425");
+        cityCoordinates.put("우도", "33.5219,126.9571");
+        cityCoordinates.put("중문", "33.2444,126.4125");
+        
+        // 경기도 주요 도시
         cityCoordinates.put("수원", "37.2636,127.0286");
         cityCoordinates.put("성남", "37.4449,127.1388");
         cityCoordinates.put("안양", "37.3941,126.9570");
         cityCoordinates.put("고양", "37.6559,126.8351");
         cityCoordinates.put("용인", "37.2344,127.2011");
-        cityCoordinates.put("청주", "36.6424,127.4890");
-        cityCoordinates.put("천안", "36.8151,127.1135");
-        cityCoordinates.put("전주", "35.8242,127.1480");
-        cityCoordinates.put("포항", "36.0199,129.3415");
-        cityCoordinates.put("창원", "35.2540,128.6395");
-        cityCoordinates.put("김해", "35.2282,128.8812");
+        cityCoordinates.put("부천", "37.5035,126.7664");
+        cityCoordinates.put("안산", "37.3219,126.8309");
+        cityCoordinates.put("남양주", "37.6360,127.2165");
+        cityCoordinates.put("의정부", "37.7380,127.0337");
         cityCoordinates.put("평택", "36.9920,127.0887");
+        cityCoordinates.put("시흥", "37.3798,126.8032");
+        cityCoordinates.put("파주", "37.7599,126.7799");
+        cityCoordinates.put("김포", "37.6151,126.7150");
+        cityCoordinates.put("광명", "37.4791,126.8646");
+        cityCoordinates.put("광주시", "37.4132,127.2547"); // 경기도 광주시
+        cityCoordinates.put("하남", "37.5398,127.2054");
+        
+        // 강원도 주요 도시 및 관광지
+        cityCoordinates.put("춘천", "37.8813,127.7300");
+        cityCoordinates.put("원주", "37.3422,127.9201");
         cityCoordinates.put("강릉", "37.7556,128.8961");
+        cityCoordinates.put("동해", "37.5248,129.1142");
+        cityCoordinates.put("속초", "38.2071,128.5918");
+        cityCoordinates.put("삼척", "37.4498,129.1674");
+        cityCoordinates.put("태백", "37.1665,128.9886");
+        cityCoordinates.put("설악산", "38.1193,128.4657");
+        cityCoordinates.put("양양", "38.0754,128.6189");
+        cityCoordinates.put("평창", "37.3706,128.3903");
+        
+        // 충청북도 주요 도시
+        cityCoordinates.put("청주", "36.6424,127.4890");
+        cityCoordinates.put("충주", "36.9912,127.9260");
+        cityCoordinates.put("제천", "37.1324,128.1910");
+        cityCoordinates.put("음성", "36.9400,127.6903");
+        cityCoordinates.put("진천", "36.8556,127.4354");
+        cityCoordinates.put("증평", "36.7850,127.5814");
+        
+        // 충청남도 주요 도시
+        cityCoordinates.put("천안", "36.8151,127.1135");
+        cityCoordinates.put("공주", "36.5633,127.2544");
+        cityCoordinates.put("보령", "36.3494,126.6032");
+        cityCoordinates.put("아산", "36.7897,127.0019");
+        cityCoordinates.put("서산", "36.7850,126.4503");
+        cityCoordinates.put("논산", "36.1893,127.1000");
+        cityCoordinates.put("계룡", "36.2741,127.2506");
+        cityCoordinates.put("당진", "36.8899,126.6461");
+        cityCoordinates.put("태안", "36.7456,126.2980");
+        
+        // 전라북도 주요 도시 및 관광지
+        cityCoordinates.put("전주", "35.8242,127.1480");
+        cityCoordinates.put("군산", "35.9676,126.7366");
+        cityCoordinates.put("익산", "35.9483,126.9577");
+        cityCoordinates.put("정읍", "35.5700,126.8561");
+        cityCoordinates.put("남원", "35.4164,127.3905");
+        cityCoordinates.put("김제", "35.8033,126.8809");
+        cityCoordinates.put("완주", "35.8441,127.1550");
+        cityCoordinates.put("진안", "35.7913,127.4253");
+        cityCoordinates.put("무주", "36.0068,127.6611");
+        cityCoordinates.put("장수", "35.6471,127.5212");
+        
+        // 전라남도 주요 도시 및 관광지
+        cityCoordinates.put("목포", "34.8118,126.3922");
+        cityCoordinates.put("여수", "34.7604,127.6622");
+        cityCoordinates.put("순천", "34.9506,127.4875");
+        cityCoordinates.put("나주", "35.0158,126.7103");
+        cityCoordinates.put("광양", "34.9400,127.6958");
+        cityCoordinates.put("담양", "35.3220,126.9882");
+        cityCoordinates.put("곡성", "35.2821,127.2923");
+        cityCoordinates.put("구례", "35.2022,127.4628");
+        cityCoordinates.put("보성", "34.7717,127.0799");
+        cityCoordinates.put("화순", "35.0646,126.9857");
+        cityCoordinates.put("해남", "34.5733,126.5989");
+        cityCoordinates.put("영암", "34.8001,126.6968");
+        cityCoordinates.put("무안", "34.9904,126.4816");
+        
+        // 경상북도 주요 도시 및 관광지
+        cityCoordinates.put("포항", "36.0199,129.3415");
+        cityCoordinates.put("경주", "35.8562,129.2246");
+        cityCoordinates.put("김천", "36.1398,128.1135");
+        cityCoordinates.put("안동", "36.5684,128.7294");
+        cityCoordinates.put("구미", "36.1195,128.3444");
+        cityCoordinates.put("영주", "36.8055,128.6240");
+        cityCoordinates.put("영천", "35.9733,128.9388");
+        cityCoordinates.put("상주", "36.4108,128.1592");
+        cityCoordinates.put("문경", "36.5869,128.1873");
+        cityCoordinates.put("경산", "35.8250,128.7415");
+        
+        // 경상남도 주요 도시 및 관광지
+        cityCoordinates.put("창원", "35.2540,128.6395");
+        cityCoordinates.put("진주", "35.1800,128.1108");
+        cityCoordinates.put("통영", "34.8544,128.4332");
+        cityCoordinates.put("사천", "35.0038,128.0641");
+        cityCoordinates.put("김해", "35.2282,128.8812");
+        cityCoordinates.put("밀양", "35.5042,128.7464");
         cityCoordinates.put("거제", "34.8806,128.6211");
         cityCoordinates.put("양산", "35.3350,129.0378");
+        cityCoordinates.put("남해", "34.8376,127.8924");
+        cityCoordinates.put("거창", "35.6868,127.9093");
+        cityCoordinates.put("함안", "35.2723,128.4064");
+        cityCoordinates.put("합천", "35.5671,128.1673");
+        cityCoordinates.put("산청", "35.4156,127.8738");
+        cityCoordinates.put("하동", "35.0674,127.7513");
+        
+        // 서울 주요 지역
+        cityCoordinates.put("강남", "37.5172,127.0473");
+        cityCoordinates.put("강북", "37.6396,127.0257");
+        cityCoordinates.put("강서", "37.5509,126.8495");
+        cityCoordinates.put("관악", "37.4784,126.9516");
+        cityCoordinates.put("광진", "37.5384,127.0822");
+        cityCoordinates.put("구로", "37.4954,126.8874");
+        cityCoordinates.put("금천", "37.4566,126.8972");
+        cityCoordinates.put("노원", "37.6543,127.0567");
+        cityCoordinates.put("도봉", "37.6688,127.0470");
+        cityCoordinates.put("동대문", "37.5741,127.0399");
+        cityCoordinates.put("마포", "37.5637,126.9086");
+        cityCoordinates.put("서대문", "37.5791,126.9368");
+        cityCoordinates.put("송파", "37.5145,127.1060");
+        cityCoordinates.put("종로", "37.5720,126.9793");
+        cityCoordinates.put("중구", "37.5636,126.9975");
+        
+        // 인천 주요 지역
+        cityCoordinates.put("부평", "37.5070,126.7218");
+        cityCoordinates.put("남동", "37.4467,126.7312");
+        cityCoordinates.put("서구", "37.5450,126.6756"); // 인천 서구
+        cityCoordinates.put("연수", "37.4106,126.6780");
+        cityCoordinates.put("계양", "37.5374,126.7380");
+        cityCoordinates.put("강화", "37.7469,126.4881");
+        
+        // 주요 관광지 및 명소
+        cityCoordinates.put("에버랜드", "37.2933,127.2025");
+        cityCoordinates.put("롯데월드", "37.5111,127.0980");
+        cityCoordinates.put("경복궁", "37.5796,126.9770");
+        cityCoordinates.put("남산", "37.5514,126.9882");
+        cityCoordinates.put("북한산", "37.6587,126.9773");
+        cityCoordinates.put("독도", "37.2427,131.8675");
+        cityCoordinates.put("울릉도", "37.5041,130.8667");
+        cityCoordinates.put("지리산", "35.3349,127.7306");
+        cityCoordinates.put("설악산", "38.1193,128.4657");
+        cityCoordinates.put("월출산", "34.7547,126.6870");
+        cityCoordinates.put("덕유산", "35.8606,127.7467");
+        cityCoordinates.put("가야산", "35.8227,128.1147");
+        cityCoordinates.put("소백산", "36.9059,128.4575");
+        cityCoordinates.put("오대산", "37.7341,128.5986");
+        cityCoordinates.put("내장산", "35.4977,126.8862");
+        cityCoordinates.put("태안해안", "36.6733,126.2794");
+        cityCoordinates.put("속리산", "36.5307,127.8572");
+        cityCoordinates.put("월정리", "33.5561,126.7959"); // 제주 월정리
+        cityCoordinates.put("해운대", "35.1586,129.1603"); // 부산 해운대
     }
     
     /**
@@ -293,6 +434,14 @@ public class WeatherService {
         } else { // 겨울
             return 0 + (hour > 12 ? 5 : -3);
         }
+    }
+    
+    /**
+     * 도시 좌표 정보를 반환합니다.
+     * @return 도시명과 좌표 정보(위도,경도)를 담은 Map
+     */
+    public Map<String, String> getCityCoordinates() {
+        return cityCoordinates;
     }
     
     /**
