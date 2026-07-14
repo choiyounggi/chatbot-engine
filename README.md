@@ -1,72 +1,74 @@
-# LASA 기반 챗봇 엔진
+# LASA-based Chatbot Engine
 
-이 프로젝트는 LASA(Listen-Analyze-Solve-Answer) 프레임워크를 적용한 챗봇 엔진입니다.
+**English** | [한국어](README.ko.md)
 
-## LASA 프레임워크란?
+A chatbot engine built on the LASA (Listen-Analyze-Solve-Answer) framework.
 
-LASA는 효과적인 챗봇 시스템을 구축하기 위한 프레임워크로, 다음 4단계로 구성됩니다:
+## What is LASA?
 
-1. **Listen (듣기)**: 사용자 입력을 수신하고 전처리합니다.
-2. **Analyze (분석)**: 사용자 의도와 관련 엔티티를 추출합니다.
-3. **Solve (해결)**: 분석된 의도에 따라 문제를 해결하고 응답 전략을 수립합니다.
-4. **Answer (응답)**: 최종 응답을 생성하여 사용자에게 전달합니다.
+LASA is a framework for building effective chatbot systems, composed of four stages:
 
-## 시스템 구조
+1. **Listen**: receive and preprocess the user's input.
+2. **Analyze**: extract the user's intent and related entities.
+3. **Solve**: resolve the analyzed intent and shape a response strategy.
+4. **Answer**: generate the final response and deliver it to the user.
+
+## System structure
 
 ```
 com.yk.chatbot
 ├── controller
-│   └── ChatbotController.java    # REST API 컨트롤러
+│   └── ChatbotController.java    # REST API controller
 ├── dto
-│   ├── ChatRequest.java          # 요청 DTO
-│   └── ChatResponse.java         # 응답 DTO
-├── lasa                          # LASA 프레임워크 인터페이스
-│   ├── Listen.java               # 듣기 인터페이스
-│   ├── Analyze.java              # 분석 인터페이스
-│   ├── AnalysisResult.java       # 분석 결과 클래스
-│   ├── Solve.java                # 해결 인터페이스
-│   ├── SolutionResult.java       # 해결 결과 클래스
-│   ├── Answer.java               # 응답 인터페이스
-│   └── impl                      # 구현체 패키지
-│       ├── SimpleListener.java   # 기본 리스너 구현
-│       ├── SimpleAnalyzer.java   # 기본 분석기 구현
-│       ├── SimpleSolver.java     # 기본 해결기 구현
-│       └── SimpleAnswerer.java   # 기본 응답기 구현
+│   ├── ChatRequest.java          # request DTO
+│   └── ChatResponse.java         # response DTO
+├── lasa                          # LASA framework interfaces
+│   ├── Listen.java               # listen interface
+│   ├── Analyze.java              # analyze interface
+│   ├── AnalysisResult.java       # analysis result class
+│   ├── Solve.java                # solve interface
+│   ├── SolutionResult.java       # solution result class
+│   ├── Answer.java               # answer interface
+│   └── impl                      # implementations
+│       ├── SimpleListener.java   # default listener
+│       ├── SimpleAnalyzer.java   # default analyzer
+│       ├── SimpleSolver.java     # default solver
+│       └── SimpleAnswerer.java   # default answerer
 └── service
-    └── LasaChatbotService.java   # LASA 기반 챗봇 서비스
+    └── LasaChatbotService.java   # LASA-based chatbot service
 ```
 
-## API 사용 방법
+## API usage
 
-### 요청
+### Request
 
 ```http
 POST /api/v1/chat
 Content-Type: application/json
 
 {
-  "message": "오늘 날씨 어때?"
+  "message": "How's the weather today?"
 }
 ```
 
-### 응답
+### Response
 
 ```json
 {
-  "reply": "현재 서울의 날씨는 맑음입니다. 기온은 23도 입니다.",
+  "reply": "It is currently sunny in Seoul, 23°C.",
   "intent": "weather"
 }
 ```
 
-## 확장 방법
+## Extending
 
-새로운 의도를 추가하거나 기능을 확장하고 싶다면:
+To add a new intent or extend functionality:
 
-1. `SimpleAnalyzer` 클래스에서 새로운 의도 패턴을 추가
-2. `SimpleSolver` 클래스에서 새로운 의도에 대한 처리 로직 구현
-3. 필요시 새로운 DTO, 엔티티 타입 등을 추가
+1. Add the new intent pattern in `SimpleAnalyzer`
+2. Implement handling logic for the new intent in `SimpleSolver`
+3. Add new DTOs / entity types as needed
 
-## 의존성
+## Dependencies
 
 - Spring Boot
 - Lombok
