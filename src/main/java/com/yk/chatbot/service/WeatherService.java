@@ -1,10 +1,10 @@
 package com.yk.chatbot.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.web.client.RestTemplateBuilder;
+import org.springframework.boot.restclient.RestTemplateBuilder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -339,7 +339,7 @@ public class WeatherService {
             log.debug("API 응답 수신: {}", rawResponse);
             
             JsonNode response = objectMapper.readTree(rawResponse);
-            String weatherStatus = response.path("weather").get(0).path("description").asText();
+            String weatherStatus = response.path("weather").get(0).path("description").asString();
             log.info("날씨 상태 (영어): {}", weatherStatus);
             
             // 영어 날씨 상태를 한국어로 변환

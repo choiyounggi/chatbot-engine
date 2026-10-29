@@ -1,7 +1,7 @@
 package com.yk.chatbot.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
@@ -59,7 +59,7 @@ public class RasaClientService {
 
             // 응답 파싱
             String intent = response.has("intent") && response.get("intent").has("name")
-                    ? response.get("intent").get("name").asText()
+                    ? response.get("intent").get("name").asString()
                     : "unknown";
             
             double confidence = response.has("intent") && response.get("intent").has("confidence")
@@ -73,8 +73,8 @@ public class RasaClientService {
                 
                 for (JsonNode entity : entitiesNode) {
                     if (entity.has("entity") && entity.has("value")) {
-                        String entityName = entity.get("entity").asText();
-                        String entityValue = entity.get("value").asText();
+                        String entityName = entity.get("entity").asString();
+                        String entityValue = entity.get("value").asString();
                         
                         // 엔티티 값이 비어있지 않은 경우만 처리
                         if (entityValue != null && !entityValue.trim().isEmpty()) {
