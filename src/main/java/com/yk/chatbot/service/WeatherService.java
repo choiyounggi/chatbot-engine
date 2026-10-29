@@ -339,7 +339,7 @@ public class WeatherService {
             log.debug("API 응답 수신: {}", rawResponse);
             
             JsonNode response = objectMapper.readTree(rawResponse);
-            String weatherStatus = response.path("weather").get(0).path("description").asString();
+            String weatherStatus = response.path("weather").get(0).path("description").asString("");
             log.info("날씨 상태 (영어): {}", weatherStatus);
             
             // 영어 날씨 상태를 한국어로 변환

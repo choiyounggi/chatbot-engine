@@ -43,8 +43,6 @@ public class RasaClientService {
      */
     public Map<String, Object> parseMessage(String message, String senderId) {
         try {
-            Map<String, Object> result = new HashMap<>();
-
             // Rasa NLU 모델 분석 요청
             String modelEndpoint = rasaServerUrl + "/model/parse";
             Map<String, String> requestBody = new HashMap<>();
@@ -57,50 +55,7 @@ public class RasaClientService {
             JsonNode response = sendRequest(modelEndpoint, requestBody);
             log.info("Rasa 응답 수신: {}", response.toString());
 
-            // 응답 파싱
-            String intent = response.has("intent") && response.get("intent").has("name")
-                    ? response.get("intent").get("name").asString()
-                    : "unknown";
-            
-            double confidence = response.has("intent") && response.get("intent").has("confidence")
-                    ? response.get("intent").get("confidence").asDouble()
-                    : 0.0;
-
-            Map<String, Object> entities = new HashMap<>();
-            if (response.has("entities") && response.get("entities").isArray()) {
-                JsonNode entitiesNode = response.get("entities");
-                log.info("엔티티 추출 시작: 총 {} 개의 엔티티 발견", entitiesNode.size());
-                
-                for (JsonNode entity : entitiesNode) {
-                    if (entity.has("entity") && entity.has("value")) {
-                        String entityName = entity.get("entity").asString();
-                        String entityValue = entity.get("value").asString();
-                        
-                        // 엔티티 값이 비어있지 않은 경우만 처리
-                        if (entityValue != null && !entityValue.trim().isEmpty()) {
-                            entities.put(entityName, entityValue);
-                            log.info("엔티티 추출: {}={}", entityName, entityValue);
-                        } else {
-                            log.warn("빈 엔티티 값 발견: {}", entityName);
-                        }
-                    } else {
-                        log.warn("유효하지 않은 엔티티 형식: {}", entity);
-                    }
-                }
-            } else {
-                log.warn("엔티티 필드가 없거나 배열이 아님: {}", response);
-            }
-
-            result.put("intent", intent);
-            result.put("confidence", confidence);
-            result.put("entities", entities);
-            result.put("rawResponse", response);
-
-            // 최종 결과 로깅
-            log.info("분석 결과: intent={}, confidence={}, entities={}", 
-                     intent, confidence, entities);
-
-            return result;
+            return parseResponse(response);
         } catch (Exception e) {
             log.error("Rasa 서버 통신 중 오류 발생", e);
             Map<String, Object> errorResult = new HashMap<>();
@@ -110,6 +65,58 @@ public class RasaClientService {
             errorResult.put("error", e.getMessage());
             return errorResult;
         }
+    }
+
+    /**
+     * Rasa 서버 응답을 의도, 신뢰도, 엔티티로 파싱합니다
+     */
+    Map<String, Object> parseResponse(JsonNode response) {
+        Map<String, Object> result = new HashMap<>();
+
+        // 응답 파싱
+        String intent = response.has("intent") && response.get("intent").has("name")
+                ? response.get("intent").get("name").asString("")
+                : "unknown";
+
+        double confidence = response.has("intent") && response.get("intent").has("confidence")
+                ? response.get("intent").get("confidence").asDouble()
+                : 0.0;
+
+        Map<String, Object> entities = new HashMap<>();
+        if (response.has("entities") && response.get("entities").isArray()) {
+            JsonNode entitiesNode = response.get("entities");
+            log.info("엔티티 추출 시작: 총 {} 개의 엔티티 발견", entitiesNode.size());
+
+            for (JsonNode entity : entitiesNode) {
+                if (entity.has("entity") && entity.has("value")) {
+                    String entityName = entity.get("entity").asString("");
+                    String entityValue = entity.get("value").asString("");
+
+                    // 엔티티 값이 비어있지 않은 경우만 처리
+                    if (entityValue != null && !entityValue.trim().isEmpty()) {
+                        entities.put(entityName, entityValue);
+                        log.info("엔티티 추출: {}={}", entityName, entityValue);
+                    } else {
+                        log.warn("빈 엔티티 값 발견: {}", entityName);
+                    }
+                } else {
+                    log.warn("유효하지 않은 엔티티 형식: {}", entity);
+                }
+            }
+        } else {
+            log.warn("엔티티 필드가 없거나 배열이 아님: {}", response);
+        }
+
+        result.put("intent", intent);
+        result.put("confidence", confidence);
+        result.put("entities", entities);
+        result.put("rawResponse", response);
+
+        // 최종 결과 로깅
+        log.info("분석 결과: intent={}, confidence={}, entities={}",
+                 intent, confidence, entities);
+
+        return result;
     }
 
     /**

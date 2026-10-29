@@ -1,47 +1,79 @@
 package com.yk.chatbot.service;
 
 import org.junit.jupiter.api.Test;
-import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
+import java.util.Map;
+
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Jackson 3 (tools.jackson.databind) migration coverage for the
- * response-parsing pattern used by RasaClientService#parseMessage and
- * WeatherService#getWeatherForLocation (readTree + has()/get() navigation).
+ * Covers RasaClientService#parseResponse directly against the Jackson 3
+ * (tools.jackson.databind) response-parsing path: normal parsing, a
+ * container-valued entity (which Jackson 3's asString() without a default
+ * would throw JsonNodeException on, unlike Jackson 2's asText()), the
+ * empty-object boundary, and a non-array entities field.
  */
 class RasaJsonParsingTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final RasaClientService service = new RasaClientService(objectMapper);
 
     @Test
-    void parsesIntentAndEntitiesFromValidRasaResponse() {
-        String json = "{\"intent\":{\"name\":\"greet\",\"confidence\":0.95},"
-                + "\"entities\":[{\"entity\":\"city\",\"value\":\"Seoul\"}]}";
+    void parsesIntentConfidenceAndStringEntities() {
+        JsonNode response = objectMapper.readTree(
+                "{\"intent\":{\"name\":\"greet\",\"confidence\":0.95},"
+                        + "\"entities\":[{\"entity\":\"city\",\"value\":\"Seoul\"},"
+                        + "{\"entity\":\"day\",\"value\":\"Monday\"}]}");
 
-        JsonNode response = objectMapper.readTree(json);
+        Map<String, Object> result = service.parseResponse(response);
 
-        assertThat(response.has("intent")).isTrue();
-        assertThat(response.get("intent").get("name").asString()).isEqualTo("greet");
-        assertThat(response.get("intent").get("confidence").asDouble()).isEqualTo(0.95);
-        assertThat(response.get("entities").get(0).get("value").asString()).isEqualTo("Seoul");
+        assertThat(result.get("intent")).isEqualTo("greet");
+        assertThat(result.get("confidence")).isEqualTo(0.95);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> entities = (Map<String, Object>) result.get("entities");
+        assertThat(entities).containsOnly(Map.entry("city", "Seoul"), Map.entry("day", "Monday"));
     }
 
     @Test
-    void readTreeThrowsJacksonExceptionOnMalformedJson() {
-        String malformed = "{\"intent\": {\"name\": \"greet\"";
+    void objectValuedEntityIsSkippedButIntentAndStringEntityStillParse() {
+        JsonNode response = objectMapper.readTree(
+                "{\"intent\":{\"name\":\"greet\",\"confidence\":0.9},"
+                        + "\"entities\":[{\"entity\":\"range\",\"value\":{\"from\":\"a\",\"to\":\"b\"}},"
+                        + "{\"entity\":\"city\",\"value\":\"Seoul\"}]}");
 
-        assertThrows(JacksonException.class, () -> objectMapper.readTree(malformed));
+        Map<String, Object> result = service.parseResponse(response);
+
+        assertThat(result.get("intent")).isEqualTo("greet");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> entities = (Map<String, Object>) result.get("entities");
+        assertThat(entities).containsOnly(Map.entry("city", "Seoul"));
     }
 
     @Test
-    void emptyJsonObjectHasNoIntentFieldAndIsEmpty() {
+    void emptyJsonObjectYieldsUnknownIntentZeroConfidenceAndNoEntities() {
         JsonNode response = objectMapper.readTree("{}");
 
-        assertThat(response.isEmpty()).isTrue();
-        assertThat(response.has("intent")).isFalse();
+        Map<String, Object> result = service.parseResponse(response);
+
+        assertThat(result.get("intent")).isEqualTo("unknown");
+        assertThat(result.get("confidence")).isEqualTo(0.0);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> entities = (Map<String, Object>) result.get("entities");
+        assertThat(entities).isEmpty();
+    }
+
+    @Test
+    void nonArrayEntitiesFieldYieldsEmptyEntitiesWithoutThrowing() {
+        JsonNode response = objectMapper.readTree(
+                "{\"intent\":{\"name\":\"greet\",\"confidence\":0.9},\"entities\":\"not-an-array\"}");
+
+        Map<String, Object> result = service.parseResponse(response);
+
+        assertThat(result.get("intent")).isEqualTo("greet");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> entities = (Map<String, Object>) result.get("entities");
+        assertThat(entities).isEmpty();
     }
 }
