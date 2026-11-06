@@ -1,0 +1,24 @@
+[project]
+name = "chatcore"
+version = "0.0.1"
+description = "LLM-free, scenario-based chatbot engine core"
+requires-python = ">=3.13"
+dependencies = [
+    "kiwipiepy>=0.24.1",
+    "numpy>=2.5.4",
+    "pyyaml>=6.0.3",
+    "scikit-learn>=1.9.1",
+    "sentence-transformers>=6.2.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

@@ -62,3 +62,8 @@ rasaServer/rasa.db
 
 # 개인 인증 정보
 rasaServer/.env
+### Python ###
+.venv/
+__pycache__/
+.pytest_cache/
+.claude/tmp/
