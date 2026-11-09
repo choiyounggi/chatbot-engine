@@ -6,7 +6,7 @@
 동의어가 달린 엔티티, 시나리오, 응답 템플릿으로 이뤄져요. 엔진은 한국어 입력을 문장 임베딩 모델(학습하지 않음)과
 작은 분류기로 이해하고, 시나리오를 정해진 대로 진행해요. 이 데이터를 편집하는 빌더 UI는 나중에 만들어요.
 
-> 상태: Phase 1(프로젝트 뼈대). 엔진 코어는 Phase 2부터 만들어요.
+> 상태: Phase 2 — NLU 없는 시나리오 엔진(대화는 테스트에서 미리 정한 명령으로 진행해요).
 > 설계와 로드맵: [docs/engine-core-plan.md](docs/engine-core-plan.md)
 
 ## 시작하기
@@ -15,7 +15,8 @@
 
 ```sh
 make setup   # uv sync --locked
-make check   # ruff + mypy(strict, src/) + pytest — CI와 같음
+make check   # ruff + mypy(strict, src/) + pytest·커버리지 — CI와 같음
+make test-db # Postgres 저장소 테스트까지 (5432가 쓰이고 있으면 CHATCORE_DB_PORT=…)
 ```
 
 선택:
@@ -29,7 +30,7 @@ make bench   # Phase 0 NLU 벤치마크 — Apple Silicon, 모델 다운로드, 
 
 | 경로 | 내용 |
 |---|---|
-| `src/chatcore/` | 엔진 패키지 (Phase 2 전까지 비어 있음) |
-| `bots/sample/nlu.yaml` | 샘플 봇 NLU 데이터 (원본) |
+| `src/chatcore/` | 엔진 패키지: `bot/`(봇 정의·로더), `dialogue/`(명령·이벤트·상태·시나리오 엔진·턴 처리), `store/`(메모리·Postgres) |
+| `bots/sample/` | 샘플 봇: `bot.yaml`(시나리오·응답), `nlu.yaml`(의도·엔티티) |
 | `bench/` | NLU 벤치마크와 테스트셋 |
 | `docs/` | 계획과 벤치마크 보고서 |

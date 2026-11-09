@@ -1,0 +1,10 @@
+name: 날씨 → 지역 되묻기 → 부산 → 응답
+turns:
+  - user: 날씨 알려줘
+    commands: [{start: check_weather}]
+    expect: [ask_location]
+  - user: 부산
+    commands: [{set: {location: 부산}}]
+    expect: [weather_report]
+    text: ["부산은 지금 맑음이에요."]
+    stack: []

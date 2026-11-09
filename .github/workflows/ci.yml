@@ -12,6 +12,21 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: chatcore
+          POSTGRES_PASSWORD: chatcore-ci-only
+          POSTGRES_DB: chatcore
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U chatcore -d chatcore"
+          --health-interval 2s --health-timeout 3s --health-retries 20
+    env:
+      # Postgres store tests fail (not skip) in CI when this is missing.
+      CHATCORE_TEST_DATABASE_URL: postgresql://chatcore:chatcore-ci-only@localhost:5432/chatcore
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.3  # no moving major tag upstream; pin the release

@@ -1,0 +1,13 @@
+name: 지역을 묻는 도중 다른 시나리오로 갔다가 돌아와 다시 묻기
+turns:
+  - user: 날씨 어때
+    commands: [{start: check_weather}]
+    expect: [ask_location]
+  - user: 근데 지금 몇 시야
+    commands: [{start: current_time}]
+    expect: [time_report, ask_location]
+    stack: [check_weather]
+  - user: 제주
+    commands: [{set: {location: 제주}}]
+    expect: [weather_report]
+    stack: []

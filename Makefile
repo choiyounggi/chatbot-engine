@@ -1,5 +1,5 @@
 # chatcore developer commands. Requires uv (https://docs.astral.sh/uv/).
-.PHONY: setup lint typecheck test check bench db-up db-down
+.PHONY: setup lint typecheck test test-db check bench db-up db-down
 
 setup:  ## install Python 3.14 + locked dependencies into .venv
 	uv sync --locked
@@ -10,16 +10,23 @@ lint:
 typecheck:
 	uv run mypy
 
-test:
-	uv run pytest -q
+CHATCORE_DB_PORT ?= 5432
+TEST_DB_URL = postgresql://chatcore:chatcore-local-only@127.0.0.1:$(CHATCORE_DB_PORT)/chatcore
+COV = --cov=chatcore.bot --cov=chatcore.dialogue --cov-report=term-missing:skip-covered --cov-fail-under=90
+
+test:  ## unit + conversation tests; Postgres tests skip unless CHATCORE_TEST_DATABASE_URL is set
+	uv run pytest -q $(COV)
+
+test-db: db-up  ## also run the Postgres store tests against the compose database
+	CHATCORE_TEST_DATABASE_URL=$(TEST_DB_URL) uv run pytest -q $(COV)
 
 check: lint typecheck test  ## what CI runs
 
 bench:  ## Phase 0 NLU benchmark (Apple Silicon, downloads models, ~10 min)
 	uv run python bench/phase0.py
 
-db-up:  ## local Postgres + pgvector (used from Phase 2)
-	docker compose up -d --wait db
+db-up:  ## local Postgres + pgvector on 127.0.0.1:$(CHATCORE_DB_PORT)
+	CHATCORE_DB_PORT=$(CHATCORE_DB_PORT) docker compose up -d --wait db
 
 db-down:
 	docker compose down

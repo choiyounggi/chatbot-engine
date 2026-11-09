@@ -1,0 +1,15 @@
+name: 같은 질문에 세 번 엉뚱하게 답하면 시나리오를 접고 폴백
+turns:
+  - user: 날씨
+    commands: [{start: check_weather}]
+    expect: [ask_location]
+  - user: 음
+    commands: [{fallback: true}]
+    expect: [ask_location]
+  - user: 글쎄
+    commands: [{set: {location: 아틀란티스}}]   # not in the location dictionary
+    expect: [ask_location]
+  - user: 몰라
+    commands: [{fallback: true}]
+    expect: [fallback]
+    stack: []

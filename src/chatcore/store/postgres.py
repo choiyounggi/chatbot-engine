@@ -1,0 +1,79 @@
+"""Postgres tracker store.
+
+One transaction per turn: a transaction-scoped advisory lock on the session
+(`pg_try_advisory_xact_lock`, so a second concurrent turn fails fast with
+SessionBusy instead of waiting), read the log, insert the new events, commit.
+If the turn raises, the transaction rolls back and nothing is stored.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+import psycopg
+from psycopg.types.json import Jsonb
+
+from chatcore.dialogue.events import Event, from_json, to_json
+from chatcore.store.base import SessionBusy, Tracker, check_session_id
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS chat_events (
+    session_id  text        NOT NULL,
+    seq         integer     NOT NULL,
+    type        text        NOT NULL,
+    payload     jsonb       NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (session_id, seq)
+);
+"""
+
+
+class PostgresStore:
+    def __init__(self, dsn: str, connect_timeout: int = 5) -> None:
+        if not dsn:
+            raise ValueError("dsn is required")
+        self.dsn = dsn
+        self.connect_timeout = connect_timeout
+
+    def _connect(self) -> psycopg.Connection[tuple[object, ...]]:
+        return psycopg.connect(self.dsn, connect_timeout=self.connect_timeout)
+
+    def ensure_schema(self) -> None:
+        with self._connect() as conn:
+            conn.execute(SCHEMA)
+
+    @contextmanager
+    def session(self, session_id: str) -> Iterator[Tracker]:
+        check_session_id(session_id)
+        with self._connect() as conn, conn.transaction():
+            row = conn.execute("SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))", (session_id,)).fetchone()
+            if row is None or row[0] is not True:
+                raise SessionBusy(session_id)
+            events = self._load(conn, session_id)
+            tracker = Tracker(session_id, events)
+            yield tracker
+            if tracker.pending:
+                start = len(events)
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        "INSERT INTO chat_events (session_id, seq, type, payload) VALUES (%s, %s, %s, %s)",
+                        [(session_id, start + i, e.type, Jsonb(to_json(e))) for i, e in enumerate(tracker.pending)],
+                    )
+
+    def events(self, session_id: str) -> list[Event]:
+        check_session_id(session_id)
+        with self._connect() as conn:
+            return self._load(conn, session_id)
+
+    @staticmethod
+    def _load(conn: psycopg.Connection[tuple[object, ...]], session_id: str) -> list[Event]:
+        rows = conn.execute(
+            "SELECT payload FROM chat_events WHERE session_id = %s ORDER BY seq", (session_id,)
+        ).fetchall()
+        out: list[Event] = []
+        for (payload,) in rows:
+            if not isinstance(payload, dict):
+                raise TypeError(f"chat_events.payload must be a JSON object, got {type(payload).__name__}")
+            out.append(from_json(payload))
+        return out
