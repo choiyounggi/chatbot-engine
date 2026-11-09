@@ -1,0 +1,9 @@
+name: 지역을 묻는 중에 같은 의도를 지역과 함께 다시 말하면 슬롯만 채움(같은 시나리오를 다시 쌓지 않음)
+turns:
+  - user: 날씨 알려줘
+    commands: [{start: check_weather}]
+    expect: [ask_location]
+  - user: 부산 날씨 알려줘
+    commands: [{start: check_weather, slots: {location: 부산}}]
+    expect: [weather_report]
+    stack: []

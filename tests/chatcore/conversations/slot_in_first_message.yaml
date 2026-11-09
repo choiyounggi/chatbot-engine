@@ -1,0 +1,6 @@
+name: 첫 메시지에 지역이 있으면 묻지 않고 바로 답함(동의어는 대표값으로)
+turns:
+  - user: 부산광역시 기온 몇 도야
+    commands: [{start: check_temperature, slots: {location: 부산광역시}}]
+    expect: [temperature_report]
+    text: ["부산의 현재 기온은 21°C예요."]

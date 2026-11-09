@@ -1,0 +1,9 @@
+name: 후속 질문 "부산은?" — 끝난 시나리오를 새 값으로 다시 실행
+turns:
+  - user: 서울 날씨
+    commands: [{start: check_weather, slots: {location: 서울}}]
+    expect: [weather_report]
+  - user: 부산은?
+    commands: [{rerun: check_weather, slot: location, value: 부산}]
+    expect: [weather_report]
+    text: ["부산은 지금 맑음이에요."]

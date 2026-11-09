@@ -1,0 +1,10 @@
+name: 지역을 묻는 도중 취소
+turns:
+  - user: 기온 알려줘
+    commands: [{start: check_temperature}]
+    expect: [ask_location]
+    stack: [check_temperature]
+  - user: 됐어 그만
+    commands: [{cancel: true}]
+    expect: [cancelled]
+    stack: []

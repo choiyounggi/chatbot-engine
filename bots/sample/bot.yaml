@@ -1,0 +1,110 @@
+# Sample bot: scenarios and responses (intents and entities are in nlu.yaml).
+# Actions (get_weather, get_temperature, now) are registered in code; real
+# implementations arrive in Phase 4, tests use stubs.
+id: sample
+label: 샘플 봇
+
+settings:
+  intent_threshold: 0.30
+  similarity_threshold: 0.39
+  ambiguity_margin: 0.10
+  max_attempts: 3
+  max_steps_per_turn: 20
+  max_stack_depth: 5
+
+scenarios:
+  check_weather:
+    label: 날씨 안내
+    trigger: {intent: weather}
+    slots:
+      location: {entity: location, ask: ask_location}
+    steps:
+      - collect: location
+      - action: get_weather
+        args: {location: "{{ slots.location }}"}
+      - respond: weather_report
+
+  check_temperature:
+    label: 기온 안내
+    trigger: {intent: temperature}
+    slots:
+      location: {entity: location, ask: ask_location}
+    steps:
+      - collect: location
+      - action: get_temperature
+        args: {location: "{{ slots.location }}"}
+      - respond: temperature_report
+
+  current_time:
+    label: 현재 시각
+    trigger: {intent: time}
+    steps:
+      - action: now
+      - respond: time_report
+
+  greet:
+    label: 인사
+    trigger: {intent: greeting}
+    steps: [{respond: greeting}]
+
+  goodbye:
+    label: 작별 인사
+    trigger: {intent: bye}
+    steps: [{respond: bye}]
+
+  thank:
+    label: 감사 답례
+    trigger: {intent: thanks}
+    steps: [{respond: thanks}]
+
+  show_help:
+    label: 도움말
+    trigger: {intent: help}
+    steps: [{respond: help}]
+
+  praise:
+    label: 칭찬 답례
+    trigger: {intent: compliment}
+    steps: [{respond: compliment}]
+
+  complaint:
+    label: 불만 응대
+    trigger: {intent: negative_feedback}
+    steps: [{respond: negative_feedback}]
+
+responses:
+  # required by the engine
+  fallback:
+    text: "잘 이해하지 못했어요. '도움말'이라고 입력해 보세요."
+  cancelled:
+    text: "알겠어요, 그만할게요."
+  restarted:
+    text: "처음부터 다시 시작할게요."
+  error:
+    text: "일시적인 문제로 답하지 못했어요. 잠시 후 다시 시도해 주세요."
+  clarify:
+    text: "혹시 이 중에 원하시는 게 있나요?"
+  input_invalid:
+    text: "메시지가 비어 있거나 너무 길어요. 1,000자 이내로 다시 입력해 주세요."
+
+  ask_location:
+    text: "어느 지역이요?"
+    quick_replies: ["서울", "부산", "제주"]
+  weather_report:
+    text: "{{ slots.location }}은 지금 {{ results.get_weather.condition }}이에요."
+  temperature_report:
+    text: "{{ slots.location }}의 현재 기온은 {{ results.get_temperature.celsius }}°C예요."
+  time_report:
+    text: "지금은 {{ results.now.time }}이에요."
+  greeting:
+    variants: ["안녕하세요! 무엇을 도와드릴까요?", "반가워요! 무엇이든 물어보세요."]
+  bye:
+    variants: ["안녕히 가세요!", "다음에 또 만나요."]
+  thanks:
+    text: "천만에요! 더 필요한 게 있으면 말씀해 주세요."
+  help:
+    text: "날씨, 기온, 현재 시각을 알려드릴 수 있어요. '서울 날씨 어때?'처럼 물어보세요."
+  compliment:
+    text: "칭찬 고마워요!"
+  negative_feedback:
+    text: "죄송해요. 다시 한 번 말씀해 주시면 더 잘 도와드릴게요."

@@ -18,3 +18,5 @@ build/
 
 # Secrets
 .env
+.coverage
+coverage.xml

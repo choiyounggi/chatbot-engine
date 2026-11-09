@@ -7,7 +7,7 @@ intents with example sentences, entities with synonyms, scenarios, response temp
 engine understands Korean input with a frozen sentence-embedding model plus a small classifier,
 then follows the scenario deterministically. A builder UI for editing that data comes later.
 
-> Status: Phase 1 (project skeleton). The engine core is built from Phase 2 on.
+> Status: Phase 2 — scenario engine without NLU (conversations are driven by scripted commands in tests).
 > Design and roadmap: [docs/engine-core-plan.md](docs/engine-core-plan.md).
 
 ## Quick start
@@ -16,7 +16,8 @@ Requires [uv](https://docs.astral.sh/uv/) and `make`. Python 3.14 is installed b
 
 ```sh
 make setup   # uv sync --locked
-make check   # ruff + mypy (strict, src/) + pytest — the same as CI
+make check   # ruff + mypy (strict, src/) + pytest with coverage — the same as CI
+make test-db # also the Postgres store tests (CHATCORE_DB_PORT=… if 5432 is taken)
 ```
 
 Optional:
@@ -30,7 +31,7 @@ make bench   # Phase 0 NLU benchmark — Apple Silicon, downloads models, ~10 mi
 
 | Path | What |
 |---|---|
-| `src/chatcore/` | engine package (empty until Phase 2) |
-| `bots/sample/nlu.yaml` | sample bot NLU data (source of truth) |
+| `src/chatcore/` | engine package: `bot/` (definition, loader), `dialogue/` (commands, events, state, scenario engine, turns), `store/` (in-memory, Postgres) |
+| `bots/sample/` | sample bot: `bot.yaml` (scenarios, responses), `nlu.yaml` (intents, entities) |
 | `bench/` | NLU benchmarks and test sets |
 | `docs/` | plan and benchmark reports |

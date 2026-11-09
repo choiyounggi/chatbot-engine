@@ -1,0 +1,19 @@
+name: 처음으로·잡담·되묻기
+turns:
+  - user: 안녕
+    commands: [{start: greet}]
+    expect: [greeting]
+  - user: 날씨
+    commands: [{start: check_weather}]
+    expect: [ask_location]
+  - user: 처음으로
+    commands: [{restart: true}]
+    expect: [restarted]
+    stack: []
+  - user: 그거
+    commands: [{clarify: [weather, temperature]}]
+    expect: [clarify]
+    quick_replies: [[날씨 문의, 기온 문의]]
+  - user: 고마워
+    commands: [{start: thank}]
+    expect: [thanks]
