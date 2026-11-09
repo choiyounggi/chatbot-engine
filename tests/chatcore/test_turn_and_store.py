@@ -10,7 +10,6 @@ import pytest
 from chatcore.bot.loader import BotError
 from chatcore.dialogue.commands import StartScenario
 from chatcore.dialogue.events import BotUttered, SessionStarted, TurnFailed, UserUttered
-from chatcore.dialogue.state import fold
 from chatcore.dialogue.turn import MAX_INPUT_CHARS, ScriptedInterpreter, TurnProcessor
 from chatcore.dialogue.values import ActionRegistry
 from chatcore.store.base import SessionBusy
@@ -93,18 +92,26 @@ def test_bot_edit_restarts_sessions_whose_scenarios_vanished(sample_bot, registr
         "responses": {k: v for k, v in sample_bot.responses.items() if k != "weather_report"},
     })
     result = processor(edited, registry, store).handle("s", "안녕")
-    assert [m.response for m in result.messages] == ["greeting"]
+    assert [m.response for m in result.messages] == ["restarted", "greeting"]  # the user is told
     kinds = [type(e).__name__ for e in result.events]
-    assert kinds[:2] == ["SessionRestarted", "SessionStarted"]
+    assert kinds[:3] == ["SessionRestarted", "BotUttered", "SessionStarted"]
 
 
-def test_bot_edit_keeps_sessions_whose_scenarios_still_fit(sample_bot, registry):
+def test_new_version_restarts_a_scenario_in_progress_even_if_it_still_exists(sample_bot, registry):
     store = InMemoryStore()
-    processor(sample_bot, registry, store).handle("s", "날씨")
-    edited = sample_bot.model_copy(update={"version": "edited"})
+    processor(sample_bot, registry, store).handle("s", "날씨")  # check_weather waits for a location
+    edited = sample_bot.model_copy(update={"version": "edited"})  # its steps may differ; the engine cannot tell
     result = processor(edited, registry, store).handle("s", "부산")
-    assert "SessionRestarted" not in [type(e).__name__ for e in result.events]
-    assert [f.scenario for f in fold(store.events("s")).stack] == ["check_weather"]
+    assert [m.response for m in result.messages][0] == "restarted"
+
+
+def test_new_version_keeps_an_idle_session_without_a_notice(sample_bot, registry):
+    store = InMemoryStore()
+    processor(sample_bot, registry, store).handle("s", "안녕")  # greet finishes; nothing in progress
+    edited = sample_bot.model_copy(update={"version": "edited"})
+    result = processor(edited, registry, store).handle("s", "안녕")
+    assert [m.response for m in result.messages] == ["greeting"]
+    assert [type(e).__name__ for e in result.events][:2] == ["SessionStarted", "UserUttered"]
 
 
 def test_events_are_persisted_only_when_the_turn_completes():
@@ -212,3 +219,15 @@ def test_processor_with_store(sample_bot, registry, store):
     proc = processor(sample_bot, registry, store)
     assert [m.response for m in proc.handle(sid, "날씨").messages] == ["ask_location"]
     assert any(isinstance(e, SessionStarted) for e in store.events(sid))
+
+
+def test_recent_filters_by_prefix_and_type_newest_first(store):
+    run = uuid.uuid4().hex[:8]
+    a, look_alike = f"a_{run}:s1", f"ax{run}:s1"  # "_" must not act as a LIKE wildcard
+    for sid, text in ((a, "first"), (look_alike, "other bot"), (a, "second")):
+        with store.session(sid) as tracker:
+            tracker.append([UserUttered(text=text), BotUttered(response="r", text="r")])
+    found = store.recent(f"a_{run}:", "user_uttered", 10)
+    assert [(sid, e.text) for sid, e in found] == [(a, "second"), (a, "first")]
+    assert [e.text for _, e in store.recent(f"a_{run}:", "user_uttered", 1)] == ["second"]
+    assert store.recent(f"a_{run}:", "user_uttered", 0) == [] and store.recent(f"none_{run}:", "user_uttered", 5) == []

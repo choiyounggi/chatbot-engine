@@ -14,8 +14,10 @@ import datetime as dt
 import json
 import random
 import re
+import shutil
 import sys
 import time
+import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -223,11 +225,24 @@ def train(bot: BotDefinition, embedder: Embedder, out_root: Path, fresh: Embedde
         sample = rows[:16]
         report.determinism_max_diff = float(np.abs(fresh.encode(sample) - fresh.encode(sample)).max())
     directory = out_root / bot.id / bot.version
-    directory.mkdir(parents=True, exist_ok=True)
-    clf.save(directory / "classifier.npz")
-    meta = {**asdict(report), "embedding_prompt": embedder.prompt,
-            "created_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds")}
-    (directory / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    # Write a sibling directory and swap it in, so a reader (a deploy, a server start) never
+    # sees half-written files when the same version is trained again.
+    staging = directory.with_name(f".{bot.version}.{uuid.uuid4().hex}")
+    staging.mkdir()
+    try:
+        clf.save(staging / "classifier.npz")
+        meta = {**asdict(report), "embedding_prompt": embedder.prompt,
+                "created_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds")}
+        (staging / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        old = directory.with_name(f".{bot.version}.old.{uuid.uuid4().hex}")
+        if directory.exists():
+            directory.rename(old)
+        staging.rename(directory)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    shutil.rmtree(old, ignore_errors=True)
     return directory, report
 
 

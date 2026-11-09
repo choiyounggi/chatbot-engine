@@ -15,15 +15,20 @@ from chatcore.api import create_app
 from chatcore.cli import chat
 from chatcore.conversations import synthetic_actions
 from chatcore.dialogue.turn import TurnProcessor
+from chatcore.host import StaticHost
 from chatcore.nlu.entities import EntityExtractor
 from chatcore.nlu.interpreter import NluInterpreter
 from chatcore.nlu.model import CachedEmbedder, ModelMismatch, NluModel
 from chatcore.nlu.train import train
-from chatcore.runtime import BotRuntime, build_runtime, build_runtimes, default_store
+from chatcore.runtime import BotRuntime, build_runtime, default_store
 from chatcore.serving import BatchedEmbedder
 from chatcore.store.memory import InMemoryStore
 
 from .conftest import SAMPLE
+
+
+def static(rt):
+    return StaticHost({"sample": rt}, rt.processor.store)
 
 
 @pytest.fixture(scope="module")
@@ -40,7 +45,7 @@ def runtime(sample_bot, fake_embedder, artifacts):
 
 @pytest.fixture
 def client(runtime):
-    return TestClient(create_app({"sample": runtime}))
+    return TestClient(create_app(static(runtime)))
 
 
 def say(client, text, session="s1", **params):
@@ -101,7 +106,7 @@ def test_concurrent_turn_of_the_same_session_gets_409(sample_bot, fake_embedder,
         return model.parse(text)
 
     proc = TurnProcessor(sample_bot, store, NluInterpreter(slow_parse), synthetic_actions(), rng=random.Random(0))
-    client = TestClient(create_app({"sample": BotRuntime(sample_bot, proc, model)}))
+    client = TestClient(create_app(static(BotRuntime(sample_bot, proc, model))))
     first: dict = {}
     t = threading.Thread(target=lambda: first.update(r=say(client, "안녕하세요")))
     t.start()
@@ -128,7 +133,7 @@ class BrokenStore:
 
 def test_storage_failure_is_503_without_details(sample_bot, fake_embedder, artifacts):
     rt = build_runtime(SAMPLE, artifacts, fake_embedder, BrokenStore(), actions=synthetic_actions())
-    response = say(TestClient(create_app({"sample": rt})), "안녕하세요")
+    response = say(TestClient(create_app(static(rt))), "안녕하세요")
     assert response.status_code == 503
     assert "hunter2" not in response.text and "db.internal" not in response.text
 
@@ -147,13 +152,6 @@ def test_each_turn_is_logged_as_json(client, caplog):
 
 
 # ---------------------------------------------------------------- runtime, CLI, batching
-
-
-def test_build_runtimes_rejects_duplicates_and_empty(fake_embedder, artifacts):
-    with pytest.raises(ValueError, match="share the id"):
-        build_runtimes([SAMPLE, SAMPLE], artifacts, fake_embedder, InMemoryStore())
-    with pytest.raises(ValueError, match="no bots"):
-        build_runtimes([], artifacts, fake_embedder, InMemoryStore())
 
 
 def test_build_runtime_needs_a_trained_model(fake_embedder, tmp_path):
@@ -212,7 +210,7 @@ class CorruptStore(BrokenStore):
 
 def test_non_storage_failure_is_500_not_retryable_503(sample_bot, fake_embedder, artifacts):
     rt = build_runtime(SAMPLE, artifacts, fake_embedder, CorruptStore(), actions=synthetic_actions())
-    response = say(TestClient(create_app({"sample": rt})), "안녕하세요")
+    response = say(TestClient(create_app(static(rt))), "안녕하세요")
     assert response.status_code == 500 and "inconsistent" not in response.text
 
 
@@ -221,5 +219,5 @@ def test_nlu_parse_failure_is_500_without_details(runtime):
         raise RuntimeError("secret detail")
 
     runtime.model.parse = boom
-    r = TestClient(create_app({"sample": runtime})).post("/v1/bots/sample/nlu/parse", json={"text": "안녕"})
+    r = TestClient(create_app(static(runtime))).post("/v1/bots/sample/nlu/parse", json={"text": "안녕"})
     assert r.status_code == 500 and "secret" not in r.text

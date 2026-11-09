@@ -71,7 +71,7 @@ class NluInterpreter:
     def interpret(self, text: str, state: DialogueState, bot: BotDefinition) -> Interpretation:
         result = self.parse(text)
         rule, commands = self._decide(text, result, state, bot)
-        info: dict[str, Any] = {"rule": rule, **result.to_log()}
+        info: dict[str, Any] = {"rule": rule, "text": text, **result.to_log()}
         return Interpretation(commands, info)
 
     # ------------------------------------------------------------------

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from chatcore.actions.builtin import builtin_registry
 from chatcore.bot.loader import load_bot
+from chatcore.bot.repository import BotRepository, InMemoryRepository, PostgresRepository
 from chatcore.bot.schema import BotDefinition
 from chatcore.dialogue.turn import TurnProcessor
 from chatcore.dialogue.values import ActionRegistry
@@ -35,6 +35,16 @@ def build_runtime(bot_dir: Path, artifacts: Path, embedder: Embedder, store: Tra
     return BotRuntime(bot, TurnProcessor(bot, store, NluInterpreter(model.parse), actions), model)
 
 
+def default_repository() -> BotRepository:
+    """Postgres when CHATCORE_DATABASE_URL is set, else in-memory (re-seeded from --bot on every start)."""
+    url = os.environ.get("CHATCORE_DATABASE_URL")
+    if not url:
+        return InMemoryRepository()
+    repository = PostgresRepository(url)
+    repository.ensure_schema()
+    return repository
+
+
 def default_store() -> TrackerStore:
     """Postgres when CHATCORE_DATABASE_URL is set, else in-memory (sessions vanish on restart)."""
     url = os.environ.get("CHATCORE_DATABASE_URL")
@@ -45,16 +55,3 @@ def default_store() -> TrackerStore:
     store = PostgresStore(url)
     store.ensure_schema()
     return store
-
-
-def build_runtimes(bot_dirs: Sequence[Path], artifacts: Path, embedder: Embedder,
-                   store: TrackerStore) -> dict[str, BotRuntime]:
-    runtimes: dict[str, BotRuntime] = {}
-    for directory in bot_dirs:
-        rt = build_runtime(directory, artifacts, embedder, store)
-        if rt.bot.id in runtimes:
-            raise ValueError(f"two bots share the id {rt.bot.id!r}")
-        runtimes[rt.bot.id] = rt
-    if not runtimes:
-        raise ValueError("no bots given")
-    return runtimes
