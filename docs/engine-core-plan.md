@@ -317,7 +317,8 @@ Makefile      setup / check / test / bench / db-up (Phase 3 이후 train / chat 
 - **결과 (2026-11-09):** 커밋할 파일만 복사한 새 디렉터리에서 실행했다.
   - macOS: `make setup && make check` 통과(ruff, mypy strict, pytest 64개).
   - Linux 컨테이너(이 맥의 Docker, aarch64): ruff, mypy, 그리고 Kiwi를 쓰지 않는 테스트 22개는 통과했다. **Kiwi 형태소 분석은 첫 호출에서 프로세스가 강제 종료(exit 137)된다.** Python 3.13/3.14, kiwipiepy 0.23/0.24, x86-64 에뮬레이션 모두 같았다. kiwipiepy 0.23은 "NEON에서는 양자화 미지원 → 양자화하지 않은 모델로 대체"라고 경고한다. 그래서 큰 모델이 Docker VM 메모리(4GB)를 넘는 것으로 추정하지만, 원인은 확정하지 못했다.
-  - GitHub CI(x86-64, AVX2)에서 통과하는지는 push 후 확인한다.
+  - GitHub CI(ubuntu-26.04, x86-64): PR #3의 run 42635196685에서 `make check` 통과했다. 설치된 버전은 `torch==2.15.0+cpu`, `kiwipiepy==0.24.1`이고, Kiwi 테스트를 포함해 `64 passed`. 그러니 Kiwi 강제 종료는 이 맥의 Docker(aarch64, x86-64 에뮬레이션)에서만 생긴다.
+  - 첫 CI 실행은 `astral-sh/setup-uv@v10`을 찾지 못해 실패했다. 이 Action은 주 버전 태그가 없어서 `v10.3.3`으로 고정했다.
 
 ### Phase 2 — 봇 정의·대화 엔진 (NLU 없이)
 1. 봇 정의 스키마·로더·검증(§3.1). 잘못된 참조나 순환이 있으면 로드 실패.
@@ -395,7 +396,7 @@ Makefile      setup / check / test / bench / db-up (Phase 3 이후 train / chat 
 | 의도당 예문이 적다 (빌더 사용자는 5~10개만 넣기 쉬움) | 인식률 저하 | 엔티티 자리 확장, 동의어 치환, 글자 n-gram. 예문이 적은 의도는 학습할 때 경고 |
 | 범위 밖 판단이 단어가 겹치는 문장에 약함 | 엉뚱한 시나리오 실행 | hard negative 학습(독립 테스트 거절률 0.33 → 0.83). 남은 약점은 '온도'(체온·냉장고·커피). 다음 후보: 의도별 결정 경계(ADB, Zhang et al. 2021) 또는 기온 관련 hard negative 보강. 새 테스트셋으로 측정 |
 | 맥 GPU(MPS)가 없는 환경 | CPU에선 46ms로 지연 예산 초과 | 그 환경에선 `multilingual-e5-base`(CPU 16ms, F1 0.871)로 교체하고 임계값을 다시 보정 |
-| Kiwi가 Linux 컨테이너(이 맥의 Docker)에서 첫 분석 때 강제 종료됨 | Linux 서버·ARM 서버 배포 불가 가능성 | 원인 확정 전. CI(x86-64) 결과로 확인하고, 실패하면 Docker 메모리를 늘려 재현하거나 Kiwi 이슈를 등록한다. 엔진 기본 실행은 macOS 호스트 |
+| Kiwi가 ARM64 Linux(이 맥의 Docker)에서 첫 분석 때 강제 종료됨 | ARM Linux 서버(예: Graviton)에 배포할 때 위험 | x86-64 Linux(GitHub CI)와 macOS에서는 정상. ARM Linux 배포가 필요해지면 실제 ARM 서버에서 재현하고 Kiwi 이슈를 등록한다 |
 | greeting↔bye 혼동("안녕"이 두 뜻) | 인사에 작별 답 | 위치 규칙을 시험했으나 대화 중간 재인사를 망가뜨려 채택하지 않음(Phase 0b). 다음 후보: 세션 유휴 시간 기반 재시작, 개발용 대화셋으로 margin 선택 |
 | Kiwi가 ARM64에서 느림 [확인: README 경고] | 응답 지연 | Phase 0에서 측정. 느리면 프로세스 내 캐시나 모델 옵션 조정 |
 | 한국어 상대 날짜·시간 파싱이 어려움 ("담주 금욜") | 날짜 slot 오인식 | v1은 자주 쓰는 표현 목록 + 테스트로 범위를 고정. 나머지는 되묻기 |
