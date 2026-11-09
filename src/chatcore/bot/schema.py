@@ -27,6 +27,9 @@ class Settings(Model):
     intent_threshold: float = Field(0.30, ge=0, le=1)
     similarity_threshold: float = Field(0.39, ge=0, le=1)
     ambiguity_margin: float = Field(0.10, ge=0, le=1)
+    # confidence needed to leave a pending question for another intent
+    switch_threshold: float = Field(0.80, ge=0, le=1)
+    rerun_window: int = Field(3, ge=0, le=20)  # user turns after a scenario ends during which "부산은?" re-runs it
     max_attempts: int = Field(3, ge=1, le=10)  # failed re-asks of one slot before giving up
     max_steps_per_turn: int = Field(20, ge=1, le=200)
     max_stack_depth: int = Field(5, ge=1, le=20)

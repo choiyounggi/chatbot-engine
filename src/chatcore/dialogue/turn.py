@@ -6,7 +6,7 @@ import logging
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from chatcore.bot.loader import BotError, validate
 from chatcore.bot.schema import BotDefinition
@@ -29,10 +29,16 @@ log = logging.getLogger(__name__)
 MAX_INPUT_CHARS = 1000
 
 
-class Interpreter(Protocol):
-    """Understanding: user text (+ state) -> commands. Phase 3 adds the NLU one."""
+@dataclass(frozen=True)
+class Interpretation:
+    commands: list[Command]
+    info: dict[str, Any] = field(default_factory=dict)  # logged with the turn (rule, intents, entities ...)
 
-    def interpret(self, text: str, state: DialogueState, bot: BotDefinition) -> Sequence[Command]: ...
+
+class Interpreter(Protocol):
+    """Understanding: user text (+ state) -> commands (chatcore.nlu.interpreter.NluInterpreter)."""
+
+    def interpret(self, text: str, state: DialogueState, bot: BotDefinition) -> Interpretation: ...
 
 
 @dataclass
@@ -41,8 +47,8 @@ class ScriptedInterpreter:
 
     script: Mapping[str, Sequence[Command]] = field(default_factory=dict)
 
-    def interpret(self, text: str, state: DialogueState, bot: BotDefinition) -> Sequence[Command]:
-        return list(self.script.get(text, [Fallback()]))
+    def interpret(self, text: str, state: DialogueState, bot: BotDefinition) -> Interpretation:
+        return Interpretation(list(self.script.get(text, [Fallback()])), {"rule": "scripted"})
 
 
 @dataclass(frozen=True)
@@ -94,8 +100,9 @@ class TurnProcessor:
             emit(UserUttered(text=clean))
             prefix = list(new)
             try:
-                commands = list(self.interpreter.interpret(clean, state, self.bot))
-                emit(CommandsReceived(commands=[to_dict(c) for c in commands]))
+                interpretation = self.interpreter.interpret(clean, state, self.bot)
+                commands = list(interpretation.commands)
+                emit(CommandsReceived(commands=[to_dict(c) for c in commands], nlu=interpretation.info))
                 outcome = self.engine.run(state, commands)
                 new += outcome.events
                 messages = outcome.messages

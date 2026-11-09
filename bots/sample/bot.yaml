@@ -8,6 +8,8 @@ settings:
   intent_threshold: 0.30
   similarity_threshold: 0.39
   ambiguity_margin: 0.10
+  switch_threshold: 0.80
+  rerun_window: 3
   max_attempts: 3
   max_steps_per_turn: 20
   max_stack_depth: 5
