@@ -4,9 +4,10 @@ import time
 import numpy as np
 import pytest
 
-from bench.concurrency import MicroBatcher, load_test
+from bench.concurrency import load_test
 from bench.eval_independent import resolve_pair
 from bench.phase0 import BenchError
+from chatcore.serving import MicroBatcher
 
 CLASSES = np.array(["bye", "greeting", "out_of_scope", "weather"])
 
@@ -181,3 +182,26 @@ def test_idle_latency_waits_between_requests():
     assert time.perf_counter() - t0 >= 0.03
     with pytest.raises(ValueError):
         idle_latency(fake_encode, ["가"], gap=-1)
+
+
+def test_keepalive_calls_fn_while_idle_and_survives_errors():
+    seen = []
+
+    def fn(texts):
+        seen.append(list(texts))
+        if texts == ["warm"] and len(seen) == 1:
+            raise RuntimeError("first warm-up fails")
+        return fake_encode(texts)
+
+    b = MicroBatcher(fn, keepalive_ms=10, keepalive_text="warm")
+    try:
+        time.sleep(0.1)
+        assert b.keepalive_calls >= 3 and all(t == ["warm"] for t in seen)
+        np.testing.assert_array_equal(b(["abc"])[:, 0], [3])  # the worker is still alive and serving
+    finally:
+        b.close()
+
+
+def test_keepalive_must_be_positive():
+    with pytest.raises(ValueError):
+        MicroBatcher(fake_encode, keepalive_ms=0)

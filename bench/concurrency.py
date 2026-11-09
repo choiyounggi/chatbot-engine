@@ -13,7 +13,6 @@ Usage: uv run python bench/concurrency.py
 
 from __future__ import annotations
 
-import queue
 import subprocess
 import sys
 import threading
@@ -22,7 +21,10 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import numpy as np
+
+from chatcore.serving import MicroBatcher  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 REPORT = ROOT / "docs/benchmarks/concurrency.md"
@@ -31,77 +33,6 @@ RATES = (20, 60, 120)  # open-loop Poisson arrival rates, req/s
 IDLE_GAPS = (0.0, 0.2, 1.0)  # seconds of silence before each single request
 IDLE_REQUESTS = 30
 REQUESTS_PER_LEVEL = 240
-
-
-class MicroBatcher:
-    """Runs `fn(list[str]) -> array` on a single worker thread, batching
-    requests that arrive within max_wait_ms (at most max_batch per call)."""
-
-    def __init__(self, fn: Callable[[list[str]], np.ndarray], max_batch: int = 16, max_wait_ms: float = 2.0) -> None:
-        if max_batch < 1 or max_wait_ms < 0:
-            raise ValueError("max_batch must be >= 1 and max_wait_ms >= 0")
-        self.fn, self.max_batch, self.max_wait = fn, max_batch, max_wait_ms / 1000
-        self.calls = 0
-        self._closed = False
-        self._lock = threading.Lock()  # orders submit() against close()
-        self._queue: queue.Queue[tuple[str, Future] | None] = queue.Queue()
-        self._thread = threading.Thread(target=self._run, name="embedder", daemon=True)
-        self._thread.start()
-
-    def submit(self, text: str) -> Future:
-        fut: Future = Future()
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("batcher is closed")
-            self._queue.put((text, fut))
-        return fut
-
-    def __call__(self, texts: list[str]) -> np.ndarray:
-        if not texts:
-            raise ValueError("no texts")
-        return np.vstack([f.result() for f in [self.submit(t) for t in texts]])
-
-    def close(self) -> None:
-        """Finish queued requests, then stop the worker."""
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._queue.put(None)  # nothing can be enqueued after the sentinel
-        self._thread.join(timeout=30)
-
-    def _run(self) -> None:
-        stopping = False
-        while not stopping:
-            item = self._queue.get()
-            if item is None:
-                return
-            batch = [item]
-            deadline = time.perf_counter() + self.max_wait
-            while len(batch) < self.max_batch:
-                remaining = deadline - time.perf_counter()
-                try:
-                    nxt = self._queue.get(timeout=remaining) if remaining > 0 else self._queue.get_nowait()
-                except queue.Empty:
-                    break
-                if nxt is None:
-                    stopping = True  # serve this batch, then exit
-                    break
-                batch.append(nxt)
-            live = [(t, f) for t, f in batch if f.set_running_or_notify_cancel()]  # skip cancelled callers
-            if not live:
-                continue
-            self.calls += 1
-            try:
-                out = np.asarray(self.fn([t for t, _ in live]))
-                if len(out) != len(live):
-                    raise RuntimeError(f"fn returned {len(out)} rows for {len(live)} texts")
-            except Exception as exc:  # deliver the failure to every waiting caller
-                for _, fut in live:
-                    fut.set_exception(exc)
-                continue
-            for (_, fut), row in zip(live, out, strict=True):
-                fut.set_result(row)
 
 
 def load_test(batcher: MicroBatcher, texts: list[str], concurrency: int, total: int) -> list[float]:
