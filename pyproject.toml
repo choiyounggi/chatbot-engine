@@ -2,6 +2,7 @@
 name = "chatcore"
 version = "0.0.1"
 description = "LLM-free, scenario-based chatbot engine core"
+readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "kiwipiepy>=0.24.1",
@@ -9,16 +10,49 @@ dependencies = [
     "pyyaml>=6.0.3",
     "scikit-learn>=1.9.1",
     "sentence-transformers>=6.2.0",
+    "torch>=2.15.0",
 ]
 
-[tool.uv]
-package = false
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chatcore"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18",
+    "pytest>=9.2.0",
+    "ruff>=0.14",
+    "types-pyyaml",
+]
+
+# Linux (CI) gets the CPU-only torch wheel instead of the multi-GB CUDA build.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 
-[dependency-groups]
-dev = [
-    "pytest>=9.2.0",
-]
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Benchmarks and their tests predate the line limit; engine code under src/ follows it.
+"bench/**" = ["E501"]
+"tests/bench/**" = ["E501"]
+
+[tool.mypy]
+strict = true
+files = ["src"]

@@ -28,6 +28,8 @@
 
 ## 1. 기존 엔진(LASA) 분석
 
+> 기존 코드는 Phase 1에서 지웠다. 아래 파일:줄은 커밋 `4254a8e` 기준이다(`git show 4254a8e:src/main/java/...`).
+
 구조: `Listen(전처리) → Analyze(Rasa NLU + KOMORAN 키워드, 결과 병합) → Solve(intent별 switch) → Answer(템플릿)`. 의도를 모르면 OpenAI로 넘긴다.
 
 | 문제 | 근거 (파일:줄) [확인] | 새 엔진에서의 해결 |
@@ -258,7 +260,7 @@ bots/sample/  bot.yaml actions.py
 tests/        unit/ conversations/ (대화 테스트 YAML)
 bench/        phase0.py
 compose.yaml  Postgres
-Justfile      setup / test / train / chat / eval
+Makefile      setup / check / test / bench / db-up (Phase 3 이후 train / chat / eval 추가)
 ```
 
 ---
@@ -289,7 +291,7 @@ Justfile      setup / test / train / chat / eval
 3. `bench/phase0.py`로 비교한다: {확장, 엔티티 토큰 치환} × {글자 n-gram, 형태소 n-gram, 둘 다} × {LogisticRegression, LinearSVC} × C{1, 10}. 비슷한 예문끼리 묶은 단위로 5-fold 교차검증(StratifiedGroupKFold)을 하고 시드 5개로 반복한다. 범위 밖 거절률은 학습에 쓰지 않은 문장 100개로 잰다.
 4. 측정 항목: macro-F1, 범위 밖 문장 거절률, 추론 p95 지연, 학습 시간, Kiwi 처리 속도(ARM64).
 5. 산출물: 기본 조합, 확신도 계산 방식(§2.3-2), `intent_threshold`·`ambiguity_margin` 초기값.
-- **결과 (2026-11-06, 완료):** 독립 리뷰 2회를 반영해 재측정했다(임계값 교차 적합, 의미 기준 묶음, n-gram에도 같은 게이트, 신뢰구간·부트스트랩). arctic 조합 4개가 기준을 넘었고 `expand/emb:arctic/logreg/C10`을 v1 기본값으로 정했다. 데이터 정리 내역(라벨 수정 6건, 삭제 3건 — 두 의도에 겹친 "안녕" 포함, 템플릿 이동 1건, 예문 70개 추가)은 `bench/convert_rasa_nlu.py`와 `bench/data/additions.yaml`에 있다.
+- **결과 (2026-11-06, 완료):** 독립 리뷰 2회를 반영해 재측정했다(임계값 교차 적합, 의미 기준 묶음, n-gram에도 같은 게이트, 신뢰구간·부트스트랩). arctic 조합 4개가 기준을 넘었고 `expand/emb:arctic/logreg/C10`을 v1 기본값으로 정했다. 데이터 정리 내역(라벨 수정 6건, 삭제 3건 — 두 의도에 겹친 "안녕" 포함, 템플릿 이동 1건, 예문 70개 추가)은 커밋 `4254a8e`의 `bench/convert_rasa_nlu.py`와 `bench/data/additions.yaml`에 있다(Phase 1에서 삭제).
 - **보강 (Phase 0b, 2026-11-06):** 학습 데이터를 보지 않은 별도 에이전트가 쓴 독립 테스트셋(`bench/data/test_independent.yaml`)으로 미리 정한 4개 구성을 한 번씩만 평가했다(`bench/eval_independent.py` → `docs/benchmarks/phase0b.md`).
 
   | 구성 | macro-F1 | hard 범위 밖 거절률 | 학습과 먼 문장만: macro-F1 / hard 거절률 |
@@ -300,7 +302,7 @@ Justfile      setup / test / train / chat / eval
   - hard negative 학습 문장과 테스트 문장은 같은 방식으로 같은 날 쓰여 소재가 겹치는 쌍이 있다. 그래서 전체 수치는 분포 안 성능이다. 학습 문장과 의미가 먼 문장만 세도 거절률이 0.33에서 0.82로 오르므로, 효과는 겹침 때문이 아니다.
   - **인사/작별 위치 규칙은 채택하지 않는다.** 규칙은 첫 턴이면 greeting 쪽으로, 이후 턴이면 bye 쪽으로 가리고, 상대보다 0.5 이상 높을 때만 뒤집는다. 기본 대화에서는 인사·작별 턴 정확도가 0.875에서 0.958로 올랐다(n=24). 하지만 규칙을 정한 뒤 따로 쓴 경계 대화(`bench/data/test_dialogues_edge.yaml`)에서는 0.833에서 0.800으로 내려갔다. 대화 중간에 다시 인사하는 경우는 0.83에서 0.50이 됐다. 대안 후보는 두 가지다. ① 세션이 30분 쉬면 새 세션으로 보아 첫 턴 규칙을 다시 적용한다. ② 0.5보다 작은 margin을 쓴다. ②는 별도 개발용 대화셋으로 고르고 새 테스트로 검증해야 한다.
   - 이 테스트셋은 이제 열어 봤다. 다음 보강(남은 오답: 체온·냉장고·커피 같은 '온도' 문장)은 새로 쓴 테스트셋으로 재야 한다.
-- **완료 조건:** `uv run bench/phase0.py`가 `docs/benchmarks/phase0.md`에 결과표를 쓰고, 아래 기준을 넘은 조합이 있으면 exit 0. 그 조합을 v1 기본값으로 정한다.
+- **완료 조건:** `make bench`(= `uv run python bench/phase0.py`)가 `docs/benchmarks/phase0.md`에 결과표를 쓰고, 아래 기준을 넘은 조합이 있으면 exit 0. 그 조합을 v1 기본값으로 정한다.
   - macro-F1 ≥ 0.90
   - 범위 밖 거절률 ≥ 0.80
   - 추론 p95 ≤ 20ms (연속 요청 기준. 유휴 후 요청은 이 기준을 못 맞춘다는 사실을 Phase 0b에서 발견했다. 아래 Phase 5 참고)
@@ -308,10 +310,14 @@ Justfile      setup / test / train / chat / eval
   - (모두 [추정] 제안값)
 
 ### Phase 1 — 레포 교체·뼈대
-1. Java·Gradle·`rasaServer/`를 지운다. 학습 데이터는 Phase 0에서 옮겼고, 지우는 파일 목록은 PR 본문에 첨부한다.
+1. Java·Gradle·`rasaServer/`를 지운다. 학습 데이터는 Phase 0에서 옮겼고, 지우는 파일 목록은 PR 본문에 첨부한다. 레거시 파일을 읽던 변환기(`bench/convert_rasa_nlu.py`)와 그 입력 파일도 함께 지우고, `bots/sample/nlu.yaml`을 원본 데이터로 삼는다.
 2. Phase 0의 uv 프로젝트에 ruff·mypy(strict)·pytest, GitHub Actions CI를 더한다.
-3. `compose.yaml`(Postgres), `Justfile`.
-- **완료 조건:** 새로 clone한 디렉터리에서 `just setup && just test`가 통과하고 CI가 초록불.
+3. `compose.yaml`(Postgres), `Makefile`. Justfile 대신 Makefile을 쓴다. `just`는 따로 설치해야 하지만 `make`는 macOS와 CI에 이미 있다.
+- **완료 조건:** 새로 clone한 디렉터리에서 `make setup && make check`가 통과한다(macOS, 그리고 Linux 컨테이너). CI는 push한 뒤 초록불인지 확인한다.
+- **결과 (2026-11-09):** 커밋할 파일만 복사한 새 디렉터리에서 실행했다.
+  - macOS: `make setup && make check` 통과(ruff, mypy strict, pytest 64개).
+  - Linux 컨테이너(이 맥의 Docker, aarch64): ruff, mypy, 그리고 Kiwi를 쓰지 않는 테스트 22개는 통과했다. **Kiwi 형태소 분석은 첫 호출에서 프로세스가 강제 종료(exit 137)된다.** Python 3.13/3.14, kiwipiepy 0.23/0.24, x86-64 에뮬레이션 모두 같았다. kiwipiepy 0.23은 "NEON에서는 양자화 미지원 → 양자화하지 않은 모델로 대체"라고 경고한다. 그래서 큰 모델이 Docker VM 메모리(4GB)를 넘는 것으로 추정하지만, 원인은 확정하지 못했다.
+  - GitHub CI(x86-64, AVX2)에서 통과하는지는 push 후 확인한다.
 
 ### Phase 2 — 봇 정의·대화 엔진 (NLU 없이)
 1. 봇 정의 스키마·로더·검증(§3.1). 잘못된 참조나 순환이 있으면 로드 실패.
@@ -330,23 +336,23 @@ Justfile      setup / test / train / chat / eval
 2. 엔티티 추출: 사전, 정규식, 시스템(숫자·상대 날짜·시간).
 3. 분류: Phase 0에서 정한 조합, 정확 일치 우선, 임계값·margin.
 4. 문맥 우선 해석기(§3.2 표).
-5. `just train bots/sample` 실행 순서: 데이터 검사(경고 출력) → 학습 → 평가 리포트 → 버전 디렉터리에 저장.
+5. `make train BOT=bots/sample` 실행 순서: 데이터 검사(경고 출력) → 학습 → 평가 리포트 → 버전 디렉터리에 저장.
 - **완료 조건:**
   - 엔티티 추출과 해석기 순서 1~6이 단위 테스트로 통과한다.
-  - `just train`이 의도별 F1 리포트를 출력하고, macro-F1이 Phase 0 기준 이상이다.
+  - `make train`이 의도별 F1 리포트를 출력하고, macro-F1이 Phase 0 기준 이상이다.
   - 같은 입력을 두 번 넣으면 같은 결과가 나오는 테스트가 통과한다.
 
 ### Phase 4 — 샘플 봇 (기존 기능 이식)
 1. 의도: greeting, weather, temperature, time, bye, thanks, help, compliment, negative_feedback + out_of_scope. `unknown_location`은 Phase 0에서 weather·temperature로 합쳤다.
 2. 액션: 날씨(키 없는 Open-Meteo API, 테스트는 녹화한 응답 사용), 현재 시각.
 3. 지역 엔티티: 기존 `LOCATION_KEYWORDS`를 대표값 + 동의어 사전으로 옮긴다.
-- **완료 조건:** `just eval`이 대화 테스트(30개 이상)를 모두 통과하면 exit 0. 여기에는 기존에 안 되던 아래 경우가 포함된다.
+- **완료 조건:** `make eval`이 대화 테스트(30개 이상)를 모두 통과하면 exit 0. 여기에는 기존에 안 되던 아래 경우가 포함된다.
   - 후속 질문: "서울 날씨" → "부산은?"
   - 되묻기 후 답하기
   - 애매한 입력에 되묻기
 
 ### Phase 5 — 채널·API (여기까지가 "로컬에서 쓸 수 있는 v1")
-1. `POST /v1/bots/{bot}/sessions/{id}/messages` → JSON 응답(텍스트 + 빠른 답장 + 디버그용 NLU 결과). CLI 채팅(`just chat`).
+1. `POST /v1/bots/{bot}/sessions/{id}/messages` → JSON 응답(텍스트 + 빠른 답장 + 디버그용 NLU 결과). CLI 채팅(`make chat`).
 2. `POST /v1/nlu/parse`: 문장 하나의 NLU 결과만 돌려준다. 나중에 빌더의 "테스트해 보기"가 쓴다.
 3. 턴 단위 구조화 로그.
 - **완료 조건:** pytest(httpx) 테스트가 통과한다. 확인 항목은 정상 대화, 빈 입력, 같은 세션 동시 요청 시 409, 없는 봇일 때 404, DB 다운 시 오류 응답이며 예외 메시지가 새지 않아야 한다. `curl`로 로컬 서버와 대화되는 것도 확인한다. 모델 호출은 워커 스레드 하나로 모은다. 여러 스레드가 동시에 MPS를 쓰면 프로세스가 죽을 수 있다(pytorch#197805, 2026-09-23 수정). torch 2.15.0에서는 동기화 없는 4스레드 동시 호출이 3회 모두 살아남았지만 설계는 바꾸지 않는다. 배칭은 '대기 0ms(실행 중 쌓인 요청만 묶음)'로 한다. 측정값은 `docs/benchmarks/concurrency.md`에 있다.
@@ -375,7 +381,7 @@ Justfile      setup / test / train / chat / eval
 |----|--------|--------|
 | 단위 | 정규화, 엔티티 추출, 해석 순서, 이벤트 fold, 시나리오 step | pytest |
 | 대화 | 여러 턴 시나리오 | YAML(사용자 발화 → 기대 응답 ID·slot) → CI에서 항상 실행 |
-| NLU 품질 | 의도별 F1, 혼동 행렬, 범위 밖 거절률 | `just train`과 `just eval` 리포트. 기준 미달이면 CI 실패 |
+| NLU 품질 | 의도별 F1, 혼동 행렬, 범위 밖 거절률 | `make train`과 `make eval` 리포트. 기준 미달이면 CI 실패 |
 | 통합 | Postgres 저장소, HTTP | compose의 Postgres로 실행 |
 
 각 테스트 파일에는 정상·에러·경계값 케이스를 모두 넣는다. 경계값 예: 빈 입력, 예문 0개인 의도, 동의어 충돌, step 상한 도달.
@@ -389,6 +395,7 @@ Justfile      setup / test / train / chat / eval
 | 의도당 예문이 적다 (빌더 사용자는 5~10개만 넣기 쉬움) | 인식률 저하 | 엔티티 자리 확장, 동의어 치환, 글자 n-gram. 예문이 적은 의도는 학습할 때 경고 |
 | 범위 밖 판단이 단어가 겹치는 문장에 약함 | 엉뚱한 시나리오 실행 | hard negative 학습(독립 테스트 거절률 0.33 → 0.83). 남은 약점은 '온도'(체온·냉장고·커피). 다음 후보: 의도별 결정 경계(ADB, Zhang et al. 2021) 또는 기온 관련 hard negative 보강. 새 테스트셋으로 측정 |
 | 맥 GPU(MPS)가 없는 환경 | CPU에선 46ms로 지연 예산 초과 | 그 환경에선 `multilingual-e5-base`(CPU 16ms, F1 0.871)로 교체하고 임계값을 다시 보정 |
+| Kiwi가 Linux 컨테이너(이 맥의 Docker)에서 첫 분석 때 강제 종료됨 | Linux 서버·ARM 서버 배포 불가 가능성 | 원인 확정 전. CI(x86-64) 결과로 확인하고, 실패하면 Docker 메모리를 늘려 재현하거나 Kiwi 이슈를 등록한다. 엔진 기본 실행은 macOS 호스트 |
 | greeting↔bye 혼동("안녕"이 두 뜻) | 인사에 작별 답 | 위치 규칙을 시험했으나 대화 중간 재인사를 망가뜨려 채택하지 않음(Phase 0b). 다음 후보: 세션 유휴 시간 기반 재시작, 개발용 대화셋으로 margin 선택 |
 | Kiwi가 ARM64에서 느림 [확인: README 경고] | 응답 지연 | Phase 0에서 측정. 느리면 프로세스 내 캐시나 모델 옵션 조정 |
 | 한국어 상대 날짜·시간 파싱이 어려움 ("담주 금욜") | 날짜 slot 오인식 | v1은 자주 쓰는 표현 목록 + 테스트로 범위를 고정. 나머지는 되묻기 |
@@ -410,4 +417,4 @@ Justfile      setup / test / train / chat / eval
 - Amazon Lex V2 intent·slot: https://docs.aws.amazon.com/lexv2/latest/dg/how-it-works.html
 - Rasa 릴리스 이력(클래식 OSS 유지보수 상태): https://github.com/RasaHQ/rasa/releases
 - kiwipiepy: https://pypi.org/project/kiwipiepy/ · https://github.com/bab2min/kiwipiepy
-- 기존 Rasa NLU 설정·데이터: `rasaServer/config.yml`, `rasaServer/data/nlu.yml`
+- 기존 Rasa NLU 설정·데이터: 커밋 `4254a8e`의 `rasaServer/config.yml`, `rasaServer/data/nlu.yml`

@@ -139,15 +139,17 @@ def test_close_finishes_queued_requests_and_rejects_new_ones():
 
 
 def test_cancelled_request_does_not_break_its_batch():
-    gate = threading.Event()
+    gate, entered = threading.Event(), threading.Event()
 
     def slow(texts):
+        entered.set()
         gate.wait(5)
         return fake_encode(texts)
 
     b = MicroBatcher(slow, max_batch=8, max_wait_ms=0)
     try:
-        first = b.submit("가")  # occupies the worker
+        first = b.submit("가")
+        assert entered.wait(5)  # the worker is busy with `first`, so the next two queue up together
         cancelled, kept = b.submit("나"), b.submit("다")
         assert cancelled.cancel()
         gate.set()

@@ -1,0 +1,21 @@
+# Local development services. The engine itself runs on the host so it can use
+# the Apple GPU (MPS); Docker on macOS cannot.
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: chatcore
+      POSTGRES_PASSWORD: chatcore-local-only
+      POSTGRES_DB: chatcore
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatcore -d chatcore"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:

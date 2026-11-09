@@ -100,7 +100,7 @@ class MicroBatcher:
                 for _, fut in live:
                     fut.set_exception(exc)
                 continue
-            for (_, fut), row in zip(live, out):
+            for (_, fut), row in zip(live, out, strict=True):
                 fut.set_result(row)
 
 

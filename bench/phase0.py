@@ -161,7 +161,7 @@ def near_duplicate_groups(templates: list[str], threshold: float = GROUP_SIMILAR
             i = parent[i]
         return i
 
-    for i, j in zip(*np.nonzero(np.triu(sim >= threshold, k=1))):
+    for i, j in zip(*np.nonzero(np.triu(sim >= threshold, k=1)), strict=True):
         parent[root(int(i))] = root(int(j))
     ids: dict[int, int] = {}
     return [ids.setdefault(root(i), len(ids)) for i in range(len(templates))]
@@ -287,7 +287,7 @@ class Embedder:
     def encode(self, texts: list[str]) -> np.ndarray:
         missing = [t for t in dict.fromkeys(texts) if t not in self.cache]
         if missing:
-            self.cache.update(zip(missing, self.encode_fresh(missing)))
+            self.cache.update(zip(missing, self.encode_fresh(missing), strict=True))
         return np.vstack([self.cache[t] for t in texts])
 
 
@@ -301,7 +301,7 @@ class KiwiMorphs:
 
     def __call__(self, text: str) -> list[str]:
         toks = [f"{t.form}/{t.tag}" for t in self.kiwi.tokenize(text)]
-        return toks + [f"{a} {b}" for a, b in zip(toks, toks[1:])]
+        return toks + [f"{a} {b}" for a, b in zip(toks, toks[1:], strict=False)]
 
 
 @dataclass(frozen=True)
@@ -374,7 +374,7 @@ class IntentModel:
         X = parts[0] if len(parts) == 1 else sp.hstack(parts, format="csr")
         return X, (emb if emb is not None else l2_normalize(X))
 
-    def fit(self, texts: list[str], labels: list[str]) -> "IntentModel":
+    def fit(self, texts: list[str], labels: list[str]) -> IntentModel:
         if not texts:
             raise BenchError("no training texts")
         X, space = self._features(texts, fit=True)
@@ -453,7 +453,7 @@ def macro_f1_idx(y: np.ndarray, p: np.ndarray, n_classes: int) -> float:
 
 
 def oos_recall(y_true: list[str], y_pred: list[str]) -> float:
-    rows = [p for t, p in zip(y_true, y_pred) if t == OOS]
+    rows = [p for t, p in zip(y_true, y_pred, strict=True) if t == OOS]
     if not rows:
         raise BenchError("no out_of_scope rows to measure")
     return sum(p == OOS for p in rows) / len(rows)
@@ -503,7 +503,7 @@ def clarify_stats(y_true: list[str], y_pred: list[str], probs: np.ndarray, class
     share of those whose true intent is in the top 2)."""
     order = np.argsort(-probs, axis=1)
     accepted = clarify = hit = 0
-    for r, (truth, pred) in enumerate(zip(y_true, y_pred)):
+    for r, (truth, pred) in enumerate(zip(y_true, y_pred, strict=True)):
         if truth == OOS or pred == OOS:
             continue
         accepted += 1
@@ -527,7 +527,7 @@ def split_halves(groups: list[int], labels: list[str], seed: int = SEED) -> dict
     """Assign each group to half 0 or 1, alternating within each intent."""
     rng = random.Random(seed)
     by_intent: dict[str, list[int]] = {}
-    for g, lab in zip(groups, labels):
+    for g, lab in zip(groups, labels, strict=True):
         if g not in by_intent.setdefault(lab, []):
             by_intent[lab].append(g)
     half: dict[int, int] = {}
@@ -627,8 +627,8 @@ def evaluate(setup: Setup, intents: dict[str, list[str]], forms: list[str], oos_
     pred_names = [str(classes[i]) for i in pred_all]
     clarify_rate, clarify_top2 = clarify_stats(y_true_all, pred_names, probs_all, classes)
     names = sorted(set(y_true_all))
-    per_intent = dict(zip(names, f1_score(y_true_all, pred_names, labels=names, average=None, zero_division=0)))
-    confusions = Counter((t, p) for t, p in zip(y_true_all, pred_names) if t != p).most_common(5)
+    per_intent = dict(zip(names, f1_score(y_true_all, pred_names, labels=names, average=None, zero_division=0), strict=True))
+    confusions = Counter((t, p) for t, p in zip(y_true_all, pred_names, strict=True) if t != p).most_common(5)
 
     # Full model with uncached embeddings: training time, cold first call, held-out OOS, latency.
     start = time.perf_counter()
@@ -752,9 +752,9 @@ def render(results: list[Result], best: Result | None, intents: dict[str, list[s
         f"- 데이터: 의도 {len(intents)}개(범위 밖 포함), 템플릿 {sum(map(len, intents.values()))}개 → 거의 같은 템플릿끼리 묶어 {n_groups}묶음(글자 n-gram 유사도 ≥ {GROUP_SIMILARITY} 또는 `{GROUPING_EMBEDDING}` 임베딩 complete-link ≥ {SEMANTIC_SIMILARITY}), 지역 표기 {len(forms)}개",
         f"- 처음 보는 범위 밖 평가 문장 {len(oos_eval)}개. 그중 {n_near}개는 학습용 범위 밖 문장과 `{GROUPING_EMBEDDING}` 유사도 ≥ {NEAR_OOS}이라 '먼 문장만' 열에서 뺐다.",
         f"- 교차검증: 묶음 단위 {N_SPLITS}-fold StratifiedGroupKFold × 시드 {len(SEEDS)}개. 평가 문장은 템플릿의 `{{location}}`에 무작위 지역을 넣은 것.",
-        f"- 범위 밖 규칙(모든 조합 동일): `out_of_scope` 클래스가 1위이거나, 1위 확률 < 확률 임계값이거나, 범위 안 학습 문장과의 최대 코사인 < 유사도 임계값이면 거절. 유사도 공간은 임베딩 조합은 임베딩, n-gram 조합은 TF-IDF.",
+        "- 범위 밖 규칙(모든 조합 동일): `out_of_scope` 클래스가 1위이거나, 1위 확률 < 확률 임계값이거나, 범위 안 학습 문장과의 최대 코사인 < 유사도 임계값이면 거절. 유사도 공간은 임베딩 조합은 임베딩, n-gram 조합은 TF-IDF.",
         f"- 임계값: 교차검증 예측에서 범위 밖 재현율 ≥ {c['oos_reject']}를 만족하는 쌍 중 macro-F1 최대(없으면 ⚠). **표의 macro-F1은 교차 적합 값**이다. 템플릿 묶음을 둘로 나눠 한쪽에서 고른 임계값으로 다른 쪽을 쟀다. 표의 임계값은 전체 예측으로 고른 배포용 초기값이다.",
-        f"- 처음 보는 범위 밖 문장은 임계값 선택에는 쓰지 않는다. 다만 통과 판정에는 쓰므로 95% 신뢰구간(Wilson)을 함께 적는다.",
+        "- 처음 보는 범위 밖 문장은 임계값 선택에는 쓰지 않는다. 다만 통과 판정에는 쓰므로 95% 신뢰구간(Wilson)을 함께 적는다.",
         f"- 기준: macro-F1 ≥ {c['macro_f1']}, 처음 보는 범위 밖 거절률 ≥ {c['oos_reject']}, 추론 p95 ≤ {c['p95_ms']}ms({LATENCY_ROUNDS}회 측정 중 최악값), 학습(임베딩 포함, 모델 로드 제외) ≤ {c['train_s']}초",
         f"- Kiwi: 모델 로드 {kiwi[0]:.2f}초, 단일 스레드 {kiwi[1]:,.0f}문장/초",
         "- 임베딩 모델:",

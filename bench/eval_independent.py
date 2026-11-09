@@ -110,21 +110,25 @@ def evaluate_config(cfg: Config, test: dict, kiwi: Kiwi, embedder: Embedder, scr
 
     sents, labels, kinds = [], [], []
     for intent, exs in test["in_scope"].items():
-        sents += exs; labels += [intent] * len(exs); kinds += ["in"] * len(exs)
+        sents += exs
+        labels += [intent] * len(exs)
+        kinds += ["in"] * len(exs)
     for kind in ("hard", "easy"):
         exs = test["out_of_scope"][kind]
-        sents += exs; labels += [OOS] * len(exs); kinds += [kind] * len(exs)
+        sents += exs
+        labels += [OOS] * len(exs)
+        kinds += [kind] * len(exs)
     preds, _ = predict(sents)
     novel = [normalize(s) not in train_texts for s in sents]
     nearest = (embedder.encode([normalize(s) for s in sents]) @ train_emb.T).max(axis=1)
     far = [bool(m < FAR) for m in nearest]
 
     def scores(mask: list[bool]) -> dict:
-        y = [l for l, m in zip(labels, mask) if m]
-        p = [q for q, m in zip(preds, mask) if m]
-        k = [q for q, m in zip(kinds, mask) if m]
-        in_rows = [(a, b) for a, b, c in zip(y, p, k) if c == "in"]
-        rej = {kind: [b == OOS for b, c in zip(p, k) if c == kind] for kind in ("hard", "easy")}
+        y = [lab for lab, m in zip(labels, mask, strict=True) if m]
+        p = [q for q, m in zip(preds, mask, strict=True) if m]
+        k = [q for q, m in zip(kinds, mask, strict=True) if m]
+        in_rows = [(a, b) for a, b, c in zip(y, p, k, strict=True) if c == "in"]
+        rej = {kind: [b == OOS for b, c in zip(p, k, strict=True) if c == kind] for kind in ("hard", "easy")}
         return {
             "n": len(y),
             "macro_f1": float(f1_score(y, p, average="macro", zero_division=0)),
@@ -135,7 +139,7 @@ def evaluate_config(cfg: Config, test: dict, kiwi: Kiwi, embedder: Embedder, scr
     all_scores = scores([True] * len(sents))
     novel_scores = scores(novel)
     far_scores = scores(far)
-    errors = [(s, l, p) for s, l, p in zip(sents, labels, preds) if l != p]
+    errors = [(s, lab, p) for s, lab, p in zip(sents, labels, preds, strict=True) if lab != p]
 
     def run_dialogues(dialogues: list[dict]) -> list[tuple[str, str, str]]:
         """(case, gold, final) per turn; turn_index = position of the user turn in the session."""
@@ -144,7 +148,7 @@ def evaluate_config(cfg: Config, test: dict, kiwi: Kiwi, embedder: Embedder, scr
             if len(d["turns"]) != len(d["labels"]):
                 raise BenchError(f"dialogue turns/labels differ: {d['turns']}")
             t_preds, t_probs = predict(d["turns"])
-            for i, (gold, pred) in enumerate(zip(d["labels"], t_preds)):
+            for i, (gold, pred) in enumerate(zip(d["labels"], t_preds, strict=True)):
                 final = resolve_pair(pred, t_probs[i], model.classes_, i) if cfg.pair_rule else pred
                 out.append((d.get("case", "main"), gold, final))
         return out
@@ -198,7 +202,7 @@ def render(results: list[tuple[Config, dict]]) -> str:
         lines.append(f"- **{cfg.name}**: 데이터 `{cfg.nlu}`, `{cfg.setup.name}`, 확률 임계값 {cfg.threshold}, 유사도 임계값 {cfg.sim_threshold}, 위치 규칙 {'켬' if cfg.pair_rule else '끔'}")
     for cfg, r in results:
         lines += ["", f"## 틀린 문장 — {cfg.name} ({len(r['errors'])}개)", "", "| 문장 | 정답 | 예측 |", "|---|---|---|"]
-        lines += [f"| {s} | {l} | {p} |" for s, l, p in r["errors"]] or ["| - | - | - |"]
+        lines += [f"| {s} | {lab} | {p} |" for s, lab, p in r["errors"]] or ["| - | - | - |"]
     return "\n".join(lines) + "\n"
 
 
