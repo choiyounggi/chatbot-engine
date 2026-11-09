@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from chatcore.bot.josa import PARTICLES
 from chatcore.bot.schema import (
     PLACEHOLDER,
     REQUIRED_RESPONSES,
@@ -30,6 +31,7 @@ from chatcore.bot.schema import (
 )
 
 MIN_EXAMPLES = 5
+LOOSE_PLACEHOLDER = re.compile(r"\{\{.*?\}\}")
 
 
 class _BotYamlLoader(yaml.SafeLoader):
@@ -205,8 +207,20 @@ def _template_errors(bot: BotDefinition) -> list[str]:
         return path
 
     errors = []
+    for where, texts in [(f"response {rid!r}", r.bodies() + r.quick_replies) for rid, r in bot.responses.items()] + [
+        (f"scenario {sid} step {i}", list(st.args.values()))
+        for sid, sc in bot.scenarios.items() for i, st in enumerate(sc.steps) if isinstance(st, ActionStep)
+    ]:
+        for t in texts:
+            # every "{{ ... }}" must be a valid placeholder, otherwise it would reach the user verbatim
+            if len(LOOSE_PLACEHOLDER.findall(t)) != len(PLACEHOLDER.findall(t)) or t.count("{{") != t.count("}}"):
+                hint = "write {{ slots.x }} or {{ slots.x|은 }}"
+                errors.append(f"{where}: malformed placeholder in {t!r} ({hint})")
+        filters = {m.group(2) for t in texts for m in PLACEHOLDER.finditer(t) if m.group(2)}
+        errors += [f"{where}: unknown particle filter |{f}" for f in sorted(filters - PARTICLES)]
     for rid, resp in bot.responses.items():
-        paths = _paths_of(resp.bodies() + resp.quick_replies)
+        texts = resp.bodies() + resp.quick_replies
+        paths = _paths_of(texts)
         if rid in REQUIRED_RESPONSES and paths:
             errors.append(f"response {rid!r} is rendered by the engine itself; remove variables {sorted(paths)}")
             continue

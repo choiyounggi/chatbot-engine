@@ -13,7 +13,8 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ID = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$", max_length=64)]
-PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)\s*\}\}")
+# {{ path }} or {{ path|은 }} (a Korean particle chosen by the value's final consonant, see bot/josa.py)
+PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)\s*(?:\|\s*([가-힣]+)\s*)?\}\}")
 SYSTEM_ENTITIES = frozenset({"sys.number", "sys.date", "sys.time"})
 # Responses the engine itself needs; every bot must define them.
 REQUIRED_RESPONSES = frozenset({"fallback", "cancelled", "restarted", "error", "clarify", "input_invalid"})
@@ -139,6 +140,7 @@ class Trigger(Model):
 class Scenario(Model):
     label: str = ""
     trigger: Trigger | None = None  # None: only reachable through call/branch
+    exclusive: bool = False  # starting it ends every running scenario first (e.g. a goodbye)
     slots: dict[str, Slot] = Field(default_factory=dict)
     steps: list[Step] = Field(min_length=1)
     on_error: str | None = None  # response ID when an action fails; default "error"

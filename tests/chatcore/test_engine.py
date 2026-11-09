@@ -295,3 +295,24 @@ def test_action_results_are_stored_as_json_would_replay_them():
 def test_non_finite_action_results_fail(bad):
     with pytest.raises(ActionError):
         registry(a=lambda args: bad).run("a", {})
+
+
+def test_exclusive_scenario_ends_running_ones():
+    bot = make_bot({"ask": {"slots": {"c": {"entity": "code", "ask": "q"}}, "steps": [{"collect": "c"}]},
+                    "bye": {"exclusive": True, "steps": [{"respond": "bye"}]}},
+                   {"q": {"text": "?"}, "bye": {"text": "bye"}})
+    h = Harness(bot)
+    h.turn(StartScenario("ask"))
+    responses, out = h.turn(StartScenario("bye"))
+    assert responses == ["bye"] and h.state.stack == []
+    assert [(e.scenario, e.reason) for e in out.events if isinstance(e, ScenarioCancelled)] == [("ask", "superseded")]
+
+
+def test_on_error_response_can_show_the_failed_scenarios_slots():
+    bot = make_bot({"s": {"on_error": "sorry", "slots": {"c": {"entity": "code", "ask": "q"}},
+                          "steps": [{"collect": "c"}, {"action": "boom"}]}},
+                   {"q": {"text": "?"}, "sorry": {"text": "{{ slots.c|은 }} 안 돼요"}})
+    h = Harness(bot, registry(boom=StubAction(error=RuntimeError("down"))))
+    h.turn(StartScenario("s"))
+    _, out = h.turn(SetSlot("c", "ABC"))
+    assert [m.text for m in out.messages] == ["ABC은(는) 안 돼요"]

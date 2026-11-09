@@ -143,6 +143,9 @@ class _Turn:
                         fallback = True
                         continue
                     if self.state.frame(sid) is None:
+                        if self.bot.scenarios[sid].exclusive:
+                            for f in reversed(list(self.state.stack)):
+                                self.emit(ScenarioCancelled(scenario=f.scenario, reason="superseded"))
                         if len(self.state.stack) >= self.settings.max_stack_depth:
                             self.reject(cmd, "scenario stack is full")
                             fallback = True
@@ -273,8 +276,8 @@ class _Turn:
                         result = self.actions.run(action, rendered)
                     except (ActionError, MissingVariable) as exc:
                         self.emit(ActionFailed(scenario=sid, action=action, error=f"{type(exc).__name__}: {exc}"))
+                        self.say(scenario.on_error or "error")  # while the scenario's slots are still in context
                         self.cancel_chain("action_failed")
-                        self.say(scenario.on_error or "error")
                         continue
                     self.emit(ActionExecuted(scenario=sid, action=action, result=result))
                     self.emit(StepEntered(scenario=sid, index=frame.step + 1))
