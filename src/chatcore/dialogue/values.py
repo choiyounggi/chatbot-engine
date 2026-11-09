@@ -174,7 +174,9 @@ class ActionRegistry:
             else:
                 with self._pool_lock:
                     if self._pool is None:
-                        self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="action")
+                        # sized for the API's request threadpool: timed-out calls keep their worker until
+                        # their own (network) timeout ends, so a small pool would starve later requests
+                        self._pool = ThreadPoolExecutor(max_workers=32, thread_name_prefix="action")
                     pool = self._pool
                 future = pool.submit(entry.fn, args)
                 try:

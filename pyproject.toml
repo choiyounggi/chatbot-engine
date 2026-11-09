@@ -5,6 +5,7 @@ description = "LLM-free, scenario-based chatbot engine core"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "fastapi>=0.162.2",
     "kiwipiepy>=0.24.1",
     "numpy>=2.5.4",
     "psycopg[binary]>=3.3.8",
@@ -13,6 +14,7 @@ dependencies = [
     "scikit-learn>=1.9.1",
     "sentence-transformers>=6.2.0",
     "torch>=2.15.0",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [build-system]
@@ -24,6 +26,7 @@ packages = ["src/chatcore"]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "mypy>=1.18",
     "pytest>=9.2.0",
     "pytest-cov>=7.1.0",

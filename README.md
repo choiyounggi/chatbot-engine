@@ -7,7 +7,7 @@ intents with example sentences, entities with synonyms, scenarios, response temp
 engine understands Korean input with a frozen sentence-embedding model plus a small classifier,
 then follows the scenario deterministically. A builder UI for editing that data comes later.
 
-> Status: Phase 2 — scenario engine without NLU (conversations are driven by scripted commands in tests).
+> Status: Phase 5 — HTTP API (`make serve`) and terminal chat (`make chat`) over the scenario engine with Korean NLU. Train the model first: `make train`.
 > Design and roadmap: [docs/engine-core-plan.md](docs/engine-core-plan.md).
 
 ## Quick start

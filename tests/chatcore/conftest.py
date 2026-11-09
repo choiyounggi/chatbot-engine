@@ -1,5 +1,7 @@
+import hashlib
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from chatcore.bot.loader import load_bot
@@ -31,3 +33,30 @@ def registry(stubs) -> ActionRegistry:
     for name, stub in stubs.items():
         reg.register(name, stub)
     return reg
+
+
+class FakeEmbedder:
+    """Deterministic stand-in for a sentence-embedding model: hashed char 1-3-grams, L2-normalized."""
+
+    model_id = "fake-ngram-256"
+    prompt = ""
+
+    def __init__(self):
+        self.calls = 0
+        self.last = None
+
+    def encode(self, texts):
+        self.calls += 1
+        self.last = list(texts)
+        out = np.zeros((len(texts), 256), dtype=np.float32)
+        for r, t in enumerate(texts):
+            for n in (1, 2, 3):
+                for i in range(len(t) - n + 1):
+                    out[r, int(hashlib.md5(t[i:i + n].encode()).hexdigest(), 16) % 256] += 1
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        return out / np.maximum(norms, 1e-9)
+
+
+@pytest.fixture(scope="session")
+def fake_embedder():
+    return FakeEmbedder()
