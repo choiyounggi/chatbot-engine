@@ -695,9 +695,17 @@ def paired_bootstrap(a: Result, b: Result, n: int = BOOTSTRAP, seed: int = SEED)
     return observed, float(lo), float(hi)
 
 
-def recommend(results: list[Result]) -> Result | None:
+def recommend(results: list[Result], n: int = BOOTSTRAP) -> Result | None:
+    """Among setups that pass, take the best macro-F1, then every passing setup
+    the paired bootstrap cannot tell apart from it (95% interval of the
+    difference includes 0), and pick the simplest (no extra n-gram features),
+    then the fastest."""
     passed = [r for r in results if r.passed]
-    return max(passed, key=lambda r: (round(r.f1_mean, 3), r.oos_reject, -r.p95_ms)) if passed else None
+    if not passed:
+        return None
+    top = max(passed, key=lambda r: r.f1_mean)
+    tied = [r for r in passed if r is top or paired_bootstrap(top, r, n)[1] <= 0]
+    return min(tied, key=lambda r: (r.setup.features.endswith("+both"), r.p95_ms))
 
 
 def kiwi_speed(texts: list[str]) -> tuple[float, float]:
@@ -778,7 +786,7 @@ def render(results: list[Result], best: Result | None, intents: dict[str, list[s
         shown = best
         lines += [
             "## 결론 (v1 기본값)", "",
-            f"- 조합: `{best.setup.name}`",
+            f"- 조합: `{best.setup.name}` (기준을 넘은 조합 중 F1 최고 조합과 bootstrap으로 구분되지 않는 것 가운데 가장 단순하고 빠른 것)",
             f"- `intent_threshold` 초기값: {best.choice.threshold:.2f}",
             f"- 범위 밖 유사도 임계값 초기값: {best.choice.sim_threshold:.2f} (모델마다 척도가 달라 모델을 바꾸면 다시 보정)",
             f"- `ambiguity_margin` 초기값: {MARGIN} (되묻기 비율 {best.clarify_rate:.2f}, 그중 정답이 2위 안 {best.clarify_top2:.2f})",

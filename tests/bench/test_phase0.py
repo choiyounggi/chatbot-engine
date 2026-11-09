@@ -18,6 +18,7 @@ from bench.phase0 import (
     evaluate,
     macro_f1_idx,
     paired_bootstrap,
+    recommend,
     semantic_groups,
     split_halves,
     template_groups,
@@ -317,3 +318,26 @@ def test_paired_bootstrap_identical_results_give_zero(kiwi):
     r = _toy_eval(kiwi, ["주식 사도 돼?"], features="char")
     d, lo, hi = paired_bootstrap(r, r, n=50)
     assert d == 0.0 and lo == 0.0 and hi == 0.0
+
+
+def test_recommend_prefers_simpler_setup_when_indistinguishable(kiwi):
+    import dataclasses
+
+    base = _toy_eval(kiwi, ["주식 사도 돼?"], features="char")
+    simple = dataclasses.replace(base, setup=Setup("expand", "emb:x", "logreg"), f1_mean=0.95, p95_ms=5.0, train_s=0.1, oos_reject=0.9)
+    hybrid = dataclasses.replace(base, setup=Setup("expand", "emb:x+both", "logreg"), f1_mean=0.951, p95_ms=4.0, train_s=0.1, oos_reject=0.9)
+    failing = dataclasses.replace(base, setup=Setup("expand", "char", "logreg"), f1_mean=0.99, p95_ms=1.0, train_s=0.1, oos_reject=0.1)
+    assert recommend([hybrid, simple, failing], n=50) is simple  # same rows → difference 0 → tied
+    assert recommend([failing], n=50) is None
+
+
+def test_recommend_keeps_a_significantly_better_setup(kiwi):
+    import dataclasses
+
+    base = _toy_eval(kiwi, ["주식 사도 돼?"], features="char")
+    rows = base.rows
+    wrong = dict(rows, pred=(rows["y"] + 1) % rows["n_classes"])  # every prediction wrong
+    good = dataclasses.replace(base, setup=Setup("expand", "emb:x+both", "logreg"), f1_mean=0.95, p95_ms=9.0, train_s=0.1, oos_reject=0.9,
+                               rows=dict(rows, pred=rows["y"].copy()))
+    bad = dataclasses.replace(base, setup=Setup("expand", "emb:x", "logreg"), f1_mean=0.91, p95_ms=1.0, train_s=0.1, oos_reject=0.9, rows=wrong)
+    assert recommend([bad, good], n=200) is good  # simpler/faster but clearly worse → not tied
