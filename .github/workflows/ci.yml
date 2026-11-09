@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3  # no moving major tag upstream; pin the release
         with:
           enable-cache: true
       - name: Install (Python version from .python-version, locked deps, CPU torch)
