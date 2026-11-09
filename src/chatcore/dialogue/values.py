@@ -7,12 +7,16 @@ import json
 import math
 import random
 import re
+import threading
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from chatcore.bot.josa import attach
 from chatcore.bot.schema import PLACEHOLDER, BotDefinition, DictionaryEntity, RegexEntity, Response
 from chatcore.dialogue.commands import SlotValue
 
@@ -96,8 +100,13 @@ def as_text(value: Any) -> str:
 
 
 def render(template: str, context: Mapping[str, Any]) -> str:
-    """Replace `{{ path }}` placeholders. No expressions, no code."""
-    return PLACEHOLDER.sub(lambda m: as_text(lookup(context, m.group(1))), template)
+    """Replace `{{ path }}` / `{{ path|은 }}` placeholders. No expressions, no code."""
+
+    def sub(m: re.Match[str]) -> str:
+        text = as_text(lookup(context, m.group(1)))
+        return attach(text, m.group(2)) if m.group(2) else text
+
+    return PLACEHOLDER.sub(sub, template)
 
 
 @dataclass(frozen=True)
@@ -130,10 +139,17 @@ class _Registered:
 
 class ActionRegistry:
     """Named functions a scenario's `action` step may call. Results must be
-    JSON-serializable mappings (they are stored in the event log)."""
+    JSON-serializable mappings (they are stored in the event log). Each call
+    gets `timeout` seconds; a slow action fails the step instead of the turn
+    (the worker thread may finish later, so actions must tolerate that)."""
 
-    def __init__(self) -> None:
+    def __init__(self, timeout: float | None = None) -> None:
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be positive")
         self._actions: dict[str, _Registered] = {}
+        self.timeout = timeout
+        self._pool: ThreadPoolExecutor | None = None
+        self._pool_lock = threading.Lock()
 
     def register(self, name: str, fn: ActionFn, args_model: type[BaseModel] | None = None) -> None:
         if not name or name in self._actions:
@@ -153,7 +169,21 @@ class ActionRegistry:
             except ValidationError as exc:
                 raise ActionError(f"bad arguments for {name}: {exc.errors()}") from exc
         try:
-            result = entry.fn(args)
+            if self.timeout is None:
+                result = entry.fn(args)
+            else:
+                with self._pool_lock:
+                    if self._pool is None:
+                        self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="action")
+                    pool = self._pool
+                future = pool.submit(entry.fn, args)
+                try:
+                    result = future.result(timeout=self.timeout)
+                except FutureTimeout as exc:
+                    # FutureTimeout is the builtin TimeoutError: it may be the action's own error
+                    if future.done():
+                        raise
+                    raise ActionError(f"{name} timed out after {self.timeout}s") from exc
         except ActionError:
             raise
         except Exception as exc:

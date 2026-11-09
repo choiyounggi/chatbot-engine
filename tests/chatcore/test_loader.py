@@ -204,3 +204,23 @@ def test_valid_template_paths_pass():
 def test_quick_replies_must_be_short_and_non_empty(q):
     with pytest.raises(ValueError):
         bot(responses={**REQUIRED, "ask": {"text": "?", "quick_replies": [q]}, "done": {"text": "끝"}})
+
+
+def test_unknown_particle_filter_is_an_error():
+    b = bot(responses={**REQUIRED, "ask": {"text": "?"}, "done": {"text": "{{ slots.c|께서 }}"}})
+    assert any("unknown particle filter |께서" in e for e in validate(b).errors)
+    ok = bot(responses={**REQUIRED, "ask": {"text": "?"}, "done": {"text": "{{ slots.c|은 }} {{ slots.c | 이에요 }}"}})
+    assert validate(ok).errors == []
+
+
+@pytest.mark.parametrize("text", ["{{ slots.c|eun }}", "{{ slots.c|은|가 }}", "{{ slots.c ", "{{ 1bad }}", "x }} y {{ slots.c }}"])
+def test_malformed_placeholders_are_errors(text):
+    b = bot(responses={**REQUIRED, "ask": {"text": "?"}, "done": {"text": text}})
+    assert any("malformed placeholder" in e for e in validate(b).errors), validate(b).errors
+
+
+def test_malformed_placeholder_in_action_args_is_an_error():
+    b = bot(scenarios={"s": {"slots": {"c": {"entity": "city", "ask": "ask"}},
+                             "steps": [{"collect": "c"}, {"action": "a", "args": {"q": "{{ slots.c|eun }}"}}]}},
+            responses={**REQUIRED, "ask": {"text": "?"}, "done": {"text": "끝"}})
+    assert any("malformed placeholder" in e for e in validate(b).errors)

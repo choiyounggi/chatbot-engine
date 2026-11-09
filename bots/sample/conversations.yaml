@@ -1,0 +1,118 @@
+# Golden conversations for `make eval`: plain user text through the real NLU model.
+# Written before the first run (2026-11-10) and not tuned to it — failures are
+# reported as they are. Actions return synthetic data (weather 맑음 20°C, time
+# 오후 3시) so texts are stable; unknown cities still fail like the real action.
+conversations:
+  - name: 인사
+    turns:
+      - {user: "안녕하세요~", expect: [greeting]}
+  - name: 반말 인사
+    turns:
+      - {user: "하이 반가워", expect: [greeting]}
+  - name: 작별
+    turns:
+      - {user: "이제 그만 가볼게요", expect: [bye]}
+  - name: 감사
+    turns:
+      - {user: "알려줘서 정말 고마워요", expect: [thanks]}
+  - name: 도움말
+    turns:
+      - {user: "너는 뭘 할 수 있어?", expect: [help]}
+  - name: 칭찬
+    turns:
+      - {user: "와 진짜 똑똑하다", expect: [compliment]}
+  - name: 불만
+    turns:
+      - {user: "그거 틀린 답이잖아", expect: [negative_feedback]}
+  - name: 현재 시각
+    turns:
+      - {user: "지금 몇 시예요?", expect: [time_report], text: ["지금은 오후 3시예요."]}
+  - name: 지역과 함께 날씨
+    turns:
+      - {user: "부산 날씨 어때?", expect: [weather_report], text: ["부산은 지금 맑음이에요."]}
+  - name: 조사 — 받침 없는 지역
+    turns:
+      - {user: "대구 날씨 알려줘", expect: [weather_report], text: ["대구는 지금 맑음이에요."]}
+  - name: 동의어는 대표값으로
+    turns:
+      - {user: "부산광역시 날씨 좀 알려줄래", expect: [weather_report], text: ["부산은 지금 맑음이에요."]}
+  - name: 도 이름은 도청 소재지 좌표로
+    turns:
+      - {user: "경기도 날씨 어때요", expect: [weather_report]}
+  - name: 지역과 함께 기온
+    turns:
+      - {user: "서울 기온 몇 도야?", expect: [temperature_report], text: ["서울의 현재 기온은 20°C예요."]}
+  - name: 날씨 → 지역 되묻기 → 답
+    turns:
+      - {user: "오늘 날씨 어때?", expect: [ask_location]}
+      - {user: "제주", expect: [weather_report]}
+  - name: 기온 → 지역 되묻기 → 문장으로 답
+    turns:
+      - {user: "지금 기온 몇 도야", expect: [ask_location]}
+      - {user: "광주요", expect: [temperature_report]}
+  - name: 후속 질문 — 은?
+    turns:
+      - {user: "서울 날씨 알려줘", expect: [weather_report]}
+      - {user: "부산은?", expect: [weather_report], text: ["부산은 지금 맑음이에요."]}
+  - name: 후속 질문 — 어때
+    turns:
+      - {user: "인천 날씨 어때", expect: [weather_report]}
+      - {user: "제주도는 어때?", expect: [weather_report]}
+  - name: 후속 질문 — 기온에서
+    turns:
+      - {user: "대전 기온 알려줘", expect: [temperature_report]}
+      - {user: "그럼 울산은요", expect: [temperature_report]}
+  - name: 되묻기 중 다른 질문 후 복귀
+    turns:
+      - {user: "날씨 알려줘", expect: [ask_location]}
+      - {user: "아 근데 지금 몇 시야", expect: [time_report, ask_location]}
+      - {user: "부산", expect: [weather_report]}
+  - name: 되묻기 중 취소
+    turns:
+      - {user: "날씨 어때", expect: [ask_location]}
+      - {user: "취소", expect: [cancelled]}
+  - name: 되묻기 중 작별 — 질문을 다시 하지 않음
+    turns:
+      - {user: "기온 알려줘", expect: [ask_location]}
+      - {user: "됐어 안녕히 계세요", expect: [bye]}
+  - name: 처음으로
+    turns:
+      - {user: "날씨 알려줘", expect: [ask_location]}
+      - {user: "처음으로", expect: [restarted]}
+  - name: 지원하지 않는 지역
+    turns:
+      - {user: "아산 날씨 알려줘", expect: [weather_unavailable]}
+  - name: 범위 밖 — 맛집
+    turns:
+      - {user: "부산 맛집 추천해줘", expect: [fallback]}
+  - name: 범위 밖 — 주식
+    turns:
+      - {user: "요즘 주식 뭐 사야 돼?", expect: [fallback]}
+  - name: 범위 밖 — 번역
+    turns:
+      - {user: "이 문장 영어로 번역해줘", expect: [fallback]}
+  - name: 범위 밖 — 요리
+    turns:
+      - {user: "김치볶음밥 만드는 법 알려줘", expect: [fallback]}
+  - name: 범위 밖 — 길찾기
+    turns:
+      - {user: "서울역까지 어떻게 가?", expect: [fallback]}
+  - name: 맥락 없는 지역명은 인사로 보지 않음
+    turns:
+      - {user: "부산은?", expect: [fallback]}
+  - name: 인사 → 날씨 → 감사 → 작별
+    turns:
+      - {user: "안녕", expect: [greeting]}
+      - {user: "서울 날씨 어때", expect: [weather_report]}
+      - {user: "고마워", expect: [thanks]}
+      - {user: "잘 있어", expect: [bye]}
+  - name: 되묻기에 엉뚱한 답 세 번이면 포기
+    turns:
+      - {user: "날씨 알려줘", expect: [ask_location]}
+      - {user: "음 글쎄", expect: [ask_location]}
+      - {user: "모르겠는데", expect: [ask_location]}
+      - {user: "아무거나", expect: [fallback]}
+  - name: 시각 후 날씨 연속
+    turns:
+      - {user: "몇 시야 지금", expect: [time_report]}
+      - {user: "그럼 서울 날씨는?", expect: [weather_report]}
