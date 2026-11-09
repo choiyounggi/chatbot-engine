@@ -1,0 +1,77 @@
+# Edge-case dialogues for the greeting/bye position rule (written 2026-11-06 without seeing any project data).
+dialogues:
+  - case: mid_regreet
+    turns: ["오늘 날씨 어때요?", "아 잠시만, 엄마 오셨다 안녕하세요!", "다시 왔어요, 비 오나요?"]
+    labels: [weather, greeting, weather]
+  - case: mid_regreet
+    turns: ["몇 시예요?", "안녕, 다시 왔어!", "고마워요"]
+    labels: [time, greeting, thanks]
+  - case: mid_regreet
+    turns: ["도움말 좀 줘", "너 되게 똑똑하다", "안녕하세요, 잠깐 자리 비웠었어요", "기온이 몇 도예요?"]
+    labels: [help, compliment, greeting, temperature]
+  - case: mid_regreet
+    turns: ["기온 알려줘", "어 잠깐, 손님 오셨네. 안녕하세요!", "다시 본론으로, 시간 알려줘"]
+    labels: [temperature, greeting, time]
+  - case: mid_regreet
+    turns: ["날씨 알려줘", "감사해요", "안녕, 나 다시 왔어"]
+    labels: [weather, thanks, greeting]
+  - case: mid_regreet
+    turns: ["넌 누구야?", "아까 답 틀렸잖아", "잠깐만 전화 좀, 어 안녕하세요!", "다시 왔어요, 내일 날씨는요?"]
+    labels: [out_of_scope, negative_feedback, greeting, weather]
+
+  - case: first_turn_bye
+    turns: ["어 잘못 눌렀다, bye", "아니다 잠깐, 지금 몇 시야?"]
+    labels: [bye, time]
+  - case: first_turn_bye
+    turns: ["이만 가볼게요", "참, 오늘 기온 몇 도예요?", "정말 고마워요"]
+    labels: [bye, temperature, thanks]
+  - case: first_turn_bye
+    turns: ["끊을게요", "잠깐, 내일 비 와요?"]
+    labels: [bye, weather]
+  - case: first_turn_bye
+    turns: ["나중에 다시 올게요, 이만", "어 그전에 궁금한 거, 넌 어떤 걸 도와줄 수 있어?"]
+    labels: [bye, help]
+  - case: first_turn_bye
+    turns: ["수고하세요, 먼저 갈게요", "아 맞다, 시간 좀 알려줄래?", "고맙습니다"]
+    labels: [bye, time, thanks]
+  - case: first_turn_bye
+    turns: ["종료할게요", "잠깐만요, 아까 대답 이상했어요", "그래도 수고했어요"]
+    labels: [bye, negative_feedback, compliment]
+
+  - case: ambiguous_both
+    turns: ["안녕", "오늘 비 오나요?", "안녕~"]
+    labels: [greeting, weather, bye]
+  - case: ambiguous_both
+    turns: ["안녕~ 왔어", "지금 몇 시야?", "잘 있어"]
+    labels: [greeting, time, bye]
+  - case: ambiguous_both
+    turns: ["잘 지내?", "기온이 몇 도야?", "고마워", "잘 지내~"]
+    labels: [greeting, temperature, thanks, bye]
+  - case: ambiguous_both
+    turns: ["안녕!", "비 많이 와?", "안녕 잘 있어"]
+    labels: [greeting, weather, bye]
+  - case: ambiguous_both
+    turns: ["잘 있어?", "오늘 기온은 어때요?", "그럼 잘 있어"]
+    labels: [greeting, temperature, bye]
+  - case: ambiguous_both
+    turns: ["안녕?", "시간 좀 알려줘", "고마워요 덕분에", "안녕~ 다음에 봐"]
+    labels: [greeting, time, thanks, bye]
+
+  - case: unambiguous_mixed
+    turns: ["날씨 좀 알려줘", "감사합니다", "처음 뵙겠습니다, 잘 부탁드려요"]
+    labels: [weather, thanks, greeting]
+  - case: unambiguous_mixed
+    turns: ["오늘 기온이 몇 도예요?", "이만 갈게요", "아니다, 시간은 몇 시예요?"]
+    labels: [temperature, bye, time]
+  - case: unambiguous_mixed
+    turns: ["넌 뭐 할 수 있어?", "아까 답 틀렸어", "만나서 반갑습니다"]
+    labels: [help, negative_feedback, greeting]
+  - case: unambiguous_mixed
+    turns: ["비가 오늘 많이 와요?", "먼저 가보겠습니다", "앗 잠깐, 똑똑하네"]
+    labels: [weather, bye, compliment]
+  - case: unambiguous_mixed
+    turns: ["몇 시인지 알려줘", "고맙네요", "똑똑하다", "처음 뵙겠습니다"]
+    labels: [time, thanks, compliment, greeting]
+  - case: unambiguous_mixed
+    turns: ["기온은요?", "그만 가보겠습니다", "아니 잠깐, 넌 어떤 일을 할 수 있니?", "고마워 정말"]
+    labels: [temperature, bye, help, thanks]

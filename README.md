@@ -1,74 +1,36 @@
-# LASA-based Chatbot Engine
+# chatcore
 
 **English** | [한국어](README.ko.md)
 
-A chatbot engine built on the LASA (Listen-Analyze-Solve-Answer) framework.
+An LLM-free, scenario-based chatbot engine that runs on your own machine. Bots are data —
+intents with example sentences, entities with synonyms, scenarios, response templates — and the
+engine understands Korean input with a frozen sentence-embedding model plus a small classifier,
+then follows the scenario deterministically. A builder UI for editing that data comes later.
 
-## What is LASA?
+> Status: Phase 1 (project skeleton). The engine core is built from Phase 2 on.
+> Design and roadmap: [docs/engine-core-plan.md](docs/engine-core-plan.md).
 
-LASA is a framework for building effective chatbot systems, composed of four stages:
+## Quick start
 
-1. **Listen**: receive and preprocess the user's input.
-2. **Analyze**: extract the user's intent and related entities.
-3. **Solve**: resolve the analyzed intent and shape a response strategy.
-4. **Answer**: generate the final response and deliver it to the user.
+Requires [uv](https://docs.astral.sh/uv/) and `make`. Python 3.14 is installed by uv.
 
-## System structure
-
-```
-com.yk.chatbot
-├── controller
-│   └── ChatbotController.java    # REST API controller
-├── dto
-│   ├── ChatRequest.java          # request DTO
-│   └── ChatResponse.java         # response DTO
-├── lasa                          # LASA framework interfaces
-│   ├── Listen.java               # listen interface
-│   ├── Analyze.java              # analyze interface
-│   ├── AnalysisResult.java       # analysis result class
-│   ├── Solve.java                # solve interface
-│   ├── SolutionResult.java       # solution result class
-│   ├── Answer.java               # answer interface
-│   └── impl                      # implementations
-│       ├── SimpleListener.java   # default listener
-│       ├── SimpleAnalyzer.java   # default analyzer
-│       ├── SimpleSolver.java     # default solver
-│       └── SimpleAnswerer.java   # default answerer
-└── service
-    └── LasaChatbotService.java   # LASA-based chatbot service
+```sh
+make setup   # uv sync --locked
+make check   # ruff + mypy (strict, src/) + pytest — the same as CI
 ```
 
-## API usage
+Optional:
 
-### Request
-
-```http
-POST /api/v1/chat
-Content-Type: application/json
-
-{
-  "message": "How's the weather today?"
-}
+```sh
+make db-up   # Postgres 17 + pgvector on 127.0.0.1:5432 (Docker), used from Phase 2
+make bench   # Phase 0 NLU benchmark — Apple Silicon, downloads models, ~10 min
 ```
 
-### Response
+## Layout
 
-```json
-{
-  "reply": "It is currently sunny in Seoul, 23°C.",
-  "intent": "weather"
-}
-```
-
-## Extending
-
-To add a new intent or extend functionality:
-
-1. Add the new intent pattern in `SimpleAnalyzer`
-2. Implement handling logic for the new intent in `SimpleSolver`
-3. Add new DTOs / entity types as needed
-
-## Dependencies
-
-- Spring Boot
-- Lombok
+| Path | What |
+|---|---|
+| `src/chatcore/` | engine package (empty until Phase 2) |
+| `bots/sample/nlu.yaml` | sample bot NLU data (source of truth) |
+| `bench/` | NLU benchmarks and test sets |
+| `docs/` | plan and benchmark reports |

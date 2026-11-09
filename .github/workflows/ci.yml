@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3  # no moving major tag upstream; pin the release
+        with:
+          enable-cache: true
+      - name: Install (Python version from .python-version, locked deps, CPU torch)
+        run: make setup
+      - name: Lint, type-check, test
+        run: make check
