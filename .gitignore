@@ -8,6 +8,9 @@ __pycache__/
 dist/
 build/
 
+# Trained models (make train)
+artifacts/
+
 # Local scratch (benchmarks, fresh-clone checks)
 .claude/tmp/
 

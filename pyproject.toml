@@ -60,3 +60,7 @@ select = ["E", "F", "I", "B", "UP"]
 strict = true
 files = ["src"]
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]  # libraries without type information
+module = ["kiwipiepy.*", "kiwipiepy", "sklearn.*", "sentence_transformers.*", "scipy.*"]
+ignore_missing_imports = true

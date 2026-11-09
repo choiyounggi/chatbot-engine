@@ -122,7 +122,9 @@ def validate(bot: BotDefinition, actions: Iterable[str] | None = None) -> Report
     for sid, sc in bot.scenarios.items():
         where = f"scenario {sid}"
         if sc.trigger is not None:
-            if sc.trigger.intent not in bot.intents:
+            if sc.trigger.intent == "out_of_scope":
+                errors.append(f"{where}: out_of_scope cannot trigger a scenario (it is the fallback)")
+            elif sc.trigger.intent not in bot.intents:
                 errors.append(f"{where}: trigger intent {sc.trigger.intent!r} is not defined")
             elif sc.trigger.intent in triggered:
                 errors.append(f"{where}: intent {sc.trigger.intent!r} already triggers {triggered[sc.trigger.intent]}")

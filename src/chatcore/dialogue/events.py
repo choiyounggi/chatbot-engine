@@ -33,6 +33,7 @@ class UserUttered(_Event):
 class CommandsReceived(_Event):
     type: Literal["commands_received"] = "commands_received"
     commands: list[dict[str, Any]]
+    nlu: dict[str, Any] = Field(default_factory=dict)  # how the commands were derived (for logs and the builder)
 
 
 class CommandRejected(_Event):
