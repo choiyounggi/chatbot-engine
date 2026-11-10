@@ -72,7 +72,8 @@ def utc_now() -> dt.datetime:
 class TurnProcessor:
     def __init__(self, bot: BotDefinition, store: TrackerStore, interpreter: Interpreter,
                  actions: ActionRegistry, rng: random.Random | None = None, clock: Clock = utc_now) -> None:
-        report = validate(bot, actions.names())
+        # the registry may already hold this bot's own HTTP skills (BotHost.actions_for): they are not clashes
+        report = validate(bot, actions.names() - set(bot.skills))
         if report.errors:
             raise BotError(report.errors)
         self.bot, self.store, self.interpreter, self.clock = bot, store, interpreter, clock
