@@ -25,7 +25,7 @@ from chatcore.store.memory import InMemoryStore
 from chatcore.training_queue import group, key
 
 from .conftest import SAMPLE
-from .test_builder import B, draft, finish, postgres_repository, save, say, ship, trained_sample  # noqa: F401
+from .test_builder import B, draft, finish, postgres_repository, save, say, ship
 from .test_turn_and_store import STORES
 
 T0 = dt.datetime(2026, 11, 10, 9, 0, tzinfo=dt.UTC)
