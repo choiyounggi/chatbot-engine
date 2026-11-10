@@ -45,6 +45,33 @@
         "title": "ActionStep",
         "type": "object"
       },
+      "AddExamplesIn": {
+        "properties": {
+          "intent": {
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "title": "Intent",
+            "type": "string"
+          },
+          "texts": {
+            "items": {
+              "maxLength": 1000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Texts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "texts",
+          "intent"
+        ],
+        "title": "AddExamplesIn",
+        "type": "object"
+      },
       "BasicCard": {
         "additionalProperties": false,
         "properties": {
@@ -175,6 +202,7 @@
             "default": {
               "ambiguity_margin": 0.1,
               "intent_threshold": 0.3,
+              "keyword_match": false,
               "max_attempts": 3,
               "max_stack_depth": 5,
               "max_steps_per_turn": 20,
@@ -440,6 +468,70 @@
         "title": "Carousel",
         "type": "object"
       },
+      "ChangeOut": {
+        "properties": {
+          "action": {
+            "enum": [
+              "added",
+              "removed",
+              "changed"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "area": {
+            "enum": [
+              "bot",
+              "settings",
+              "system",
+              "block",
+              "intent",
+              "entity",
+              "response"
+            ],
+            "title": "Area",
+            "type": "string"
+          },
+          "examples_added": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Examples Added"
+          },
+          "examples_removed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Examples Removed"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "area",
+          "id",
+          "label",
+          "action"
+        ],
+        "title": "ChangeOut",
+        "type": "object"
+      },
       "CollectStep": {
         "additionalProperties": false,
         "properties": {
@@ -585,6 +677,53 @@
         "title": "DraftSavedOut",
         "type": "object"
       },
+      "EditOut": {
+        "properties": {
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeOut"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "saved_at": {
+            "title": "Saved At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "saved_at",
+          "changes"
+        ],
+        "title": "EditOut",
+        "type": "object"
+      },
+      "EditsOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EditOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bot",
+          "items"
+        ],
+        "title": "EditsOut",
+        "type": "object"
+      },
       "Escape": {
         "additionalProperties": false,
         "description": "Kakao's 탈출 block: these exact phrases end every running scenario.",
@@ -667,6 +806,11 @@
       "Intent": {
         "additionalProperties": false,
         "properties": {
+          "exact_only": {
+            "default": false,
+            "title": "Exact Only",
+            "type": "boolean"
+          },
           "examples": {
             "items": {
               "type": "string"
@@ -887,6 +1031,90 @@
         "title": "LiveOut",
         "type": "object"
       },
+      "MarkOut": {
+        "properties": {
+          "intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "marked_at": {
+            "title": "Marked At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "ignored",
+              "added"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "text",
+          "status",
+          "intent",
+          "marked_at"
+        ],
+        "title": "MarkOut",
+        "type": "object"
+      },
+      "MarkedOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "marked": {
+            "title": "Marked",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bot",
+          "marked"
+        ],
+        "title": "MarkedOut",
+        "type": "object"
+      },
+      "MarksOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MarkOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bot",
+          "items"
+        ],
+        "title": "MarksOut",
+        "type": "object"
+      },
       "MessageIn": {
         "properties": {
           "block_id": {
@@ -1094,6 +1322,7 @@
           "matched_by": {
             "enum": [
               "exact",
+              "keyword",
               "classifier"
             ],
             "title": "Matched By",
@@ -1425,6 +1654,26 @@
         "title": "Scenario",
         "type": "object"
       },
+      "SentencesIn": {
+        "properties": {
+          "texts": {
+            "items": {
+              "maxLength": 1000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Texts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "texts"
+        ],
+        "title": "SentencesIn",
+        "type": "object"
+      },
       "SessionTimeout": {
         "additionalProperties": false,
         "description": "A session idle longer than this starts over at its next message (Kakao: 최대 대기 시간).",
@@ -1470,6 +1719,11 @@
             "title": "Intent Threshold",
             "type": "number"
           },
+          "keyword_match": {
+            "default": false,
+            "title": "Keyword Match",
+            "type": "boolean"
+          },
           "max_attempts": {
             "default": 3,
             "maximum": 10.0,
@@ -1497,6 +1751,24 @@
             "minimum": 0.0,
             "title": "Rerun Window",
             "type": "integer"
+          },
+          "similarity_level": {
+            "anyOf": [
+              {
+                "enum": [
+                  "low",
+                  "normal",
+                  "somewhat_high",
+                  "high",
+                  "very_high"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Similarity Level"
           },
           "similarity_threshold": {
             "default": 0.39,
@@ -1782,6 +2054,126 @@
           "messages"
         ],
         "title": "TurnOut",
+        "type": "object"
+      },
+      "UtteranceOut": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "first_seen": {
+            "title": "First Seen",
+            "type": "string"
+          },
+          "intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "last_seen": {
+            "title": "Last Seen",
+            "type": "string"
+          },
+          "rule": {
+            "title": "Rule",
+            "type": "string"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "ignored",
+              "added"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "status_intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Intent"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "text",
+          "count",
+          "sessions",
+          "first_seen",
+          "last_seen",
+          "rule",
+          "intent",
+          "score",
+          "status",
+          "status_intent"
+        ],
+        "title": "UtteranceOut",
+        "type": "object"
+      },
+      "UtterancesOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UtteranceOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "scanned": {
+            "title": "Scanned",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "bot",
+          "scanned",
+          "truncated",
+          "items"
+        ],
+        "title": "UtterancesOut",
         "type": "object"
       },
       "Validation": {
@@ -2378,6 +2770,75 @@
         "summary": "Put Draft"
       }
     },
+    "/v1/builder/bots/{bot}/edits": {
+      "get": {
+        "description": "작업이력: what each draft save changed, newest first.",
+        "operationId": "edits_v1_builder_bots__bot__edits_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EditsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edits"
+      }
+    },
     "/v1/builder/bots/{bot}/misunderstood": {
       "get": {
         "description": "Recent messages the bot could not handle — candidates for new examples.",
@@ -2720,6 +3181,441 @@
           }
         },
         "summary": "Test Open"
+      }
+    },
+    "/v1/builder/bots/{bot}/utterances": {
+      "get": {
+        "description": "학습대기: what users said in [since, until), grouped by sentence, most frequent first.\nTest-chat sessions are not included. Reads at most the newest UTTERANCE_SCAN messages.",
+        "operationId": "utterances_v1_builder_bots__bot__utterances_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
+            }
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Until"
+            }
+          },
+          {
+            "in": "query",
+            "name": "rule",
+            "required": false,
+            "schema": {
+              "default": "misunderstood",
+              "enum": [
+                "misunderstood",
+                "all"
+              ],
+              "title": "Rule",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "intent",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Intent"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": "pending",
+              "enum": [
+                "pending",
+                "ignored",
+                "added",
+                "all"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UtterancesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Utterances"
+      }
+    },
+    "/v1/builder/bots/{bot}/utterances/add": {
+      "post": {
+        "description": "Add sentences to an intent of the draft as examples, like a save: needs the draft's ETag\n(428 without, 412 when it moved on). 404 unknown intent, 409 already another intent's example.",
+        "operationId": "add_examples_v1_builder_bots__bot__utterances_add_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "if-match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddExamplesIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DraftSavedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Examples"
+      }
+    },
+    "/v1/builder/bots/{bot}/utterances/ignore": {
+      "post": {
+        "description": "Hide sentences from the queue (they come back with \"restore\").",
+        "operationId": "ignore_v1_builder_bots__bot__utterances_ignore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SentencesIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarkedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ignore"
+      }
+    },
+    "/v1/builder/bots/{bot}/utterances/marks": {
+      "get": {
+        "description": "학습이력: sentences added, ignored or restored, newest first.",
+        "operationId": "marks_v1_builder_bots__bot__utterances_marks_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarksOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Marks"
+      }
+    },
+    "/v1/builder/bots/{bot}/utterances/restore": {
+      "post": {
+        "operationId": "restore_v1_builder_bots__bot__utterances_restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SentencesIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarkedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore"
       }
     },
     "/v1/builder/bots/{bot}/versions": {

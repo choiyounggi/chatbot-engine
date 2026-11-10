@@ -4,14 +4,28 @@ import numpy as np
 import pytest
 from sklearn.linear_model import LogisticRegression
 
-from chatcore.nlu.model import OOS, CachedEmbedder, IntentClassifier, ModelMismatch, NluModel
+from chatcore.nlu.model import (
+    OOS,
+    CachedEmbedder,
+    IntentClassifier,
+    ModelMismatch,
+    NluModel,
+    Thresholds,
+    with_thresholds,
+)
 from chatcore.nlu.train import (
     CAP_RATIO,
+    LEVEL_TARGETS,
     TrainingError,
+    _decide_batch,
+    _search_thresholds,
+    classifier_intents,
+    confusable_intents,
     entity_forms,
     evaluate,
     expand,
     fill,
+    fit_only,
     format_report,
     main,
     near_duplicate_groups,
@@ -214,3 +228,214 @@ def test_classifier_data_errors_become_training_errors(sample_bot, fake_embedder
     with pytest.raises(TrainingError, match="in-scope"):
         fit_only(sample_bot, CachedEmbedder(fake_embedder), tmp_path)
     assert not list(tmp_path.iterdir())  # nothing half-saved
+
+
+# ---------------------------------------------------------------- E13: exact_only intents
+
+
+def test_classifier_intents_excludes_exact_only(sample_bot):
+    marked = sample_bot.model_copy(update={"intents": {
+        **sample_bot.intents, "thanks": sample_bot.intents["thanks"].model_copy(update={"exact_only": True})}})
+    intents = classifier_intents(marked)
+    assert "thanks" not in intents and set(intents) == set(sample_bot.intents) - {"thanks"}
+
+
+def test_evaluate_excludes_exact_only_intents_from_cv_and_the_few_examples_check(sample_bot, fake_embedder):
+    marked = sample_bot.model_copy(update={"intents": {
+        **sample_bot.intents, "thanks": sample_bot.intents["thanks"].model_copy(
+            update={"examples": ["고마워"], "exact_only": True})}})
+    report = evaluate(marked, fake_embedder)  # a non-exact_only intent with 1 example would raise "at least 5"
+    assert "thanks" not in report.per_intent_f1
+
+
+def test_fit_only_errors_when_exact_only_leaves_fewer_than_two_classifier_intents(sample_bot, fake_embedder, tmp_path):
+    one_left = sample_bot.model_copy(update={"intents": {
+        "weather": sample_bot.intents["weather"],
+        "greeting": sample_bot.intents["greeting"].model_copy(update={"exact_only": True}),
+    }})
+    with pytest.raises(TrainingError, match="two intents"):
+        fit_only(one_left, CachedEmbedder(fake_embedder), tmp_path)
+
+
+def test_exact_only_intent_still_matches_exactly(sample_bot, fake_embedder, extractor, tmp_path):
+    marked = sample_bot.model_copy(update={"intents": {
+        **sample_bot.intents, "thanks": sample_bot.intents["thanks"].model_copy(update={"exact_only": True})}})
+    directory, _ = train(marked, CachedEmbedder(fake_embedder), tmp_path)
+    model = NluModel.load(marked, directory, fake_embedder, extractor)
+    literal = next(ex for ex in marked.intents["thanks"].examples if "{" not in ex)
+    result = model.parse(literal)
+    assert result.matched_by == "exact" and result.intents[0].intent == "thanks"
+
+
+# ---------------------------------------------------------------- E13: confusable intents
+
+
+def test_confusable_intents_finds_identical_examples_and_sorts_by_similarity(sample_bot, fake_embedder):
+    bot = sample_bot.model_copy(update={"intents": {
+        "greeting": sample_bot.intents["greeting"].model_copy(update={"examples": ["안녕하세요"]}),
+        "weather": sample_bot.intents["weather"].model_copy(update={"examples": ["안녕하세요"]}),
+        "bye": sample_bot.intents["bye"].model_copy(update={"examples": ["완전히 다른 문장입니다 그리고 아주 길다"]}),
+        "out_of_scope": sample_bot.intents["out_of_scope"],
+    }})
+    pairs = confusable_intents(bot, fake_embedder, threshold=0.999)
+    assert len(pairs) == 1 and (pairs[0].a, pairs[0].b) == ("greeting", "weather")
+    assert pairs[0].similarity == pytest.approx(1.0) and (pairs[0].example_a, pairs[0].example_b) == ("안녕하세요", "안녕하세요")
+
+
+def test_confusable_intents_needs_at_least_two_in_scope_intents(sample_bot, fake_embedder):
+    one = sample_bot.model_copy(update={"intents": {"weather": sample_bot.intents["weather"]}})
+    assert confusable_intents(one, fake_embedder) == []
+
+
+def test_train_report_and_meta_include_confusable_pairs(sample_bot, fake_embedder, tmp_path):
+    directory, report = train(sample_bot, CachedEmbedder(fake_embedder), tmp_path)
+    assert isinstance(report.confusable, list)
+    meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+    assert "confusable" in meta and "thresholds" in meta
+
+
+# ---------------------------------------------------------------- E13: similarity_level search
+
+
+def test_search_thresholds_tie_break_prefers_the_lowest_thresholds():
+    classes = (OOS, "a")
+    probs = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)  # OOS always rejected, "a" always accepted
+    sims = np.array([0.0, 1.0], dtype=np.float32)
+    thresholds, warning = _search_thresholds([(probs, sims, classes, [OOS, "a"])], "low", ambiguity_margin=0.1)
+    assert warning is None
+    assert (thresholds.intent_threshold, thresholds.similarity_threshold) == (0.0, 0.0)
+
+
+def test_search_thresholds_meets_the_target_without_hurting_in_scope_recall():
+    classes = (OOS, "a", "b")
+    probs = np.array([
+        [0.1, 0.6, 0.3],    # OOS row the classifier is fooled by, at 0.6
+        [0.2, 0.5, 0.3],    # OOS row the classifier is fooled by, at 0.5
+        [0.1, 0.8, 0.1],    # true "a", confidently
+        [0.05, 0.15, 0.8],  # true "b", confidently
+    ], dtype=np.float32)
+    sims = np.array([0.5, 0.3, 0.9, 0.85], dtype=np.float32)
+    true = [OOS, OOS, "a", "b"]
+    folds = [(probs, sims, classes, true)]
+    thresholds, warning = _search_thresholds(folds, "normal", ambiguity_margin=0.1)  # target 0.90
+    assert warning is None and thresholds.level == "normal"
+    y_pred = _decide_batch(probs, sims, classes, thresholds.intent_threshold, thresholds.similarity_threshold, 0.1)
+    oos_rows = [p for t, p in zip(true, y_pred, strict=True) if t == OOS]
+    in_rows = [(t, p) for t, p in zip(true, y_pred, strict=True) if t != OOS]
+    assert sum(p == OOS for p in oos_rows) / len(oos_rows) >= LEVEL_TARGETS["normal"]
+    assert sum(p == t for t, p in in_rows) / len(in_rows) == 1.0  # both in-scope rows still decided correctly
+
+
+def test_search_thresholds_falls_back_with_a_warning_when_the_target_is_unreachable():
+    classes = (OOS, "a")
+    # neither row can ever be rejected: probability and similarity are both above the whole grid
+    probs = np.array([[0.05, 0.95], [0.05, 0.95]], dtype=np.float32)
+    sims = np.array([0.96, 0.96], dtype=np.float32)
+    thresholds, warning = _search_thresholds([(probs, sims, classes, [OOS, "a"])], "very_high", ambiguity_margin=0.1)
+    assert warning is not None and "very_high" in warning
+    assert thresholds.level == "very_high"
+
+
+def test_evaluate_with_similarity_level_but_no_out_of_scope_examples_warns_and_keeps_document_numbers(
+        sample_bot, fake_embedder):
+    no_oos = sample_bot.model_copy(update={
+        "settings": sample_bot.settings.model_copy(update={"similarity_level": "high"}),
+        "intents": {k: v for k, v in sample_bot.intents.items() if k != OOS},
+    })
+    report = evaluate(no_oos, fake_embedder)
+    assert report.thresholds.level is None
+    assert report.thresholds.intent_threshold == sample_bot.settings.intent_threshold
+    assert any("no out_of_scope examples" in w for w in report.warnings)
+
+
+def test_evaluate_with_similarity_level_searches_thresholds(sample_bot, fake_embedder):
+    leveled = sample_bot.model_copy(
+        update={"settings": sample_bot.settings.model_copy(update={"similarity_level": "low"})})
+    report = evaluate(leveled, fake_embedder)
+    assert report.thresholds.level == "low"
+    assert report.oos_recall is not None and report.in_scope_recall is not None
+    if not any("targets out-of-scope rejection" in w for w in report.warnings):
+        assert report.oos_recall >= LEVEL_TARGETS["low"]
+
+
+def test_similarity_levels_are_monotonic_in_rejection_and_recall(sample_bot, fake_embedder):
+    """Raising the level never lowers the achieved out-of-scope rejection and never raises
+    in-scope recall (docs/engine-core-plan.md "빌더 단계 E-B4")."""
+    results = []
+    for level in ("low", "normal", "somewhat_high", "high", "very_high"):
+        leveled = sample_bot.model_copy(
+            update={"settings": sample_bot.settings.model_copy(update={"similarity_level": level})})
+        report = evaluate(leveled, fake_embedder)
+        results.append((report.oos_recall, report.in_scope_recall))
+    rejections = [r for r, _ in results]
+    recalls = [c for _, c in results]
+    assert all(a <= b + 1e-9 for a, b in zip(rejections[:-1], rejections[1:], strict=True))
+    assert all(a >= b - 1e-9 for a, b in zip(recalls[:-1], recalls[1:], strict=True))
+
+
+def test_fit_only_meta_records_document_thresholds_with_a_null_level(sample_bot, fake_embedder, tmp_path):
+    directory = fit_only(sample_bot, CachedEmbedder(fake_embedder), tmp_path)
+    meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+    s = sample_bot.settings
+    assert meta["thresholds"] == {"intent_threshold": s.intent_threshold, "similarity_threshold": s.similarity_threshold,
+                                  "ambiguity_margin": s.ambiguity_margin, "level": None}
+
+
+# ---------------------------------------------------------------- E13: thresholds applied at load
+
+
+def test_with_thresholds_changes_settings_but_keeps_the_bot_version(sample_bot):
+    th = Thresholds(0.5, 0.6, 0.2, "high")
+    served = with_thresholds(sample_bot, th)
+    assert served.version == sample_bot.version
+    assert (served.settings.intent_threshold, served.settings.similarity_threshold,
+            served.settings.ambiguity_margin) == (0.5, 0.6, 0.2)
+    assert served.settings.rerun_window == sample_bot.settings.rerun_window  # untouched
+
+
+def test_nlu_model_thresholds_reads_meta_or_falls_back_to_the_document(sample_bot):
+    raw = {"thresholds": {"intent_threshold": 0.5, "similarity_threshold": 0.6, "ambiguity_margin": 0.2,
+                          "level": "high"}}
+    assert NluModel.thresholds(raw, sample_bot) == Thresholds(0.5, 0.6, 0.2, "high")
+    s = sample_bot.settings
+    assert NluModel.thresholds({}, sample_bot) == Thresholds(s.intent_threshold, s.similarity_threshold,
+                                                              s.ambiguity_margin, None)
+
+
+def test_nlu_model_load_applies_the_stored_thresholds(sample_bot, fake_embedder, extractor, tmp_path):
+    directory, _ = train(sample_bot, CachedEmbedder(fake_embedder), tmp_path)
+    meta_path = directory / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["thresholds"] = {"intent_threshold": 0.77, "similarity_threshold": 0.11, "ambiguity_margin": 0.05,
+                          "level": "very_high"}
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    model = NluModel.load(sample_bot, directory, fake_embedder, extractor)
+    assert (model.bot.settings.intent_threshold, model.bot.settings.similarity_threshold,
+            model.bot.settings.ambiguity_margin) == (0.77, 0.11, 0.05)
+    assert model.bot.version == sample_bot.version
+
+
+def test_nlu_model_load_without_a_thresholds_key_uses_the_document_numbers(sample_bot, fake_embedder, extractor, tmp_path):
+    """An older training's meta.json, saved before this field existed."""
+    directory, _ = train(sample_bot, CachedEmbedder(fake_embedder), tmp_path)
+    meta_path = directory / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    del meta["thresholds"]
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    model = NluModel.load(sample_bot, directory, fake_embedder, extractor)
+    assert model.bot.settings.intent_threshold == sample_bot.settings.intent_threshold
+    assert model.bot.settings.similarity_threshold == sample_bot.settings.similarity_threshold
+
+
+@pytest.mark.parametrize("thresholds", [{"intent_threshold": 0.3}, {"intent_threshold": "x", "similarity_threshold": 0.4,
+                                                                   "ambiguity_margin": 0.1}, "broken"])
+def test_a_malformed_thresholds_entry_in_meta_is_a_model_mismatch(sample_bot, fake_embedder, tmp_path, thresholds):
+    directory = fit_only(sample_bot, CachedEmbedder(fake_embedder), tmp_path)
+    meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+    meta["thresholds"] = thresholds
+    (directory / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    if isinstance(thresholds, dict):
+        with pytest.raises(ModelMismatch, match="thresholds"):
+            NluModel.load(sample_bot, directory, fake_embedder)
+    else:  # not even a mapping: treated like an older model without stored thresholds
+        assert NluModel.load(sample_bot, directory, fake_embedder).bot.settings == sample_bot.settings

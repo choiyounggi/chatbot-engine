@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 
 from chatcore.bot.schema import BotDefinition
 from chatcore.nlu.entities import EntityExtractor, EntityMatch, bare, normalize
+from chatcore.nlu.keyword import KeywordMatcher
 
 OOS = "out_of_scope"
 FloatArray = NDArray[np.float32]
@@ -145,7 +146,7 @@ class NluResult:
     intents: tuple[IntentScore, ...]  # best first; exact matches have score 1.0
     similarity: float  # max cosine to an in-scope training example (1.0 for exact matches)
     entities: tuple[EntityMatch, ...]
-    matched_by: str  # "exact" | "classifier"
+    matched_by: str  # "exact" | "keyword" | "classifier"
 
     @property
     def top(self) -> IntentScore:
@@ -168,6 +169,41 @@ class ModelMismatch(ValueError):
     """The stored model was trained for another bot version or embedding model."""
 
 
+def keyword_keys(bot: BotDefinition, matcher: KeywordMatcher) -> dict[tuple[str, ...], list[str]]:
+    """Core-morpheme key -> the intents whose literal examples reduce to it (sorted, unique)."""
+    owners: dict[tuple[str, ...], set[str]] = {}
+    for intent, spec in bot.intents.items():
+        for example in spec.examples:
+            if "{" not in example:  # templates are not literal sentences
+                key = matcher.morphemes(example)
+                if key:
+                    owners.setdefault(key, set()).add(intent)
+    return {key: sorted(names) for key, names in owners.items()}
+
+
+@dataclass(frozen=True)
+class Thresholds:
+    """The OOS-decision thresholds a model was evaluated at (bot/schema.py Settings.similarity_level,
+    docs/engine-core-plan.md "빌더 단계 E-B4"). `level` is None for the document's own numbers
+    (no level asked, or deploy training found no out_of_scope examples to search against)."""
+
+    intent_threshold: float
+    similarity_threshold: float
+    ambiguity_margin: float
+    level: str | None = None
+
+
+def with_thresholds(bot: BotDefinition, thresholds: Thresholds) -> BotDefinition:
+    """`bot` with its settings' thresholds replaced (the version is the document's content hash,
+    so it is unaffected by this in-memory override)."""
+    settings = bot.settings.model_copy(update={
+        "intent_threshold": thresholds.intent_threshold,
+        "similarity_threshold": thresholds.similarity_threshold,
+        "ambiguity_margin": thresholds.ambiguity_margin,
+    })
+    return bot.model_copy(update={"settings": settings})
+
+
 @dataclass
 class NluModel:
     bot: BotDefinition
@@ -176,28 +212,56 @@ class NluModel:
     extractor: EntityExtractor
     today: Callable[[], dt.date] = dt.date.today
     _exact: dict[str, str] = field(init=False, default_factory=dict)
+    _keyword: dict[tuple[str, ...], str] = field(init=False, default_factory=dict)
+    _matcher: KeywordMatcher | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         for intent, spec in self.bot.intents.items():
             for example in spec.examples:
                 if "{" not in example:  # templates are not literal sentences
                     self._exact.setdefault(bare(example), intent)
+        if self.bot.settings.keyword_match:
+            self._matcher = KeywordMatcher()
+            self._keyword = {key: owners[0] for key, owners in keyword_keys(self.bot, self._matcher).items()
+                             if len(owners) == 1}  # a key two intents share decides nothing
 
     def parse(self, text: str) -> NluResult:
         entities = tuple(self.extractor.extract(text, self.today()))
         exact = self._exact.get(bare(text))
         if exact is not None:
             return NluResult(text, (IntentScore(exact, 1.0),), 1.0, entities, "exact")
+        if self._matcher is not None:
+            key = self._matcher.morphemes(text)
+            keyword = self._keyword.get(key) if key else None
+            if keyword is not None:
+                return NluResult(text, (IntentScore(keyword, 1.0),), 1.0, entities, "keyword")
         probs, sims = self.classifier.predict(self.embedder.encode([normalize(text)]))  # as in training
         order = np.argsort(-probs[0])
         intents = tuple(IntentScore(self.classifier.classes[i], float(probs[0, i])) for i in order)
         return NluResult(text, intents, float(sims[0]), entities, "classifier")
 
+    @staticmethod
+    def thresholds(meta: dict[str, Any], bot: BotDefinition) -> Thresholds:
+        """The thresholds the stored model was evaluated at: meta.json's `thresholds` (deploy
+        training, docs/engine-core-plan.md "빌더 단계 E-B4") when present, else the bot document's
+        own settings (test builds, and models trained before this field existed)."""
+        raw = meta.get("thresholds")
+        if not isinstance(raw, dict):
+            s = bot.settings
+            return Thresholds(s.intent_threshold, s.similarity_threshold, s.ambiguity_margin, None)
+        try:
+            level = raw.get("level")
+            return Thresholds(float(raw["intent_threshold"]), float(raw["similarity_threshold"]),
+                              float(raw["ambiguity_margin"]), level if isinstance(level, str) else None)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ModelMismatch(f"meta.json has unreadable thresholds {raw!r}; train again") from exc
+
     @classmethod
     def load(cls, bot: BotDefinition, directory: Path, embedder: Embedder, extractor: EntityExtractor | None = None,
              today: Callable[[], dt.date] = dt.date.today) -> NluModel:
-        cls.check(bot, directory, embedder)
-        return cls(bot, IntentClassifier.load(directory / "classifier.npz"), embedder,
+        meta = cls.check(bot, directory, embedder)
+        served = with_thresholds(bot, cls.thresholds(meta, bot))
+        return cls(served, IntentClassifier.load(directory / "classifier.npz"), embedder,
                    extractor or EntityExtractor(bot), today)
 
     @staticmethod

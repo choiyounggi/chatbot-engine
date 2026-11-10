@@ -32,6 +32,12 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+# Builder's 5-step similarity dial (engine-core-plan.md "빌더 단계 E-B4"): a target out-of-scope
+# rejection rate, not a fixed number. Deploy training searches intent_threshold/similarity_threshold
+# for the pair that best meets it (chatcore.nlu.train._search_thresholds).
+SimilarityLevel = Literal["low", "normal", "somewhat_high", "high", "very_high"]
+
+
 class Settings(Model):
     intent_threshold: float = Field(0.30, ge=0, le=1)
     similarity_threshold: float = Field(0.39, ge=0, le=1)
@@ -42,11 +48,19 @@ class Settings(Model):
     max_attempts: int = Field(3, ge=1, le=10)  # failed re-asks of one slot before giving up
     max_steps_per_turn: int = Field(20, ge=1, le=200)
     max_stack_depth: int = Field(5, ge=1, le=20)
+    # None: intent_threshold/similarity_threshold above are used as given (today's behaviour).
+    # Set: deploy training ignores them and searches for thresholds meeting this level's target
+    # out-of-scope rejection rate (needs the bot to have out_of_scope examples).
+    similarity_level: SimilarityLevel | None = None
+    keyword_match: bool = False  # core-morpheme exact match in addition to literal text (nlu/keyword.py)
 
 
 class Intent(Model):
     label: str = ""
     examples: list[str] = Field(min_length=1)
+    # left out of classifier training and cross-validation (still needs >= 2 non-exact_only
+    # intents to train); its examples still match exactly, by text and by keyword match
+    exact_only: bool = False
 
 
 class DictionaryEntity(Model):

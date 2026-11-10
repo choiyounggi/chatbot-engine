@@ -12,6 +12,7 @@ without restarting (docs/engine-core-plan.md §3.1, Phase 6):
 
 from __future__ import annotations
 
+import copy
 import logging
 import shutil
 import threading
@@ -24,16 +25,17 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from chatcore.actions.builtin import builtin_registry
+from chatcore.bot.changes import summarize
 from chatcore.bot.loader import BotError, bot_from_document, read_document, validate
-from chatcore.bot.repository import BotRepository, VersionInfo
+from chatcore.bot.repository import BotRepository, RevisionConflict, VersionInfo
 from chatcore.bot.schema import BotDefinition
 from chatcore.dialogue.events import SessionStarted
 from chatcore.dialogue.turn import TurnProcessor
 from chatcore.dialogue.values import ActionRegistry
-from chatcore.nlu.entities import EntityExtractor
+from chatcore.nlu.entities import EntityExtractor, bare
 from chatcore.nlu.interpreter import NluInterpreter
 from chatcore.nlu.model import CachedEmbedder, Embedder, ModelMismatch, NluModel
-from chatcore.nlu.train import Report, fit_only, train
+from chatcore.nlu.train import ConfusablePair, Report, confusable_intents, fit_only, train
 from chatcore.runtime import BotRuntime
 from chatcore.store.base import TrackerStore
 
@@ -78,6 +80,30 @@ class NoDraft(Exception):
 
 class NoEarlierDeployment(Exception):
     """Rollback asked for, but the bot has never been deployed with a different version."""
+
+
+def unique_sentences(texts: list[str]) -> list[tuple[str, str]]:
+    """(key, text) per distinct sentence (first spelling wins), for marks."""
+    seen: dict[str, str] = {}
+    for t in texts:
+        seen.setdefault(bare(t), t)
+    return list(seen.items())
+
+
+class BadExample(ValueError):
+    """Sentences that cannot be examples: nothing left after trimming, or template braces."""
+
+    def __init__(self, texts: list[str]) -> None:
+        super().__init__(f"cannot be examples: {texts}")
+        self.texts = texts
+
+
+class ExampleTaken(ValueError):
+    """Sentences that are already examples of another intent (one sentence cannot train two)."""
+
+    def __init__(self, texts: list[str]) -> None:
+        super().__init__(f"already examples of another intent: {texts}")
+        self.texts = texts
 
 
 class NotTrained(ValueError):
@@ -176,13 +202,50 @@ class BotHost:
         return DraftCheck(bot.version, report.errors, report.warnings)
 
     def save_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None) -> DraftCheck:
-        """Save even an invalid draft (a builder saves work in progress); report its problems.
-        RevisionConflict when expected_revision is given and the stored draft moved on."""
+        """Save even an invalid draft (a builder saves work in progress); report its problems and
+        record what changed (작업이력). RevisionConflict when expected_revision is given and the
+        stored draft moved on (then the summary, made against the draft we read, is not stored)."""
         if document.get("id") != bot_id:
             raise BotError([f"the document's id must be {bot_id!r}"])
         check = self.check_draft(document)
-        revision = self.repository.save_draft(bot_id, document, expected_revision)
+        before = self.repository.draft(bot_id)
+        changes = summarize(before.document if before is not None else None, document)
+        if before is not None and expected_revision is not None and before.revision != expected_revision:
+            raise RevisionConflict(before.revision)
+        revision = self.repository.save_draft(bot_id, document, expected_revision, [dict(c) for c in changes])
         return DraftCheck(check.version, check.errors, check.warnings, revision)
+
+    def add_examples(self, bot_id: str, texts: list[str], intent: str, expected_revision: int) -> DraftCheck:
+        """Add sentences from the training queue to an intent of the draft as examples (ones it
+        already has are skipped) and mark them added. KeyError: no draft or no such intent;
+        ExampleTaken: a sentence is already an example of another intent; RevisionConflict as save_draft."""
+        draft = self.repository.draft(bot_id)
+        if draft is None:
+            raise KeyError(bot_id)
+        document = copy.deepcopy(draft.document)
+        intents = document.get("intents")
+        if not isinstance(intents, dict):
+            raise KeyError(intent)
+        target = intents.get(intent)
+        if not isinstance(target, dict) or not isinstance(target.get("examples"), list):
+            raise KeyError(intent)
+        bad = sorted({t for t in texts if not bare(t) or "{" in t or "}" in t})
+        if bad:  # empty after trimming, or template syntax ("{location}") that training would expand
+            raise BadExample(bad)
+        owner = {bare(e): name for name, spec in intents.items()
+                 if isinstance(spec, dict) and isinstance(spec.get("examples"), list)
+                 for e in spec["examples"] if isinstance(e, str)}
+        taken = sorted({t for t in texts if owner.get(bare(t), intent) != intent})
+        if taken:
+            raise ExampleTaken(taken)
+        known = {bare(e) for e in target["examples"] if isinstance(e, str)}
+        for text in texts:
+            if bare(text) not in known:
+                target["examples"].append(" ".join(text.split()))
+                known.add(bare(text))
+        check = self.save_draft(bot_id, document, expected_revision)
+        self.repository.mark_utterances(bot_id, unique_sentences(texts), "added", intent)
+        return check
 
     def train_draft(self, bot_id: str) -> tuple[VersionInfo, Report]:
         """Validate and train the draft; store it as a version if it clears min_f1."""
@@ -194,6 +257,15 @@ class BotHost:
         if directory is None:
             raise BelowBar(report, self.min_f1)
         return self.repository.add_version(bot_id, bot.version, document, report.macro_f1), report
+
+    def confusable(self, bot_id: str, build: str) -> list[ConfusablePair]:
+        """Confusable intent pairs of a test build (the document it was built from, not the draft
+        as it is now); [] when the build is unknown or expired."""
+        runtime = self.test_runtime(bot_id, build)
+        return self.confusable_of(runtime.bot) if runtime is not None else []
+
+    def confusable_of(self, bot: BotDefinition) -> list[ConfusablePair]:
+        return confusable_intents(bot, self.bulk)
 
     def deploy(self, bot_id: str, version: str, note: str = "") -> None:
         """Build the runtime first (NotTrained / VersionNotFound / BotError leave everything as
@@ -304,7 +376,10 @@ class BotHost:
                                   EntityExtractor(bot))
         except ModelMismatch as exc:
             raise NotTrained(str(exc)) from exc
-        return BotRuntime(bot, TurnProcessor(bot, self.store, NluInterpreter(model.parse), self.actions), model)
+        # model.bot carries the thresholds meta.json was trained with (NluModel.load, docs/
+        # engine-core-plan.md "빌더 단계 E-B4"), not necessarily the document's own numbers.
+        served = model.bot
+        return BotRuntime(served, TurnProcessor(served, self.store, NluInterpreter(model.parse), self.actions), model)
 
 
 def _remove(directories: list[Path]) -> None:

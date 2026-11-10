@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
-from chatcore.dialogue.events import Event
-from chatcore.store.base import SessionBusy, Tracker, check_session_id
+from chatcore.dialogue.events import CommandsReceived, Event
+from chatcore.store.base import SessionBusy, Tracker, Utterance, check_session_id
 
 
 class InMemoryStore:
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC)) -> None:
         self._events: dict[str, list[Event]] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
-        self._log: list[tuple[str, Event]] = []  # every committed event, in commit order
+        self._log: list[tuple[str, Event, dt.datetime]] = []  # every committed event, in commit order
+        self._clock = clock
 
     @contextmanager
     def session(self, session_id: str) -> Iterator[Tracker]:
@@ -29,7 +31,8 @@ class InMemoryStore:
             yield tracker
             with self._guard:
                 self._events.setdefault(session_id, []).extend(tracker.pending)
-                self._log.extend((session_id, e) for e in tracker.pending)
+                now = self._clock()
+                self._log.extend((session_id, e, now) for e in tracker.pending)
         finally:
             lock.release()
 
@@ -43,9 +46,23 @@ class InMemoryStore:
             return []
         out: list[tuple[str, Event]] = []
         with self._guard:
-            for sid, e in reversed(self._log):
+            for sid, e, _ in reversed(self._log):
                 if sid.startswith(prefix) and e.type == event_type:
                     out.append((sid, e))
+                    if len(out) >= limit:
+                        break
+        return out
+
+    def utterances(self, prefix: str, since: dt.datetime | None, until: dt.datetime | None,
+                   limit: int) -> list[Utterance]:
+        if limit < 1:
+            return []
+        out: list[Utterance] = []
+        with self._guard:
+            for sid, e, at in reversed(self._log):
+                if (isinstance(e, CommandsReceived) and sid.startswith(prefix)
+                        and (since is None or at >= since) and (until is None or at < until)):
+                    out.append(Utterance(sid, at, dict(e.nlu)))
                     if len(out) >= limit:
                         break
         return out

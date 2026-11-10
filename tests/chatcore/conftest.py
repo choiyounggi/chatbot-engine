@@ -50,6 +50,7 @@ class PooledKiwi:
 @pytest.fixture(autouse=True)
 def pooled_kiwi(monkeypatch):
     monkeypatch.setattr("chatcore.nlu.entities.Kiwi", PooledKiwi)
+    monkeypatch.setattr("chatcore.nlu.keyword.Kiwi", PooledKiwi)
 
 
 @pytest.fixture(scope="session")
@@ -92,3 +93,16 @@ class FakeEmbedder(HashingEmbedder):
 @pytest.fixture(scope="session")
 def fake_embedder():
     return FakeEmbedder()
+
+
+@pytest.fixture(scope="session")
+def trained_sample(fake_embedder, tmp_path_factory):
+    """The sample bot trained once; each test gets a copy, so seeding reuses it instead of training."""
+    from chatcore.bot.repository import InMemoryRepository
+    from chatcore.conversations import synthetic_actions
+    from chatcore.host import BotHost
+    from chatcore.store.memory import InMemoryStore
+
+    root = tmp_path_factory.mktemp("trained")
+    BotHost(InMemoryRepository(), InMemoryStore(), fake_embedder, root, actions=synthetic_actions, min_f1=0.0).seed(SAMPLE)
+    return root

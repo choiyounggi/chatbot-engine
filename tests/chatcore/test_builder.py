@@ -30,14 +30,6 @@ from .conftest import SAMPLE
 B = "/v1/builder/bots/sample"
 
 
-@pytest.fixture(scope="session")
-def trained_sample(fake_embedder, tmp_path_factory):
-    """The sample bot trained once; each test gets a copy, so seeding reuses it instead of training."""
-    root = tmp_path_factory.mktemp("trained")
-    BotHost(InMemoryRepository(), InMemoryStore(), fake_embedder, root, actions=synthetic_actions, min_f1=0.0).seed(SAMPLE)
-    return root
-
-
 @pytest.fixture
 def host(fake_embedder, tmp_path, trained_sample):
     shutil.copytree(trained_sample, tmp_path, dirs_exist_ok=True)
@@ -500,6 +492,20 @@ def test_versions_have_numbers_and_the_history_keeps_notes(client):
     assert client.post(f"{B}/deploy", json={"version": body["live"], "note": "x" * 101}).status_code == 422
 
 
+def test_train_version_result_includes_thresholds_and_confusable_pairs(client):
+    job = train(client)
+    assert job["status"] == "done", job
+    result = job["result"]
+    assert result["thresholds"]["level"] is None  # the sample bot sets no similarity_level
+    assert isinstance(result["confusable"], list)
+
+
+def test_test_build_result_includes_confusable_pairs(client):
+    job = finish(client, client.post(f"{B}/test-builds"))
+    assert job["status"] == "done", job
+    assert isinstance(job["result"]["confusable"], list)
+
+
 def test_job_endpoints_and_the_event_stream(client):
     assert client.get(f"/v1/builder/jobs/{'0' * 32}").status_code == 404
     assert client.get(f"/v1/builder/jobs/{'0' * 32}/events").status_code == 404
@@ -673,3 +679,12 @@ def test_users_open_sessions_and_press_blocks_on_the_deployed_bot(client):
     assert client.post("/v1/bots/sample/sessions/u1/messages",
                        json={"text": "x", "block_id": "Bad-Id"}).status_code == 422
     assert client.post("/v1/bots/nobot/sessions/u1/open").status_code == 404
+
+
+def test_repository_latest_marks_keeps_one_per_sentence(repository):
+    bot = f"t_{uuid.uuid4().hex[:8]}"
+    repository.mark_utterances(bot, [("a", "a"), ("b", "b")], "ignored")
+    repository.mark_utterances(bot, [("a", "a")], "added", "greeting")
+    latest = {m.key: (m.status, m.intent) for m in repository.latest_marks(bot)}
+    assert latest == {"a": ("added", "greeting"), "b": ("ignored", None)}
+    assert repository.latest_marks(f"{bot}_none") == []
