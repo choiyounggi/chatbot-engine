@@ -15,10 +15,10 @@ TEST_DB_URL = postgresql://chatcore:chatcore-local-only@127.0.0.1:$(CHATCORE_DB_
 COV = --cov=chatcore.bot --cov=chatcore.dialogue --cov=chatcore.nlu --cov=chatcore.actions --cov=chatcore.conversations --cov=chatcore.api --cov=chatcore.cli --cov=chatcore.runtime --cov=chatcore.serving --cov=chatcore.host --cov-report=term-missing:skip-covered --cov-fail-under=90
 
 test:  ## unit + conversation tests; Postgres tests skip unless CHATCORE_TEST_DATABASE_URL is set
-	uv run pytest -q $(COV)
+	uv run pytest -q --durations=25 $(COV)
 
 test-db: db-up  ## also run the Postgres store tests against the compose database
-	CHATCORE_TEST_DATABASE_URL=$(TEST_DB_URL) uv run pytest -q $(COV)
+	CHATCORE_TEST_DATABASE_URL=$(TEST_DB_URL) uv run pytest -q --durations=25 $(COV)
 
 check: lint typecheck test  ## what CI runs
 

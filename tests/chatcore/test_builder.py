@@ -26,8 +26,17 @@ from .conftest import SAMPLE
 B = "/v1/builder/bots/sample"
 
 
+@pytest.fixture(scope="session")
+def trained_sample(fake_embedder, tmp_path_factory):
+    """The sample bot trained once; each test gets a copy, so seeding reuses it instead of training."""
+    root = tmp_path_factory.mktemp("trained")
+    BotHost(InMemoryRepository(), InMemoryStore(), fake_embedder, root, actions=synthetic_actions, min_f1=0.0).seed(SAMPLE)
+    return root
+
+
 @pytest.fixture
-def host(fake_embedder, tmp_path):
+def host(fake_embedder, tmp_path, trained_sample):
+    shutil.copytree(trained_sample, tmp_path, dirs_exist_ok=True)
     h = BotHost(InMemoryRepository(), InMemoryStore(), fake_embedder, tmp_path, actions=synthetic_actions, keep=1, min_f1=0.0)
     h.seed(SAMPLE)
     return h
@@ -311,6 +320,10 @@ def test_seeding_reuses_a_model_that_is_already_trained(host, fake_embedder, tmp
         raise AssertionError("retrained a model that was already in artifacts/")
 
     monkeypatch.setattr(fresh, "train_draft", no_training)
+    loads = []
+    real_load = fresh._load
+    monkeypatch.setattr(fresh, "_load", lambda bot: loads.append(bot.version) or real_load(bot))
     assert fresh.seed(SAMPLE) == "sample" and fresh.bots() == host.bots()
+    assert loads == [host.bots()["sample"]]  # loaded once, by the deploy (a load builds a Kiwi: ~0.3 s)
     (info,) = fresh.repository.versions("sample")
     assert info.macro_f1 == host.repository.versions("sample")[0].macro_f1  # taken from meta.json

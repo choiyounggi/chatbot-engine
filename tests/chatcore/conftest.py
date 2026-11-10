@@ -1,8 +1,10 @@
 import hashlib
+import threading
 from pathlib import Path
 
 import numpy as np
 import pytest
+from kiwipiepy import Kiwi
 
 from chatcore.bot.loader import load_bot
 from chatcore.bot.schema import BotDefinition
@@ -11,6 +13,44 @@ from chatcore.dialogue.values import ActionRegistry, StubAction
 ROOT = Path(__file__).resolve().parents[2]
 SAMPLE = ROOT / "bots/sample"
 SAMPLE_ACTIONS = ("get_weather", "get_temperature", "now")
+
+
+_KIWIS: dict[frozenset, tuple[Kiwi, threading.Lock]] = {}
+_KIWIS_GUARD = threading.Lock()
+
+
+class PooledKiwi:
+    """Test stand-in for kiwipiepy.Kiwi. A real Kiwi() takes ~0.3 s here and several times that on
+    CI, and the suite builds the same bot dozens of times, so extractors that add the same user
+    words share one real instance (created on first use, one lock per instance)."""
+
+    def __init__(self) -> None:
+        self._words: list[tuple] = []
+        self._real: tuple[Kiwi, threading.Lock] | None = None
+
+    def add_user_word(self, *args) -> bool:
+        assert self._real is None, "words must be added before the first tokenize"
+        self._words.append(args)
+        return True
+
+    def tokenize(self, text: str, **kwargs):
+        if self._real is None:
+            key = frozenset(self._words)
+            with _KIWIS_GUARD:
+                if key not in _KIWIS:
+                    kiwi = Kiwi()
+                    for args in self._words:
+                        kiwi.add_user_word(*args)
+                    _KIWIS[key] = (kiwi, threading.Lock())
+            self._real = _KIWIS[key]
+        kiwi, lock = self._real
+        with lock:
+            return kiwi.tokenize(text, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def pooled_kiwi(monkeypatch):
+    monkeypatch.setattr("chatcore.nlu.entities.Kiwi", PooledKiwi)
 
 
 @pytest.fixture(scope="session")
