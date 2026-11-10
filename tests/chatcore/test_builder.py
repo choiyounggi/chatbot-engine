@@ -506,13 +506,6 @@ def test_test_build_result_includes_confusable_pairs(client):
     assert isinstance(job["result"]["confusable"], list)
 
 
-def test_host_confusable_needs_a_draft(host):
-    from chatcore.host import NoDraft
-
-    with pytest.raises(NoDraft):
-        host.confusable("nodraft")
-
-
 def test_job_endpoints_and_the_event_stream(client):
     assert client.get(f"/v1/builder/jobs/{'0' * 32}").status_code == 404
     assert client.get(f"/v1/builder/jobs/{'0' * 32}/events").status_code == 404
@@ -686,3 +679,12 @@ def test_users_open_sessions_and_press_blocks_on_the_deployed_bot(client):
     assert client.post("/v1/bots/sample/sessions/u1/messages",
                        json={"text": "x", "block_id": "Bad-Id"}).status_code == 422
     assert client.post("/v1/bots/nobot/sessions/u1/open").status_code == 404
+
+
+def test_repository_latest_marks_keeps_one_per_sentence(repository):
+    bot = f"t_{uuid.uuid4().hex[:8]}"
+    repository.mark_utterances(bot, [("a", "a"), ("b", "b")], "ignored")
+    repository.mark_utterances(bot, [("a", "a")], "added", "greeting")
+    latest = {m.key: (m.status, m.intent) for m in repository.latest_marks(bot)}
+    assert latest == {"a": ("added", "greeting"), "b": ("ignored", None)}
+    assert repository.latest_marks(f"{bot}_none") == []

@@ -64,3 +64,20 @@ def test_keyword_match_does_not_match_unrelated_input(sample_bot, fake_embedder,
     model = NluModel.load(bot, directory, fake_embedder)
     result = model.parse("그거")
     assert result.matched_by == "classifier"
+
+
+def test_a_keyword_key_two_intents_share_matches_neither(sample_bot, fake_embedder, tmp_path):
+    # "배송 조회해요" and "배송 조회할래요" both reduce to (배송, 조회): which intent is meant is unknown
+    from chatcore.bot.schema import BotDefinition
+    from chatcore.nlu.train import keyword_collisions
+
+    data = _kwbot(sample_bot, keyword_match=True).model_dump()
+    data["intents"]["track"] = {"examples": ["배송 조회해요"]}
+    data["intents"]["cancel_order"] = {"examples": ["배송 조회할래요"]}
+    bot = BotDefinition.model_validate(data)
+    directory = fit_only(bot, CachedEmbedder(fake_embedder), tmp_path)
+    model = NluModel.load(bot, directory, fake_embedder)
+    assert model.parse("배송 조회해요").matched_by == "exact"  # the literal sentence still matches exactly
+    assert model.parse("배송 조회했어요").matched_by == "classifier"  # the shared key does not decide
+    assert keyword_collisions(bot) == [("배송 조회", ["cancel_order", "track"])]
+    assert keyword_collisions(_kwbot(sample_bot, keyword_match=False)) == []

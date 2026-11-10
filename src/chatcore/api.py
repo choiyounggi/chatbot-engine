@@ -37,7 +37,17 @@ from chatcore.bot.repository import RevisionConflict, VersionNotFound
 from chatcore.bot.schema import BasicCard, BotDocument, Carousel, ListCard, SimpleImage
 from chatcore.dialogue.state import fold
 from chatcore.dialogue.turn import MAX_INPUT_CHARS, TurnResult, UnknownBlock
-from chatcore.host import BelowBar, BotHost, ExampleTaken, Host, NoDraft, NoEarlierDeployment, NotTrained
+from chatcore.host import (
+    BadExample,
+    BelowBar,
+    BotHost,
+    ExampleTaken,
+    Host,
+    NoDraft,
+    NoEarlierDeployment,
+    NotTrained,
+    unique_sentences,
+)
 from chatcore.jobs import JobFailed, JobRunner
 from chatcore.nlu.train import TrainingError
 from chatcore.runtime import BotRuntime
@@ -514,14 +524,17 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
         if (since and since.tzinfo is None) or (until and until.tzinfo is None):
             raise HTTPException(422, "since and until need a time zone (e.g. 2026-11-10T00:00:00+09:00)")
         found = host.store.utterances(f"{bot}:", since, until, UTTERANCE_SCAN + 1)
-        items = group(found[:UTTERANCE_SCAN], host.repository.utterance_marks(bot), rule, intent, status, limit)
+        items = group(found[:UTTERANCE_SCAN], host.repository.latest_marks(bot), rule, intent, status, limit)
         return {"bot": bot, "scanned": min(len(found), UTTERANCE_SCAN), "truncated": len(found) > UTTERANCE_SCAN,
                 "items": [asdict(i) for i in items]}
 
     def mark(bot: str, body: SentencesIn, status: str) -> dict[str, Any]:
         known(bot)
-        host.repository.mark_utterances(bot, [(queue_key(t), t) for t in body.texts], status)
-        return {"bot": bot, "marked": len(body.texts)}
+        if any(not queue_key(t) for t in body.texts):
+            raise HTTPException(422, "a sentence is empty after trimming spaces and punctuation")
+        sentences = unique_sentences(body.texts)
+        host.repository.mark_utterances(bot, sentences, status)
+        return {"bot": bot, "marked": len(sentences)}
 
     @app.post("/v1/builder/bots/{bot}/utterances/ignore", dependencies=deps, response_model=MarkedOut)
     def ignore(body: SentencesIn, bot: str = BOT_ID) -> Any:
@@ -547,6 +560,9 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
             raise HTTPException(404, f"the draft has no intent {body.intent!r}") from exc
         except ExampleTaken as exc:
             return JSONResponse({"detail": "already examples of another intent", "texts": exc.texts}, status_code=409)
+        except BadExample as exc:
+            return JSONResponse({"detail": "these cannot be examples (empty, or {braces} of a template)",
+                                 "texts": exc.texts}, status_code=422)
         except RevisionConflict as exc:
             return JSONResponse({"detail": "the draft was changed elsewhere; reload it", "revision": exc.current},
                                 status_code=412)
@@ -591,7 +607,7 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
         def run() -> dict[str, Any]:
             try:
                 build = host.build_test(bot)
-                confusable = host.confusable(bot)
+                confusable = host.confusable(bot, build)  # of the document that was built
                 return {"build": build, "confusable": [asdict(c) for c in confusable]}
             except BotError as exc:
                 raise JobFailed("invalid_draft", {"detail": "the draft is invalid", "errors": exc.problems}) from exc

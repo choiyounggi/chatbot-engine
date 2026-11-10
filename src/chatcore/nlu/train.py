@@ -364,8 +364,22 @@ def evaluate(bot: BotDefinition, embedder: Embedder) -> Report:
                     .most_common(5)],
         thresholds=thresholds,
         confusable=confusable_intents(bot, embedder),
-        warnings=validate(bot).warnings + extra_warnings,
+        warnings=validate(bot).warnings + extra_warnings + [
+            f"keyword match: {' '.join(k)!r} is shared by {', '.join(owners)}; it matches none of them"
+            for k, owners in keyword_collisions(bot)],
     )
+
+
+def keyword_collisions(bot: BotDefinition) -> list[tuple[str, list[str]]]:
+    """With keyword_match on: core-morpheme keys more than one intent's examples reduce to
+    ("배송 조회해요" / "배송 조회할래요"), as (key words, intents). Such a key matches none of them."""
+    if not bot.settings.keyword_match:
+        return []
+    from chatcore.nlu.keyword import KeywordMatcher
+    from chatcore.nlu.model import keyword_keys
+
+    keys = sorted(keyword_keys(bot, KeywordMatcher()).items())
+    return [(" ".join(k), owners) for k, owners in keys if len(owners) > 1]
 
 
 # ---------------------------------------------------------------- train + save

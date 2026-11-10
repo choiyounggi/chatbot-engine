@@ -284,3 +284,48 @@ def test_queue_period_and_filters(client):
     assert client.get(f"{B}/utterances", params={"since": "2026-11-10T00:00:00"}).status_code == 422  # no time zone
     assert client.get(f"{B}/utterances", params={"status": "weird"}).status_code == 422
     assert client.get("/v1/builder/bots/nobot/utterances").status_code == 404
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+def test_add_refuses_sentences_that_cannot_be_examples(client):
+    tag = client.get(f"{B}/draft").headers["ETag"]
+    for texts in (["   "], ["?!"], ["{location} 날씨"]):
+        r = client.post(f"{B}/utterances/add", json={"texts": texts, "intent": "weather"}, headers={"If-Match": tag})
+        assert r.status_code == 422, (texts, r.text)
+    assert client.get(f"{B}/draft").headers["ETag"] == tag  # nothing was saved
+    assert client.get(f"{B}/utterances/marks").json()["items"] == []
+    assert client.post(f"{B}/utterances/ignore", json={"texts": ["..."]}).status_code == 422
+
+
+def test_add_tolerates_malformed_intents_elsewhere_in_an_invalid_draft(client):
+    doc = draft(client)
+    doc["intents"]["help"]["examples"] = None  # drafts may be invalid
+    doc["intents"]["thanks"]["examples"] = "안녕"  # a string, not a list
+    assert save(client, doc).status_code == 200
+    tag = client.get(f"{B}/draft").headers["ETag"]
+    r = client.post(f"{B}/utterances/add", json={"texts": ["안", "새로운 날씨 질문"], "intent": "weather"},
+                    headers={"If-Match": tag})
+    assert r.status_code == 200, r.text  # no 500, and "안" is not "taken" by the string's characters
+    assert draft(client)["intents"]["weather"]["examples"][-2:] == ["안", "새로운 날씨 질문"]
+
+
+def test_one_mark_per_sentence_and_the_queue_reads_only_the_latest_marks(client, host):
+    say(client, "같은 문장", "u1")
+    r = client.post(f"{B}/utterances/ignore", json={"texts": ["같은 문장", "같은 문장!", " 같은  문장 "]})
+    assert r.json()["marked"] == 1
+    assert len(client.get(f"{B}/utterances/marks").json()["items"]) == 1
+    host.repository.mark_utterances("sample", [("같은 문장", "같은 문장")], "pending")
+    assert [(m.key, m.status) for m in host.repository.latest_marks("sample")] == [("같은 문장", "pending")]
+
+
+def test_test_build_confusable_pairs_describe_the_built_draft(client, host):
+    build = finish(client, client.post(f"{B}/test-builds"))["result"]["build"]
+    doc = draft(client)
+    doc["intents"]["greeting"]["examples"] = ["완전히 다른 문장 하나"] * 1
+    assert save(client, doc).status_code == 200  # the draft moves on after the build
+    built = host.test_runtime("sample", build)
+    assert built is not None
+    assert host.confusable("sample", build) == host.confusable_of(built.bot)
+    assert host.confusable("sample", "0" * 12) == []  # unknown build: nothing to describe

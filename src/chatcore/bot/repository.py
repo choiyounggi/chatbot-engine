@@ -90,6 +90,7 @@ class BotRepository(Protocol):
         """Record a status for (key, text) pairs from the training queue."""
         ...
     def utterance_marks(self, bot_id: str, limit: int | None = None) -> list[Mark]: ...  # newest first
+    def latest_marks(self, bot_id: str) -> list[Mark]: ...  # the newest mark of each sentence
     def add_version(
         self, bot_id: str, version: str, document: dict[str, Any], macro_f1: float | None
     ) -> VersionInfo: ...
@@ -166,6 +167,12 @@ class InMemoryRepository:
         with self._lock:
             marks = list(self._marks.get(bot_id, []))
         return marks if limit is None else marks[:max(limit, 0)]
+
+    def latest_marks(self, bot_id: str) -> list[Mark]:
+        latest: dict[str, Mark] = {}
+        for m in self.utterance_marks(bot_id):  # newest first
+            latest.setdefault(m.key, m)
+        return list(latest.values())
 
     def add_version(self, bot_id: str, version: str, document: dict[str, Any], macro_f1: float | None) -> VersionInfo:
         with self._lock:
@@ -332,6 +339,13 @@ class PostgresRepository:
         with self._connect() as conn:
             rows = conn.execute("SELECT key, text, status, intent, marked_at FROM bot_utterance_marks "
                                 "WHERE bot_id = %s ORDER BY id DESC LIMIT %s", (bot_id, limit)).fetchall()
+        return [Mark(str(k), str(t), str(s), i, _iso(at)) for k, t, s, i, at in rows]
+
+    def latest_marks(self, bot_id: str) -> list[Mark]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT DISTINCT ON (key) key, text, status, intent, marked_at "
+                                "FROM bot_utterance_marks WHERE bot_id = %s ORDER BY key, id DESC",
+                                (bot_id,)).fetchall()
         return [Mark(str(k), str(t), str(s), i, _iso(at)) for k, t, s, i, at in rows]
 
     def add_version(self, bot_id: str, version: str, document: dict[str, Any], macro_f1: float | None) -> VersionInfo:

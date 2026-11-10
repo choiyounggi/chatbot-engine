@@ -169,6 +169,18 @@ class ModelMismatch(ValueError):
     """The stored model was trained for another bot version or embedding model."""
 
 
+def keyword_keys(bot: BotDefinition, matcher: KeywordMatcher) -> dict[tuple[str, ...], list[str]]:
+    """Core-morpheme key -> the intents whose literal examples reduce to it (sorted, unique)."""
+    owners: dict[tuple[str, ...], set[str]] = {}
+    for intent, spec in bot.intents.items():
+        for example in spec.examples:
+            if "{" not in example:  # templates are not literal sentences
+                key = matcher.morphemes(example)
+                if key:
+                    owners.setdefault(key, set()).add(intent)
+    return {key: sorted(names) for key, names in owners.items()}
+
+
 @dataclass(frozen=True)
 class Thresholds:
     """The OOS-decision thresholds a model was evaluated at (bot/schema.py Settings.similarity_level,
@@ -210,12 +222,8 @@ class NluModel:
                     self._exact.setdefault(bare(example), intent)
         if self.bot.settings.keyword_match:
             self._matcher = KeywordMatcher()
-            for intent, spec in self.bot.intents.items():
-                for example in spec.examples:
-                    if "{" not in example:
-                        key = self._matcher.morphemes(example)
-                        if key:
-                            self._keyword.setdefault(key, intent)
+            self._keyword = {key: owners[0] for key, owners in keyword_keys(self.bot, self._matcher).items()
+                             if len(owners) == 1}  # a key two intents share decides nothing
 
     def parse(self, text: str) -> NluResult:
         entities = tuple(self.extractor.extract(text, self.today()))
@@ -241,8 +249,12 @@ class NluModel:
         if not isinstance(raw, dict):
             s = bot.settings
             return Thresholds(s.intent_threshold, s.similarity_threshold, s.ambiguity_margin, None)
-        return Thresholds(float(raw["intent_threshold"]), float(raw["similarity_threshold"]),
-                           float(raw["ambiguity_margin"]), raw.get("level"))
+        try:
+            level = raw.get("level")
+            return Thresholds(float(raw["intent_threshold"]), float(raw["similarity_threshold"]),
+                              float(raw["ambiguity_margin"]), level if isinstance(level, str) else None)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ModelMismatch(f"meta.json has unreadable thresholds {raw!r}; train again") from exc
 
     @classmethod
     def load(cls, bot: BotDefinition, directory: Path, embedder: Embedder, extractor: EntityExtractor | None = None,

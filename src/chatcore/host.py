@@ -82,6 +82,22 @@ class NoEarlierDeployment(Exception):
     """Rollback asked for, but the bot has never been deployed with a different version."""
 
 
+def unique_sentences(texts: list[str]) -> list[tuple[str, str]]:
+    """(key, text) per distinct sentence (first spelling wins), for marks."""
+    seen: dict[str, str] = {}
+    for t in texts:
+        seen.setdefault(bare(t), t)
+    return list(seen.items())
+
+
+class BadExample(ValueError):
+    """Sentences that cannot be examples: nothing left after trimming, or template braces."""
+
+    def __init__(self, texts: list[str]) -> None:
+        super().__init__(f"cannot be examples: {texts}")
+        self.texts = texts
+
+
 class ExampleTaken(ValueError):
     """Sentences that are already examples of another intent (one sentence cannot train two)."""
 
@@ -213,8 +229,12 @@ class BotHost:
         target = intents.get(intent)
         if not isinstance(target, dict) or not isinstance(target.get("examples"), list):
             raise KeyError(intent)
-        owner = {bare(e): name for name, spec in intents.items() if isinstance(spec, dict)
-                 for e in spec.get("examples", []) if isinstance(e, str)}
+        bad = sorted({t for t in texts if not bare(t) or "{" in t or "}" in t})
+        if bad:  # empty after trimming, or template syntax ("{location}") that training would expand
+            raise BadExample(bad)
+        owner = {bare(e): name for name, spec in intents.items()
+                 if isinstance(spec, dict) and isinstance(spec.get("examples"), list)
+                 for e in spec["examples"] if isinstance(e, str)}
         taken = sorted({t for t in texts if owner.get(bare(t), intent) != intent})
         if taken:
             raise ExampleTaken(taken)
@@ -224,7 +244,7 @@ class BotHost:
                 target["examples"].append(" ".join(text.split()))
                 known.add(bare(text))
         check = self.save_draft(bot_id, document, expected_revision)
-        self.repository.mark_utterances(bot_id, [(bare(t), t) for t in texts], "added", intent)
+        self.repository.mark_utterances(bot_id, unique_sentences(texts), "added", intent)
         return check
 
     def train_draft(self, bot_id: str) -> tuple[VersionInfo, Report]:
@@ -238,13 +258,13 @@ class BotHost:
             raise BelowBar(report, self.min_f1)
         return self.repository.add_version(bot_id, bot.version, document, report.macro_f1), report
 
-    def confusable(self, bot_id: str) -> list[ConfusablePair]:
-        """Confusable intent pairs in the current draft (train.py confusable_intents); for a
-        test build's job result, since fit_only() does no cross-validation of its own."""
-        document = self.repository.get_draft(bot_id)
-        if document is None:
-            raise NoDraft(bot_id)
-        bot = bot_from_document(document, self.actions.names())
+    def confusable(self, bot_id: str, build: str) -> list[ConfusablePair]:
+        """Confusable intent pairs of a test build (the document it was built from, not the draft
+        as it is now); [] when the build is unknown or expired."""
+        runtime = self.test_runtime(bot_id, build)
+        return self.confusable_of(runtime.bot) if runtime is not None else []
+
+    def confusable_of(self, bot: BotDefinition) -> list[ConfusablePair]:
         return confusable_intents(bot, self.bulk)
 
     def deploy(self, bot_id: str, version: str, note: str = "") -> None:

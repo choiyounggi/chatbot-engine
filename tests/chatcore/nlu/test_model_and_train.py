@@ -425,3 +425,17 @@ def test_nlu_model_load_without_a_thresholds_key_uses_the_document_numbers(sampl
     model = NluModel.load(sample_bot, directory, fake_embedder, extractor)
     assert model.bot.settings.intent_threshold == sample_bot.settings.intent_threshold
     assert model.bot.settings.similarity_threshold == sample_bot.settings.similarity_threshold
+
+
+@pytest.mark.parametrize("thresholds", [{"intent_threshold": 0.3}, {"intent_threshold": "x", "similarity_threshold": 0.4,
+                                                                   "ambiguity_margin": 0.1}, "broken"])
+def test_a_malformed_thresholds_entry_in_meta_is_a_model_mismatch(sample_bot, fake_embedder, tmp_path, thresholds):
+    directory = fit_only(sample_bot, CachedEmbedder(fake_embedder), tmp_path)
+    meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+    meta["thresholds"] = thresholds
+    (directory / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    if isinstance(thresholds, dict):
+        with pytest.raises(ModelMismatch, match="thresholds"):
+            NluModel.load(sample_bot, directory, fake_embedder)
+    else:  # not even a mapping: treated like an older model without stored thresholds
+        assert NluModel.load(sample_bot, directory, fake_embedder).bot.settings == sample_bot.settings
