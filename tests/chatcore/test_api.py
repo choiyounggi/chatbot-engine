@@ -221,3 +221,15 @@ def test_nlu_parse_failure_is_500_without_details(runtime):
     runtime.model.parse = boom
     r = TestClient(create_app(static(runtime))).post("/v1/bots/sample/nlu/parse", json={"text": "안녕"})
     assert r.status_code == 500 and "secret" not in r.text
+
+
+def test_bulk_lane_of_batched_embedder_gives_the_same_vectors(fake_embedder):
+    batched = BatchedEmbedder(fake_embedder)
+    lane = batched.bulk()
+    try:
+        assert (lane.model_id, lane.prompt) == (batched.model_id, batched.prompt)
+        assert np.allclose(lane.encode(["안녕", "날씨"]), batched.encode(["안녕", "날씨"]))
+        assert lane.encode([]).shape == (0, 0)
+    finally:
+        batched.close()
+

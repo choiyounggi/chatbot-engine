@@ -6,7 +6,7 @@
 동의어가 달린 엔티티, 시나리오, 응답 템플릿으로 이뤄져요. 엔진은 한국어 입력을 문장 임베딩 모델(학습하지 않음)과
 작은 분류기로 이해하고, 시나리오를 정해진 대로 진행해요. 이 데이터를 편집하는 빌더 UI는 나중에 만들어요.
 
-> 상태: Phase 6 — 한국어 NLU를 붙인 시나리오 엔진을 HTTP API(`make serve`)와 터미널 채팅(`make chat`)으로 쓸 수 있어요. 빌더 API(`/v1/builder/...`)로 초안 저장·학습·배포·되돌리기·오인식 문장 조회를 해요. 빌더 API는 `CHATCORE_ADMIN_TOKEN`을 설정하면 그 토큰으로만 열려요.
+> 상태: 빌더 단계 E-A — 한국어 NLU를 붙인 시나리오 엔진을 HTTP API(`make serve`)와 터미널 채팅(`make chat`)으로 쓸 수 있어요. 빌더 API(`/v1/builder/...`)로 초안 저장(ETag로 동시 편집 보호), 백그라운드 학습(SSE로 진행 상황), 테스트 빌드와 테스트 대화, 메모·버전 번호가 붙는 배포, 되돌리기, 오인식 문장 조회를 해요. 빌더 API는 `CHATCORE_ADMIN_TOKEN`을 설정하면 그 토큰으로만 열려요. 빌더 화면은 [chatbot-builder](https://github.com/choiyounggi/chatbot-builder)에서 만들어요.
 > 설계와 로드맵: [docs/engine-core-plan.md](docs/engine-core-plan.md)
 
 ## 시작하기

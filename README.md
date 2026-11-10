@@ -7,7 +7,7 @@ intents with example sentences, entities with synonyms, scenarios, response temp
 engine understands Korean input with a frozen sentence-embedding model plus a small classifier,
 then follows the scenario deterministically. A builder UI for editing that data comes later.
 
-> Status: Phase 6 — HTTP API (`make serve`), terminal chat (`make chat`) and a builder API (`/v1/builder/...`: save draft, train, deploy, roll back, misunderstood sentences) over the scenario engine with Korean NLU. Set `CHATCORE_ADMIN_TOKEN` to protect the builder API.
+> Status: builder step E-A — HTTP API (`make serve`), terminal chat (`make chat`) and a builder API (`/v1/builder/...`: drafts with ETag, background training jobs with SSE progress, test builds with a test chat, deploy with notes and version numbers, roll back, misunderstood sentences) over the scenario engine with Korean NLU. Set `CHATCORE_ADMIN_TOKEN` to protect the builder API. The builder UI lives in [chatbot-builder](https://github.com/choiyounggi/chatbot-builder).
 > Design and roadmap: [docs/engine-core-plan.md](docs/engine-core-plan.md).
 
 ## Quick start

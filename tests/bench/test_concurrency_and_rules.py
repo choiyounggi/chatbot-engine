@@ -205,3 +205,75 @@ def test_keepalive_calls_fn_while_idle_and_survives_errors():
 def test_keepalive_must_be_positive():
     with pytest.raises(ValueError):
         MicroBatcher(fake_encode, keepalive_ms=0)
+
+
+def test_chat_requests_overtake_queued_bulk_work_and_lanes_never_mix():
+    # the worker just ran a bulk batch, so the waiting chat requests go next
+    started, release, calls = threading.Event(), threading.Event(), []
+
+    def fn(texts):
+        calls.append(list(texts))
+        if len(calls) == 1:
+            started.set()
+            release.wait(5)
+        return np.array([[len(t), ord(t[0])] for t in texts], dtype=float)
+
+    b = MicroBatcher(fn, max_batch=16, max_wait_ms=0, bulk_batch=3)
+    first = b.submit("busy", bulk=True)
+    assert started.wait(5)  # the worker is inside fn with the first bulk text
+    bulk = [b.submit(f"b{i}", bulk=True) for i in range(7)]
+    chat = [b.submit("c1"), b.submit("c2")]
+    release.set()
+    assert [f.result(5)[0] for f in chat] == [2, 2] and [f.result(5)[0] for f in bulk] == [2] * 7
+    first.result(5)
+    b.close()
+    assert calls == [["busy"], ["c1", "c2"], ["b0", "b1", "b2"], ["b3", "b4", "b5"], ["b6"]]
+
+
+def test_bulk_batch_must_be_positive():
+    with pytest.raises(ValueError, match="bulk_batch"):
+        MicroBatcher(fake_encode, bulk_batch=0)
+
+
+def test_bulk_work_still_progresses_under_a_steady_stream_of_chat():
+    started, release, calls = threading.Event(), threading.Event(), []
+
+    def fn(texts):
+        calls.append(list(texts))
+        if len(calls) == 1:
+            started.set()
+            release.wait(5)
+        return np.zeros((len(texts), 2))
+
+    b = MicroBatcher(fn, max_batch=1, max_wait_ms=0, bulk_batch=2)
+    busy = b.submit("chat-busy")
+    assert started.wait(5)
+    chats = [b.submit(f"c{i}") for i in range(10)]
+    bulk = [b.submit(f"b{i}", bulk=True) for i in range(3)]
+    release.set()
+    for f in [busy, *chats, *bulk]:
+        f.result(5)
+    b.close()
+    # turns alternate while both lanes wait: chat, bulk, chat, bulk, then the rest of the chat
+    assert calls[:5] == [["chat-busy"], ["b0", "b1"], ["c0"], ["b2"], ["c1"]]
+
+
+def test_close_fails_requests_it_could_not_serve_in_time(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+
+    def fn(texts):
+        started.set()
+        release.wait(5)
+        return np.zeros((len(texts), 2))
+
+    b = MicroBatcher(fn, max_batch=1, max_wait_ms=0)
+    busy = b.submit("busy")
+    assert started.wait(5)
+    waiting = b.submit("waiting")
+    real_join = b._thread.join
+    monkeypatch.setattr(b._thread, "join", lambda timeout=None: real_join(0.05))  # the 30 s budget runs out
+    b.close()
+    with pytest.raises(RuntimeError, match="batcher closed"):
+        waiting.result(1)
+    release.set()
+    assert busy.result(5).shape == (2,)  # the call already running still finishes

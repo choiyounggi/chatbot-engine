@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from chatcore.api import create_app  # noqa: E402
 from chatcore.conversations import synthetic_actions  # noqa: E402
+from chatcore.host import StaticHost  # noqa: E402
 from chatcore.nlu.model import SentenceEmbedder  # noqa: E402
 from chatcore.runtime import build_runtime  # noqa: E402
 from chatcore.serving import BatchedEmbedder  # noqa: E402
@@ -50,7 +51,8 @@ def measure(keepalive_ms: float | None) -> list[tuple[str, list[float]]]:
     rt = build_runtime(ROOT / "bots/sample", ROOT / "artifacts", embedder, InMemoryStore(), actions=synthetic_actions())
     rt.model.parse("워밍업")
     port = free_port()
-    server = uvicorn.Server(uvicorn.Config(create_app({"sample": rt}), host="127.0.0.1", port=port, log_level="warning"))
+    app = create_app(StaticHost({"sample": rt}, rt.processor.store))
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
     while not server.started:
         time.sleep(0.05)
