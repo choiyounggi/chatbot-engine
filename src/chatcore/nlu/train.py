@@ -218,24 +218,45 @@ def train(bot: BotDefinition, embedder: Embedder, out_root: Path, fresh: Embedde
     if report.macro_f1 < min_f1:
         return None, report
     start = time.perf_counter()
-    rows, labels = training_rows({k: v.examples for k, v in bot.intents.items()}, entity_forms(bot))
-    clf = IntentClassifier.fit(embedder.encode(rows), labels)
+    rows, clf = _fit(bot, embedder)
     report.train_seconds = time.perf_counter() - start
     if fresh is not None:
         sample = rows[:16]
         report.determinism_max_diff = float(np.abs(fresh.encode(sample) - fresh.encode(sample)).max())
-    directory = out_root / bot.id / bot.version
+    return _save(clf, out_root / bot.id / bot.version, {**asdict(report), "embedding_prompt": embedder.prompt}), report
+
+
+def fit_only(bot: BotDefinition, embedder: Embedder, out_root: Path) -> Path:
+    """Fit on all data without evaluating (no cross-validation, no F1 bar) and save to
+    out_root/<bot>/<version>/. For builder test builds: works with one example per intent."""
+    if len(bot.intents) < 2:
+        raise TrainingError("need at least two intents")
+    _, clf = _fit(bot, embedder)
+    meta: dict[str, object] = {"bot_id": bot.id, "bot_version": bot.version, "embedding_model": embedder.model_id,
+            "embedding_prompt": embedder.prompt, "macro_f1": None, "test_build": True}
+    return _save(clf, out_root / bot.id / bot.version, meta)
+
+
+def _fit(bot: BotDefinition, embedder: Embedder) -> tuple[list[str], IntentClassifier]:
+    rows, labels = training_rows({k: v.examples for k, v in bot.intents.items()}, entity_forms(bot))
+    vectors = embedder.encode(rows)
+    try:
+        return rows, IntentClassifier.fit(vectors, labels)
+    except ValueError as exc:  # e.g. only out_of_scope examples: the bot's data, not a bug
+        raise TrainingError(str(exc)) from exc
+
+
+def _save(clf: IntentClassifier, directory: Path, meta: dict[str, object]) -> Path:
+    """Write a sibling directory and swap it in, so a reader (a deploy, a server start) never
+    sees half-written files when the same version is trained again."""
     directory.parent.mkdir(parents=True, exist_ok=True)
-    # Write a sibling directory and swap it in, so a reader (a deploy, a server start) never
-    # sees half-written files when the same version is trained again.
-    staging = directory.with_name(f".{bot.version}.{uuid.uuid4().hex}")
+    staging = directory.with_name(f".{directory.name}.{uuid.uuid4().hex}")
     staging.mkdir()
+    old = directory.with_name(f".{directory.name}.old.{uuid.uuid4().hex}")
     try:
         clf.save(staging / "classifier.npz")
-        meta = {**asdict(report), "embedding_prompt": embedder.prompt,
-                "created_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds")}
+        meta = {**meta, "created_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds")}
         (staging / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        old = directory.with_name(f".{bot.version}.old.{uuid.uuid4().hex}")
         if directory.exists():
             directory.rename(old)
         staging.rename(directory)
@@ -243,7 +264,7 @@ def train(bot: BotDefinition, embedder: Embedder, out_root: Path, fresh: Embedde
         shutil.rmtree(staging, ignore_errors=True)
         raise
     shutil.rmtree(old, ignore_errors=True)
-    return directory, report
+    return directory
 
 
 def format_report(report: Report, directory: Path | None) -> str:

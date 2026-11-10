@@ -187,3 +187,30 @@ def test_training_the_same_version_again_swaps_in_complete_files(sample_bot, fak
         train(sample_bot, emb, tmp_path)
     assert sorted(p.name for p in directory.parent.iterdir()) == [sample_bot.version]  # no half-written leftovers
     NluModel.load(sample_bot, directory, emb, extractor)  # the previous model is untouched
+
+
+def test_fit_only_needs_no_evaluation_but_two_intents(sample_bot, fake_embedder, extractor, tmp_path):
+    from chatcore.nlu.train import TrainingError, fit_only
+
+    tiny = sample_bot.model_copy(update={"intents": {
+        "greeting": sample_bot.intents["greeting"].model_copy(update={"examples": ["안녕"]}),
+        "weather": sample_bot.intents["weather"].model_copy(update={"examples": ["날씨 어때"]})}})
+    directory = fit_only(tiny, CachedEmbedder(fake_embedder), tmp_path)
+    meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+    assert meta["test_build"] is True and meta["macro_f1"] is None
+    assert NluModel.load(tiny, directory, fake_embedder, extractor).parse("날씨 어때").intents[0].intent == "weather"
+    alone = sample_bot.model_copy(update={"intents": {"weather": sample_bot.intents["weather"]}})
+    with pytest.raises(TrainingError, match="two intents"):
+        fit_only(alone, CachedEmbedder(fake_embedder), tmp_path)
+
+
+def test_classifier_data_errors_become_training_errors(sample_bot, fake_embedder, tmp_path, monkeypatch):
+    from chatcore.nlu.train import TrainingError, fit_only
+
+    def refuse(*args, **kwargs):
+        raise ValueError("need at least one in-scope example")
+
+    monkeypatch.setattr(IntentClassifier, "fit", refuse)
+    with pytest.raises(TrainingError, match="in-scope"):
+        fit_only(sample_bot, CachedEmbedder(fake_embedder), tmp_path)
+    assert not list(tmp_path.iterdir())  # nothing half-saved

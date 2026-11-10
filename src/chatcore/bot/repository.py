@@ -20,35 +20,67 @@ class VersionNotFound(KeyError):
     pass
 
 
+class RevisionConflict(Exception):
+    """The draft changed since the caller read it (another tab or editor saved first)."""
+
+    def __init__(self, current: int | None) -> None:
+        super().__init__(f"the draft is at revision {current}")
+        self.current = current
+
+
 @dataclass(frozen=True)
 class VersionInfo:
     version: str
+    number: int  # 1, 2, 3... per bot, in the order versions were trained (shown as v1, v2...)
     created_at: str  # ISO 8601, UTC
     macro_f1: float | None
+
+
+@dataclass(frozen=True)
+class Deployment:
+    version: str
+    number: int
+    note: str
+    deployed_at: str  # ISO 8601, UTC
+
+
+@dataclass(frozen=True)
+class Draft:
+    document: dict[str, Any]
+    revision: int  # 1 on first save, +1 on every save
 
 
 class BotRepository(Protocol):
     def bots(self) -> list[str]: ...
     def get_draft(self, bot_id: str) -> dict[str, Any] | None: ...
-    def save_draft(self, bot_id: str, document: dict[str, Any]) -> None: ...
+    def draft(self, bot_id: str) -> Draft | None: ...
+    def save_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None) -> int:
+        """Store the draft and return its new revision. With expected_revision, raise
+        RevisionConflict unless the stored draft is at that revision (0: must not exist yet)."""
+        ...
     def add_version(
         self, bot_id: str, version: str, document: dict[str, Any], macro_f1: float | None
     ) -> VersionInfo: ...
     def get_version(self, bot_id: str, version: str) -> dict[str, Any]: ...
     def versions(self, bot_id: str) -> list[VersionInfo]: ...  # newest first
-    def deploy(self, bot_id: str, version: str) -> None: ...
+    def deploy(self, bot_id: str, version: str, note: str = "") -> None: ...
     def deployments(self, bot_id: str) -> list[str]: ...  # newest first; [0] is live
+    def history(self, bot_id: str) -> list[Deployment]: ...  # newest first
 
 
 def _now() -> str:
     return dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
 
 
+def _iso(value: dt.datetime) -> str:
+    return value.astimezone(dt.UTC).isoformat(timespec="seconds")
+
+
 class InMemoryRepository:
     def __init__(self) -> None:
-        self._drafts: dict[str, dict[str, Any]] = {}
+        self._drafts: dict[str, Draft] = {}
         self._versions: dict[str, dict[str, tuple[VersionInfo, dict[str, Any]]]] = {}
-        self._deployments: dict[str, list[str]] = {}
+        self._deployments: dict[str, list[Deployment]] = {}
         self._lock = threading.Lock()
 
     def bots(self) -> list[str]:
@@ -56,19 +88,28 @@ class InMemoryRepository:
             return sorted(set(self._drafts) | set(self._versions))
 
     def get_draft(self, bot_id: str) -> dict[str, Any] | None:
+        draft = self.draft(bot_id)
+        return draft.document if draft is not None else None
+
+    def draft(self, bot_id: str) -> Draft | None:
         with self._lock:
             draft = self._drafts.get(bot_id)
-            return dict(draft) if draft is not None else None
+            return Draft(dict(draft.document), draft.revision) if draft is not None else None
 
-    def save_draft(self, bot_id: str, document: dict[str, Any]) -> None:
+    def save_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None) -> int:
         with self._lock:
-            self._drafts[bot_id] = dict(document)
+            current = self._drafts.get(bot_id)
+            at = current.revision if current is not None else 0
+            if expected_revision is not None and expected_revision != at:
+                raise RevisionConflict(at or None)
+            self._drafts[bot_id] = Draft(dict(document), at + 1)
+            return at + 1
 
     def add_version(self, bot_id: str, version: str, document: dict[str, Any], macro_f1: float | None) -> VersionInfo:
         with self._lock:
             versions = self._versions.setdefault(bot_id, {})
             if version not in versions:
-                versions[version] = (VersionInfo(version, _now(), macro_f1), dict(document))
+                versions[version] = (VersionInfo(version, len(versions) + 1, _now(), macro_f1), dict(document))
             return versions[version][0]
 
     def get_version(self, bot_id: str, version: str) -> dict[str, Any]:
@@ -83,13 +124,17 @@ class InMemoryRepository:
             infos = [info for info, _ in self._versions.get(bot_id, {}).values()]
         return list(reversed(infos))  # insertion order = creation order
 
-    def deploy(self, bot_id: str, version: str) -> None:
+    def deploy(self, bot_id: str, version: str, note: str = "") -> None:
         with self._lock:
-            if version not in self._versions.get(bot_id, {}):
+            entry = self._versions.get(bot_id, {}).get(version)
+            if entry is None:
                 raise VersionNotFound(f"{bot_id}@{version}")
-            self._deployments.setdefault(bot_id, []).insert(0, version)
+            self._deployments.setdefault(bot_id, []).insert(0, Deployment(version, entry[0].number, note, _now()))
 
     def deployments(self, bot_id: str) -> list[str]:
+        return [d.version for d in self.history(bot_id)]
+
+    def history(self, bot_id: str) -> list[Deployment]:
         with self._lock:
             return list(self._deployments.get(bot_id, []))
 
@@ -98,6 +143,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS bot_drafts (
     bot_id     text PRIMARY KEY,
     document   jsonb NOT NULL,
+    revision   integer NOT NULL DEFAULT 1,
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS bot_versions (
@@ -105,6 +151,7 @@ CREATE TABLE IF NOT EXISTS bot_versions (
     version    text NOT NULL,
     document   jsonb NOT NULL,
     macro_f1   double precision,
+    number     integer,
     created_at timestamptz NOT NULL DEFAULT now(),
     seq        bigserial,
     PRIMARY KEY (bot_id, version)
@@ -113,9 +160,21 @@ CREATE TABLE IF NOT EXISTS bot_deployments (
     id          bigserial PRIMARY KEY,
     bot_id      text NOT NULL,
     version     text NOT NULL,
+    note        text NOT NULL DEFAULT '',
     deployed_at timestamptz NOT NULL DEFAULT now(),
     FOREIGN KEY (bot_id, version) REFERENCES bot_versions (bot_id, version)
 );
+-- databases created before revisions, version numbers and deploy notes
+ALTER TABLE bot_drafts ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 1;
+ALTER TABLE bot_versions ADD COLUMN IF NOT EXISTS number integer;
+ALTER TABLE bot_deployments ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT '';
+UPDATE bot_versions v SET number = r.n
+  FROM (SELECT b.bot_id, b.version,
+               (SELECT COALESCE(MAX(m.number), 0) FROM bot_versions m WHERE m.bot_id = b.bot_id)
+               + row_number() OVER (PARTITION BY b.bot_id ORDER BY b.seq) AS n
+          FROM bot_versions b WHERE b.number IS NULL) r
+ WHERE v.bot_id = r.bot_id AND v.version = r.version;
+CREATE UNIQUE INDEX IF NOT EXISTS bot_versions_number ON bot_versions (bot_id, number);
 """
 
 
@@ -140,31 +199,54 @@ class PostgresRepository:
         return [str(r[0]) for r in rows]
 
     def get_draft(self, bot_id: str) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            row = conn.execute("SELECT document FROM bot_drafts WHERE bot_id = %s", (bot_id,)).fetchone()
-        return dict(row[0]) if row else None
+        draft = self.draft(bot_id)
+        return draft.document if draft is not None else None
 
-    def save_draft(self, bot_id: str, document: dict[str, Any]) -> None:
+    def draft(self, bot_id: str) -> Draft | None:
         with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO bot_drafts (bot_id, document) VALUES (%s, %s) "
-                "ON CONFLICT (bot_id) DO UPDATE SET document = EXCLUDED.document, updated_at = now()",
-                (bot_id, Jsonb(document)),
-            )
+            row = conn.execute("SELECT document, revision FROM bot_drafts WHERE bot_id = %s", (bot_id,)).fetchone()
+        return Draft(dict(row[0]), int(row[1])) if row else None
+
+    def save_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None) -> int:
+        with self._connect() as conn:
+            if expected_revision is None:
+                row = conn.execute(
+                    "INSERT INTO bot_drafts (bot_id, document) VALUES (%s, %s) ON CONFLICT (bot_id) DO UPDATE "
+                    "SET document = EXCLUDED.document, revision = bot_drafts.revision + 1, updated_at = now() "
+                    "RETURNING revision", (bot_id, Jsonb(document))).fetchone()
+            elif expected_revision == 0:
+                row = conn.execute(
+                    "INSERT INTO bot_drafts (bot_id, document) VALUES (%s, %s) ON CONFLICT (bot_id) DO NOTHING "
+                    "RETURNING revision", (bot_id, Jsonb(document))).fetchone()
+            else:
+                row = conn.execute(
+                    "UPDATE bot_drafts SET document = %s, revision = revision + 1, updated_at = now() "
+                    "WHERE bot_id = %s AND revision = %s RETURNING revision",
+                    (Jsonb(document), bot_id, expected_revision)).fetchone()
+            if row is None:
+                current = conn.execute("SELECT revision FROM bot_drafts WHERE bot_id = %s", (bot_id,)).fetchone()
+                raise RevisionConflict(int(current[0]) if current else None)
+        return int(row[0])
 
     def add_version(self, bot_id: str, version: str, document: dict[str, Any], macro_f1: float | None) -> VersionInfo:
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO bot_versions (bot_id, version, document, macro_f1) VALUES (%s, %s, %s, %s) "
-                "ON CONFLICT (bot_id, version) DO NOTHING",
-                (bot_id, version, Jsonb(document), macro_f1),
-            )
-            row = conn.execute(
-                "SELECT version, created_at, macro_f1 FROM bot_versions WHERE bot_id = %s AND version = %s",
-                (bot_id, version),
-            ).fetchone()
+        for attempt in range(3):  # two new versions of one bot at once can pick the same number
+            try:
+                with self._connect() as conn:
+                    conn.execute(
+                        "INSERT INTO bot_versions (bot_id, version, document, macro_f1, number) "
+                        "SELECT %s, %s, %s, %s, COALESCE(MAX(number), 0) + 1 FROM bot_versions WHERE bot_id = %s "
+                        "ON CONFLICT (bot_id, version) DO NOTHING",
+                        (bot_id, version, Jsonb(document), macro_f1, bot_id),
+                    )
+                    row = conn.execute(
+                        "SELECT version, COALESCE(number, 0), created_at, macro_f1 FROM bot_versions "
+                        "WHERE bot_id = %s AND version = %s", (bot_id, version)).fetchone()
+                break
+            except psycopg.errors.UniqueViolation:
+                if attempt == 2:
+                    raise
         assert row is not None
-        return VersionInfo(str(row[0]), row[1].astimezone(dt.UTC).isoformat(timespec="seconds"), row[2])
+        return VersionInfo(str(row[0]), int(row[1]), _iso(row[2]), row[3])
 
     def get_version(self, bot_id: str, version: str) -> dict[str, Any]:
         with self._connect() as conn:
@@ -177,15 +259,17 @@ class PostgresRepository:
     def versions(self, bot_id: str) -> list[VersionInfo]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT version, created_at, macro_f1 FROM bot_versions WHERE bot_id = %s ORDER BY seq DESC",
+                "SELECT version, COALESCE(number, 0), created_at, macro_f1 FROM bot_versions "
+                "WHERE bot_id = %s ORDER BY seq DESC",
                 (bot_id,),
             ).fetchall()
-        return [VersionInfo(str(v), c.astimezone(dt.UTC).isoformat(timespec="seconds"), f) for v, c, f in rows]
+        return [VersionInfo(str(v), int(n), _iso(c), f) for v, n, c, f in rows]
 
-    def deploy(self, bot_id: str, version: str) -> None:
+    def deploy(self, bot_id: str, version: str, note: str = "") -> None:
         try:
             with self._connect() as conn:
-                conn.execute("INSERT INTO bot_deployments (bot_id, version) VALUES (%s, %s)", (bot_id, version))
+                conn.execute("INSERT INTO bot_deployments (bot_id, version, note) VALUES (%s, %s, %s)",
+                             (bot_id, version, note))
         except psycopg.errors.ForeignKeyViolation as exc:
             raise VersionNotFound(f"{bot_id}@{version}") from exc
 
@@ -194,3 +278,11 @@ class PostgresRepository:
             rows = conn.execute("SELECT version FROM bot_deployments WHERE bot_id = %s ORDER BY id DESC",
                                 (bot_id,)).fetchall()
         return [str(r[0]) for r in rows]
+
+    def history(self, bot_id: str) -> list[Deployment]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT d.version, COALESCE(v.number, 0), d.note, d.deployed_at FROM bot_deployments d "
+                "JOIN bot_versions v ON v.bot_id = d.bot_id AND v.version = d.version "
+                "WHERE d.bot_id = %s ORDER BY d.id DESC", (bot_id,)).fetchall()
+        return [Deployment(str(v), int(n), str(note), _iso(at)) for v, n, note, at in rows]

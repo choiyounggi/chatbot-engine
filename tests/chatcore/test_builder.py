@@ -5,9 +5,11 @@ not depend on the fake embedder's accuracy.
 """
 
 import copy
+import json
 import os
 import shutil
 import threading
+import time
 import uuid
 
 import pytest
@@ -15,10 +17,12 @@ from fastapi.testclient import TestClient
 
 from chatcore.api import create_app
 from chatcore.bot.loader import document_version, read_document
-from chatcore.bot.repository import InMemoryRepository, VersionNotFound
+from chatcore.bot.repository import InMemoryRepository, RevisionConflict, VersionNotFound
 from chatcore.conversations import synthetic_actions
 from chatcore.dialogue.state import fold
 from chatcore.host import BotHost
+from chatcore.nlu.train import TrainingError
+from chatcore.store.base import SessionBusy
 from chatcore.store.memory import InMemoryStore
 
 from .conftest import SAMPLE
@@ -57,14 +61,36 @@ def parse(client, text):
     return client.post("/v1/bots/sample/nlu/parse", json={"text": text}).json()
 
 
-def ship(client, document):
+def save(client, document):
+    """PUT the draft over the current one (with its ETag, as the builder does)."""
+    tag = client.get(f"{B}/draft").headers["ETag"]
+    return client.put(f"{B}/draft", json=document, headers={"If-Match": tag})
+
+
+def finish(client, started):
+    """Wait for a job started by `started` (a 202 response) and return its final state."""
+    assert started.status_code == 202, started.text
+    job = started.json()
+    for _ in range(800):
+        job = client.get(f"/v1/builder/jobs/{job['id']}").json()
+        if job["status"] in ("done", "failed"):
+            return job
+        time.sleep(0.025)
+    raise AssertionError(f"job did not finish: {job}")
+
+
+def train(client):
+    return finish(client, client.post(f"{B}/versions"))
+
+
+def ship(client, document, note=""):
     """Save a draft, train it, deploy it; returns the new version."""
-    saved = client.put(f"{B}/draft", json=document)
+    saved = save(client, document)
     assert saved.status_code == 200 and saved.json()["valid"], saved.json()
-    trained = client.post(f"{B}/versions")
-    assert trained.status_code == 200, trained.text
-    version = trained.json()["version"]
-    assert client.post(f"{B}/deploy", json={"version": version}).json()["live"] == version
+    job = train(client)
+    assert job["status"] == "done", job
+    version = job["result"]["version"]
+    assert client.post(f"{B}/deploy", json={"version": version, "note": note}).json()["live"] == version
     return version
 
 
@@ -129,23 +155,23 @@ def test_renaming_labels_keeps_sessions_and_events_working(client, host):
 def test_invalid_draft_is_saved_with_its_problems(client):
     doc = draft(client)
     doc["scenarios"]["check_weather"]["steps"].append({"respond": "nope"})
-    body = client.put(f"{B}/draft", json=doc).json()
+    body = save(client, doc).json()
     assert body["valid"] is False and any("nope" in e for e in body["errors"])
     assert client.get(f"{B}/draft").json() == doc  # work in progress is kept
-    trained = client.post(f"{B}/versions")
-    assert trained.status_code == 422 and trained.json()["errors"]
+    job = train(client)
+    assert job["status"] == "failed" and job["error"]["kind"] == "invalid_draft" and job["error"]["errors"]
 
 
 def test_draft_id_must_match_the_url(client):
     doc = draft(client)
     doc["id"] = "other"
-    assert client.put(f"{B}/draft", json=doc).status_code == 422
+    assert save(client, doc).status_code == 422
 
 
 def test_training_below_the_bar_is_rejected(client, host):
     host.min_f1 = 1.01
-    response = client.post(f"{B}/versions")
-    assert response.status_code == 422 and "below" in response.json()["detail"]
+    job = train(client)
+    assert job["status"] == "failed" and job["error"]["kind"] == "below_bar" and "below" in job["error"]["detail"]
 
 
 def test_versions_and_deploy_errors(client, host):
@@ -186,9 +212,9 @@ def test_host_restart_loads_the_deployed_version(host, fake_embedder, tmp_path):
 def test_training_errors_are_reported_not_crashes(client):
     doc = draft(client)
     doc["intents"]["tiny"] = {"examples": ["가나다라 하나", "가나다라 둘", "가나다라 셋"]}
-    assert client.put(f"{B}/draft", json=doc).json()["valid"]  # few examples is only a warning
-    response = client.post(f"{B}/versions")
-    assert response.status_code == 422 and "at least" in response.json()["detail"]
+    assert save(client, doc).json()["valid"]  # few examples is only a warning
+    job = train(client)
+    assert job["status"] == "failed" and job["error"]["kind"] == "training" and "at least" in job["error"]["detail"]
 
 
 def test_deploying_a_stored_version_that_no_longer_runs_is_409(client, host):
@@ -213,17 +239,17 @@ def test_concurrent_deploys_leave_memory_and_repository_agreeing(client, host, m
     v1 = host.bots()["sample"]
     doc = draft(client)
     doc["label"] = "둘째"
-    client.put(f"{B}/draft", json=doc)
-    v2 = client.post(f"{B}/versions").json()["version"]
+    save(client, doc)
+    v2 = train(client)["result"]["version"]
     inside, release, calls = threading.Event(), threading.Event(), []
     real = host.repository.deploy
 
-    def slow(bot_id, version):
+    def slow(bot_id, version, note=""):
         calls.append(version)
         if version == v2:
             inside.set()
             release.wait(5)
-        real(bot_id, version)
+        real(bot_id, version, note)
 
     monkeypatch.setattr(host.repository, "deploy", slow)
     first = threading.Thread(target=host.deploy, args=("sample", v2))
@@ -313,6 +339,30 @@ def test_repository_contract(repository):
         repository.get_version(bot, "cccccccccccc")
 
 
+def test_repository_revisions_numbers_and_history(repository):
+    bot = f"t_{uuid.uuid4().hex[:8]}"
+    doc = {**read_document(SAMPLE), "id": bot}
+    assert repository.draft(bot) is None
+    assert repository.save_draft(bot, doc, expected_revision=0) == 1  # create
+    with pytest.raises(RevisionConflict) as exists:
+        repository.save_draft(bot, doc, expected_revision=0)
+    assert exists.value.current == 1
+    assert repository.save_draft(bot, {**doc, "label": "둘"}, expected_revision=1) == 2
+    with pytest.raises(RevisionConflict) as stale:
+        repository.save_draft(bot, {**doc, "label": "셋"}, expected_revision=1)  # the other tab
+    assert stale.value.current == 2 and repository.draft(bot).document["label"] == "둘"
+    assert repository.save_draft(bot, doc) == 3  # no expectation: plain overwrite (seeding)
+    first = repository.add_version(bot, "aaaaaaaaaaaa", doc, 0.9)
+    second = repository.add_version(bot, "bbbbbbbbbbbb", doc, None)
+    assert (first.number, second.number) == (1, 2)
+    assert repository.add_version(bot, "aaaaaaaaaaaa", doc, 0.1).number == 1  # idempotent keeps its number
+    repository.deploy(bot, "aaaaaaaaaaaa")
+    repository.deploy(bot, "bbbbbbbbbbbb", "예문 추가")
+    history = repository.history(bot)
+    assert [(d.version, d.number, d.note) for d in history] == [("bbbbbbbbbbbb", 2, "예문 추가"), ("aaaaaaaaaaaa", 1, "")]
+    assert all(d.deployed_at for d in history)
+
+
 def test_seeding_reuses_a_model_that_is_already_trained(host, fake_embedder, tmp_path, monkeypatch):
     fresh = BotHost(InMemoryRepository(), InMemoryStore(), fake_embedder, tmp_path, actions=synthetic_actions, min_f1=0.0)
 
@@ -327,3 +377,227 @@ def test_seeding_reuses_a_model_that_is_already_trained(host, fake_embedder, tmp
     assert loads == [host.bots()["sample"]]  # loaded once, by the deploy (a load builds a Kiwi: ~0.3 s)
     (info,) = fresh.repository.versions("sample")
     assert info.macro_f1 == host.repository.versions("sample")[0].macro_f1  # taken from meta.json
+
+
+# ---------------------------------------------------------------- E-A: ETag drafts, jobs, test builds, history
+
+
+def test_draft_saves_need_the_current_etag(client):
+    first = client.get(f"{B}/draft")
+    tag, doc = first.headers["ETag"], copy.deepcopy(first.json())
+    assert client.put(f"{B}/draft", json=doc).status_code == 428  # no If-Match over an existing draft
+    ok = client.put(f"{B}/draft", json=doc, headers={"If-Match": tag})
+    assert ok.status_code == 200 and ok.json()["revision"] == int(tag.strip('"')) + 1
+    assert ok.headers["ETag"] == f'"{ok.json()["revision"]}"'
+    stale = client.put(f"{B}/draft", json=doc, headers={"If-Match": tag})  # the second tab
+    assert stale.status_code == 412 and stale.json()["revision"] == ok.json()["revision"]
+    assert client.put(f"{B}/draft", json=doc, headers={"If-Match": "W/" + ok.headers["ETag"]}).status_code == 200
+    assert client.put(f"{B}/draft", json=doc, headers={"If-Match": "nonsense"}).status_code == 400
+
+
+def test_a_new_bot_draft_needs_no_etag_and_unknown_drafts_are_404(client):
+    created = client.put("/v1/builder/bots/fresh/draft", json={**draft(client), "id": "fresh"})
+    assert created.status_code == 200 and created.json()["revision"] == 1
+    assert client.get("/v1/builder/bots/nobody/draft").status_code == 404
+
+
+def coupon_block(doc, examples=("쿠폰 어디서 받아요",)):
+    doc["intents"]["coupon"] = {"examples": list(examples)}
+    doc["responses"]["coupon_info"] = {"text": "쿠폰함에서 받아요"}
+    doc["scenarios"]["coupon"] = {"trigger": {"intent": "coupon"}, "steps": [{"respond": "coupon_info"}]}
+    return doc
+
+
+def test_test_build_answers_a_new_one_example_block_before_any_deploy(client):
+    assert save(client, coupon_block(draft(client))).json()["valid"]
+    assert train(client)["error"]["kind"] == "training"  # too few examples for a deployable version
+    job = finish(client, client.post(f"{B}/test-builds"))
+    assert job["status"] == "done", job
+    build = job["result"]["build"]
+    r = client.post(f"{B}/test/{build}/sessions/t1/messages", json={"text": "쿠폰 어디서 받아요"})
+    assert r.status_code == 200 and [m["response"] for m in r.json()["messages"]] == ["coupon_info"]
+    assert r.json()["nlu"]["rule"] and r.json()["stack"] == []
+    assert say(client, "쿠폰 어디서 받아요", "user") != ["coupon_info"]  # users still talk to the deployed bot
+    client.post(f"{B}/test/{build}/sessions/t1/messages", json={"text": "양자역학 설명해줘 제발"})
+    items = client.get(f"{B}/misunderstood").json()["items"]
+    assert [i["session"] for i in items] == ["user"]  # the user's miss is listed; test chats are not user data
+
+
+def test_test_chat_shows_the_scenario_stack_and_actions(client):
+    build = finish(client, client.post(f"{B}/test-builds"))["result"]["build"]
+    url = f"{B}/test/{build}/sessions/t2/messages"
+    asked = client.post(url, json={"text": "날씨 어때요?"}).json()
+    assert [(f["scenario"], f["awaiting"]) for f in asked["stack"]] == [("check_weather", "location")]
+    answered = client.post(url, json={"text": "부산"}).json()
+    assert answered["actions"] == [{"scenario": "check_weather", "action": "get_weather", "ok": True}]
+    assert answered["stack"] == [] and [m["response"] for m in answered["messages"]] == ["weather_report"]
+
+
+def test_test_build_failures_are_reported(client, host, monkeypatch):
+    doc = draft(client)
+    doc["scenarios"]["check_weather"]["steps"].append({"respond": "nope"})
+    save(client, doc)
+    assert finish(client, client.post(f"{B}/test-builds"))["error"]["kind"] == "invalid_draft"
+
+    def cannot_fit(bot_id):
+        raise TrainingError("need at least two intents")
+
+    monkeypatch.setattr(host, "build_test", cannot_fit)
+    failed = finish(client, client.post(f"{B}/test-builds"))
+    assert failed["error"] == {"kind": "training", "detail": "need at least two intents"}
+
+
+def test_training_a_bot_without_a_draft_is_a_reported_failure(client, host):
+    doc = {**read_document(SAMPLE), "id": "nodraft"}
+    host.repository.add_version("nodraft", "cccccccccccc", doc, None)  # versions only (e.g. imported)
+    for path in ("versions", "test-builds"):
+        job = finish(client, client.post(f"/v1/builder/bots/nodraft/{path}"))
+        assert job["error"]["kind"] == "no_draft", job
+
+
+def test_test_builds_expire_are_capped_and_never_fall_back_to_live(client, host, tmp_path):
+    assert client.post(f"{B}/test/{'0' * 12}/sessions/x/messages", json={"text": "안녕"}).status_code == 410
+    builds = []
+    for label in ("하나", "둘", "셋"):
+        doc = draft(client)
+        doc["label"] = label
+        save(client, doc)
+        builds.append(finish(client, client.post(f"{B}/test-builds"))["result"]["build"])
+    def build_dirs():
+        return sorted(p.name for p in (tmp_path / "_test").iterdir())
+
+    kept = {host._tests[("sample", b)][1].name for b in builds[1:]}
+    assert len(set(builds)) == 3 and host.test_runtime("sample", builds[0]) is None  # test_keep=2: oldest went
+    assert build_dirs() == sorted(kept)  # its files went with it
+    host.test_ttl = 0.01
+    time.sleep(0.05)
+    assert client.post(f"{B}/test/{builds[2]}/sessions/x/messages", json={"text": "안녕"}).status_code == 410
+    assert build_dirs() == []
+
+
+def test_test_builds_do_not_push_out_versions_that_sessions_are_pinned_to(client, host):
+    assert say(client, "날씨 어때요?", "pinned") == ["ask_location"]  # on v1
+    doc = draft(client)
+    doc["label"] = "둘째"
+    ship(client, doc)  # keep=1: v1 and v2 stay loaded
+    for label in ("t1", "t2", "t3"):
+        doc["label"] = label
+        save(client, doc)
+        finish(client, client.post(f"{B}/test-builds"))
+    v1 = host.repository.versions("sample")[-1].version
+    assert host.runtime_for_session("sample", "sample:pinned").bot.version == v1  # still loaded and pinned
+    assert say(client, "부산", "pinned") == ["weather_report"]
+
+
+def test_versions_have_numbers_and_the_history_keeps_notes(client):
+    doc = draft(client)
+    doc["label"] = "둘째"
+    ship(client, doc, note="라벨 변경")
+    client.post(f"{B}/rollback")
+    body = client.get(f"{B}/versions").json()
+    assert [v["number"] for v in body["versions"]] == [2, 1]
+    assert [(h["number"], h["note"]) for h in body["history"]] == [(1, "rollback"), (2, "라벨 변경"), (1, "")]
+    assert client.post(f"{B}/deploy", json={"version": body["live"], "note": "x" * 101}).status_code == 422
+
+
+def test_job_endpoints_and_the_event_stream(client):
+    assert client.get(f"/v1/builder/jobs/{'0' * 32}").status_code == 404
+    assert client.get(f"/v1/builder/jobs/{'0' * 32}/events").status_code == 404
+    assert client.get("/v1/builder/jobs/not-a-job").status_code == 422
+    started = client.post(f"{B}/test-builds").json()
+    with client.stream("GET", f"/v1/builder/jobs/{started['id']}/events") as stream:
+        assert stream.headers["content-type"].startswith("text/event-stream")
+        events = [json.loads(line[6:]) for line in stream.iter_lines() if line.startswith("data: ")]
+    assert events[-1]["status"] == "done" and events[-1]["result"]["build"]
+    assert all(e["id"] == started["id"] for e in events)
+
+
+def test_admin_token_guards_jobs_and_test_builds(host):
+    client = TestClient(create_app(host, admin_token="s3cret"))
+    assert client.post(f"{B}/test-builds").status_code == 401
+    assert client.get(f"/v1/builder/jobs/{'0' * 32}").status_code == 401
+    assert client.post(f"{B}/test/{'0' * 12}/sessions/x/messages", json={"text": "안녕"}).status_code == 401
+
+
+def test_the_event_stream_sends_keepalives_while_a_job_waits(client, host, monkeypatch):
+    gate = threading.Event()
+    monkeypatch.setattr(host, "build_test", lambda bot_id: "0" * 12 if gate.wait(5) else "")
+    started = client.post(f"{B}/test-builds").json()
+    lines = []
+    with client.stream("GET", f"/v1/builder/jobs/{started['id']}/events", params={"wait": 0.1}) as stream:
+        for line in stream.iter_lines():
+            lines.append(line)
+            if line.startswith(": still waiting"):
+                gate.set()
+    assert any(line.startswith(": still waiting") for line in lines)
+    assert json.loads([line for line in lines if line.startswith("data: ")][-1][6:])["status"] == "done"
+
+
+def test_a_busy_test_session_is_409(client, host, monkeypatch):
+    build = finish(client, client.post(f"{B}/test-builds"))["result"]["build"]
+    runtime = host.test_runtime("sample", build)
+
+    def busy(key, text):
+        raise SessionBusy(key)
+
+    monkeypatch.setattr(runtime.processor, "handle", busy)
+    assert client.post(f"{B}/test/{build}/sessions/t/messages", json={"text": "안녕"}).status_code == 409
+
+
+def test_training_and_test_builds_embed_through_the_bulk_lane(fake_embedder, tmp_path):
+    class Counting:
+        def __init__(self, inner):
+            self.inner, self.model_id, self.prompt, self.texts = inner, inner.model_id, inner.prompt, 0
+
+        def encode(self, texts):
+            self.texts += len(texts)
+            return self.inner.encode(texts)
+
+    chat, bulk = Counting(fake_embedder), Counting(fake_embedder)
+    h = BotHost(InMemoryRepository(), InMemoryStore(), chat, tmp_path, actions=synthetic_actions, min_f1=0.0,
+                bulk_embedder=bulk)
+    h.seed(SAMPLE)  # trains
+    trained = bulk.texts
+    assert trained > 100 and chat.texts == 0
+    h.build_test("sample")
+    assert bulk.texts > trained and chat.texts == 0
+
+
+def test_start_removes_test_builds_of_an_earlier_run(client, host, tmp_path):
+    finish(client, client.post(f"{B}/test-builds"))
+    assert list((tmp_path / "_test").iterdir())
+    host.start()
+    assert not (tmp_path / "_test").exists()
+
+
+def test_unexpected_errors_in_jobs_are_internal_and_logged_not_shown(client, host, monkeypatch):
+    def bug(bot_id):
+        raise ValueError("secret numpy detail")
+
+    monkeypatch.setattr(host, "build_test", bug)
+    failed = finish(client, client.post(f"{B}/test-builds"))
+    assert failed["error"] == {"kind": "internal", "detail": "internal error"}
+
+    def missing(bot_id):
+        raise KeyError("some_internal_key")  # a bug, not "no draft"
+
+    monkeypatch.setattr(host, "train_draft", missing)
+    assert train(client)["error"]["kind"] == "internal"
+
+
+def test_postgres_versions_tolerate_rows_without_a_number_and_backfill_after_the_max():
+    repo = postgres_repository()
+    import psycopg
+
+    bot = f"t_{uuid.uuid4().hex[:8]}"
+    doc = {**read_document(SAMPLE), "id": bot}
+    repo.add_version(bot, "aaaaaaaaaaaa", doc, None)
+    with psycopg.connect(repo.dsn) as conn:  # an existing number out of creation order, then a row with none
+        conn.execute("UPDATE bot_versions SET number = 7 WHERE bot_id = %s", (bot,))
+        conn.execute("INSERT INTO bot_versions (bot_id, version, document) VALUES (%s, %s, %s)",
+                     (bot, "bbbbbbbbbbbb", psycopg.types.json.Jsonb(doc)))
+    repo.deploy(bot, "bbbbbbbbbbbb")
+    assert [(v.version, v.number) for v in repo.versions(bot)] == [("bbbbbbbbbbbb", 0), ("aaaaaaaaaaaa", 7)]
+    assert repo.deployments(bot) == ["bbbbbbbbbbbb"] and repo.history(bot)[0].number == 0
+    repo.ensure_schema()  # the backfill numbers it after the existing maximum
+    assert [(v.version, v.number) for v in repo.versions(bot)] == [("bbbbbbbbbbbb", 8), ("aaaaaaaaaaaa", 7)]
