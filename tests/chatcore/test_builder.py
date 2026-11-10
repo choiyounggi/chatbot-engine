@@ -26,8 +26,17 @@ from .conftest import SAMPLE
 B = "/v1/builder/bots/sample"
 
 
+@pytest.fixture(scope="session")
+def trained_sample(fake_embedder, tmp_path_factory):
+    """The sample bot trained once; each test gets a copy, so seeding reuses it instead of training."""
+    root = tmp_path_factory.mktemp("trained")
+    BotHost(InMemoryRepository(), InMemoryStore(), fake_embedder, root, actions=synthetic_actions, min_f1=0.0).seed(SAMPLE)
+    return root
+
+
 @pytest.fixture
-def host(fake_embedder, tmp_path):
+def host(fake_embedder, tmp_path, trained_sample):
+    shutil.copytree(trained_sample, tmp_path, dirs_exist_ok=True)
     h = BotHost(InMemoryRepository(), InMemoryStore(), fake_embedder, tmp_path, actions=synthetic_actions, keep=1, min_f1=0.0)
     h.seed(SAMPLE)
     return h

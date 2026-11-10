@@ -67,3 +67,18 @@ def test_shorter_form_is_tried_when_longer_one_fails_the_token_boundary(sample_b
 
     ex.kiwi = SplitKiwi()
     assert [(m.value, m.text) for m in ex.extract("서울시립대", TODAY) if m.entity == "city"] == [("서울", "서울")]
+
+
+def test_the_pooled_test_kiwi_extracts_exactly_what_a_real_kiwi_does(sample_bot):
+    from kiwipiepy import Kiwi
+
+    from tests.chatcore.conftest import PooledKiwi
+
+    real, pooled = EntityExtractor(sample_bot, kiwi=Kiwi()), EntityExtractor(sample_bot)
+    assert isinstance(pooled.kiwi, PooledKiwi)  # the suite-wide stand-in is active
+    # 광명날씨 / 군포날씨 are found only with the bot's user words: they prove the words reach the real Kiwi
+    for text in ("광명날씨", "군포날씨 알려줘", "서울역 날씨", "서울시립대 앞", "부산은?", "광주 내일 3시 날씨", ""):
+        assert pooled.extract(text, TODAY) == real.extract(text, TODAY), text
+    assert [m.value for m in pooled.extract("광명날씨", TODAY) if m.entity == "location"] == ["광명"]
+    with pytest.raises(AssertionError, match="before the first tokenize"):
+        pooled.kiwi.add_user_word("늦은단어", "NNP")
