@@ -22,7 +22,7 @@ import time
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi import Path as PathParam
@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from chatcore.bot.loader import BotError, document_version
 from chatcore.bot.repository import RevisionConflict, VersionNotFound
+from chatcore.bot.schema import BotDocument
 from chatcore.dialogue.state import fold
 from chatcore.dialogue.turn import MAX_INPUT_CHARS, TurnResult
 from chatcore.host import BelowBar, BotHost, Host, NoDraft, NoEarlierDeployment, NotTrained
@@ -78,6 +79,119 @@ class DeployIn(BaseModel):
     version: str = Field(pattern=r"^[0-9a-f]{12}$")
     note: str = Field("", max_length=100)  # what changed, shown in the deploy history
 
+
+class ParseOut(BaseModel):
+    bot: str
+    text: str
+    intents: list[tuple[str, float]]  # top 3: (intent, probability)
+    similarity: float  # cosine to the nearest example of any intent
+    matched_by: Literal["exact", "classifier"]
+    entities: list[dict[str, Any]]
+
+
+class MisunderstoodItem(BaseModel):
+    session: str
+    text: str
+    rule: str
+    intents: list[tuple[str, float]]
+
+
+class MisunderstoodOut(BaseModel):
+    bot: str
+    items: list[MisunderstoodItem]
+
+
+class BotSummaryOut(BaseModel):
+    id: str
+    label: str
+    live: str | None  # deployed version
+    live_number: int | None
+    serving: str | None  # version this server answers with (None: not loaded here)
+    draft_revision: int | None
+    undeployed_changes: bool  # the draft differs from what is live
+
+
+class BotListOut(BaseModel):
+    bots: list[BotSummaryOut]
+
+
+class DraftSavedOut(BaseModel):
+    bot: str
+    version: str | None  # the draft's content hash; None when it does not parse
+    revision: int
+    valid: bool
+    errors: list[str]
+    warnings: list[str]
+
+
+class JobOut(BaseModel):
+    id: str
+    kind: str  # "version" | "test_build"
+    bot: str
+    status: Literal["queued", "running", "done", "failed"]
+    result: dict[str, Any] | None  # version: {version, number, macro_f1, ...}; test_build: {build}
+    error: dict[str, Any] | None  # {kind, detail, ...}
+    created_at: str
+    finished_at: str | None
+
+
+class ActionOut(BaseModel):
+    scenario: str
+    action: str
+    ok: bool
+
+
+class FrameOut(BaseModel):
+    scenario: str
+    step: int
+    awaiting: str | None
+    slots: dict[str, Any]
+
+
+class TestTurnOut(BaseModel):
+    bot: str
+    build: str
+    session: str
+    messages: list[MessageOut]
+    nlu: dict[str, Any] | None
+    actions: list[ActionOut]
+    stack: list[FrameOut]
+
+
+class VersionOut(BaseModel):
+    version: str
+    number: int
+    created_at: str
+    macro_f1: float | None
+    live: bool
+
+
+class DeploymentOut(BaseModel):
+    version: str
+    number: int
+    note: str
+    deployed_at: str
+
+
+class VersionsOut(BaseModel):
+    bot: str
+    live: str | None
+    versions: list[VersionOut]
+    history: list[DeploymentOut]
+
+
+class LiveOut(BaseModel):
+    bot: str
+    live: str
+
+
+# The draft is stored as written (even when invalid), so it is described with the bot
+# document's schema but not validated against it.
+DOCUMENT_SCHEMA = {"$ref": "#/components/schemas/BotDocument"}
+DRAFT_RESPONSE: dict[int | str, dict[str, Any]] = {
+    200: {"model": BotDocument, "description": "the draft as stored (may be invalid); ETag header"}}
+DRAFT_BODY: dict[str, Any] = {
+    "requestBody": {"required": True, "content": {"application/json": {"schema": DOCUMENT_SCHEMA}}}}
 
 MISUNDERSTOOD_RULES = ("fallback", "clarify")
 
@@ -130,7 +244,7 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
         }, ensure_ascii=False))
         return TurnOut(bot=bot, session=session, messages=messages_out(result), nlu=nlu if debug else None)
 
-    @app.post("/v1/bots/{bot}/nlu/parse")
+    @app.post("/v1/bots/{bot}/nlu/parse", response_model=ParseOut)
     def parse(body: MessageIn, bot: str = BOT_ID) -> Any:
         rt = runtime(bot)
         text = " ".join(body.text.split())  # what a turn would see
@@ -143,7 +257,7 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
             return JSONResponse({"detail": "internal error"}, status_code=500)
         return {"bot": bot, "text": text, **result.to_log()}
 
-    @app.get("/v1/builder/bots/{bot}/misunderstood", dependencies=[Depends(admin)])
+    @app.get("/v1/builder/bots/{bot}/misunderstood", dependencies=[Depends(admin)], response_model=MisunderstoodOut)
     def misunderstood(bot: str = BOT_ID, limit: int = 50) -> dict[str, Any]:
         """Recent messages the bot could not handle — candidates for new examples."""
         runtime(bot)
@@ -204,7 +318,7 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
         if bot not in host.repository.bots():
             raise HTTPException(404, f"unknown bot {bot!r}")
 
-    @app.get("/v1/builder/bots", dependencies=deps)
+    @app.get("/v1/builder/bots", dependencies=deps, response_model=BotListOut)
     def list_bots() -> Any:
         """Every bot in the repository, with or without a deployment (the builder's bot list)."""
         live = host.bots()
@@ -230,7 +344,8 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
             })
         return {"bots": items}
 
-    @app.get("/v1/builder/bots/{bot}/draft", dependencies=deps)
+    @app.get("/v1/builder/bots/{bot}/draft", dependencies=deps,
+             responses=DRAFT_RESPONSE)
     def get_draft(response: Response, bot: str = BOT_ID) -> Any:
         known(bot)
         draft = host.repository.draft(bot)
@@ -239,7 +354,8 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
         response.headers["ETag"] = etag(draft.revision)
         return draft.document
 
-    @app.put("/v1/builder/bots/{bot}/draft", dependencies=deps)
+    @app.put("/v1/builder/bots/{bot}/draft", dependencies=deps, response_model=DraftSavedOut,
+             openapi_extra=DRAFT_BODY)
     def put_draft(document: dict[str, Any], response: Response, bot: str = BOT_ID,
                   if_match: str | None = Header(default=None)) -> Any:
         """Saving over an existing draft needs its ETag in If-Match (428 without, 412 when it moved on)."""
@@ -259,7 +375,7 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
         return {"bot": bot, "version": check.version, "revision": check.revision, "valid": not check.errors,
                 "errors": check.errors, "warnings": check.warnings}
 
-    @app.post("/v1/builder/bots/{bot}/versions", dependencies=deps, status_code=202)
+    @app.post("/v1/builder/bots/{bot}/versions", dependencies=deps, status_code=202, response_model=JobOut)
     def train_version(bot: str = BOT_ID) -> Any:
         """Start training the draft as a deployable version; follow it at /v1/builder/jobs/{id}."""
         known(bot)
@@ -281,7 +397,7 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
 
         return jobs.submit("version", bot, run).to_dict()
 
-    @app.post("/v1/builder/bots/{bot}/test-builds", dependencies=deps, status_code=202)
+    @app.post("/v1/builder/bots/{bot}/test-builds", dependencies=deps, status_code=202, response_model=JobOut)
     def test_build(bot: str = BOT_ID) -> Any:
         """Fit the draft for the test chat (no evaluation, not deployable); follow the job."""
         known(bot)
@@ -298,7 +414,7 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
 
         return jobs.submit("test_build", bot, run, urgent=True).to_dict()  # someone waits at the test chat
 
-    @app.get("/v1/builder/jobs/{job_id}", dependencies=deps)
+    @app.get("/v1/builder/jobs/{job_id}", dependencies=deps, response_model=JobOut)
     def get_job(job_id: str = JOB_ID) -> Any:
         job = jobs.get(job_id)
         if job is None:
@@ -335,7 +451,8 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
 
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
-    @app.post("/v1/builder/bots/{bot}/test/{build}/sessions/{session}/messages", dependencies=deps)
+    @app.post("/v1/builder/bots/{bot}/test/{build}/sessions/{session}/messages", dependencies=deps,
+              response_model=TestTurnOut)
     def test_message(body: MessageIn, bot: str = BOT_ID, build: str = VERSION, session: str = SESSION_ID) -> Any:
         """Chat with a test build. 410 once it expired or was replaced: never falls back to the live bot."""
         rt = host.test_runtime(bot, build)
@@ -356,7 +473,7 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
                       for f in state.stack],
         }
 
-    @app.get("/v1/builder/bots/{bot}/versions", dependencies=deps)
+    @app.get("/v1/builder/bots/{bot}/versions", dependencies=deps, response_model=VersionsOut)
     def list_versions(bot: str = BOT_ID) -> Any:
         known(bot)
         history = host.repository.history(bot)
@@ -368,14 +485,14 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
                 "history": [{"version": d.version, "number": d.number, "note": d.note, "deployed_at": d.deployed_at}
                             for d in history]}
 
-    @app.post("/v1/builder/bots/{bot}/deploy", dependencies=deps)
+    @app.post("/v1/builder/bots/{bot}/deploy", dependencies=deps, response_model=LiveOut)
     def deploy(body: DeployIn, bot: str = BOT_ID) -> Any:
         known(bot)
         with deploy_errors(body.version):
             host.deploy(bot, body.version, body.note.strip())
         return {"bot": bot, "live": body.version}
 
-    @app.post("/v1/builder/bots/{bot}/rollback", dependencies=deps)
+    @app.post("/v1/builder/bots/{bot}/rollback", dependencies=deps, response_model=LiveOut)
     def rollback(bot: str = BOT_ID) -> Any:
         known(bot)
         with deploy_errors("the previous version"):
@@ -403,7 +520,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
     import uvicorn
 
     from chatcore.host import BotHost
-    from chatcore.nlu.model import SentenceEmbedder
+    from chatcore.nlu.model import Embedder, SentenceEmbedder
     from chatcore.runtime import default_repository, default_store
     from chatcore.serving import BatchedEmbedder
 
@@ -414,13 +531,25 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
     parser.add_argument("--artifacts", type=Path, default=Path("artifacts"))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--embedder", choices=("sentence", "hashing"), default="sentence",
+                        help="hashing: a fast stand-in for tests and CI (use a separate --artifacts directory)")
+    parser.add_argument("--min-f1", type=float, default=0.90,
+                        help="macro-F1 a trained version needs to be deployable (the hashing embedder needs 0)")
     parser.add_argument("--keep-warm-ms", type=float, default=None,
                         help="when idle, run the model this often so the first request after a pause stays fast "
                              "(keeps the GPU busy; see docs/benchmarks/api_latency.md)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    embedder = BatchedEmbedder(SentenceEmbedder(), keepalive_ms=args.keep_warm_ms)
-    host = BotHost(default_repository(), default_store(), embedder, args.artifacts, bulk_embedder=embedder.bulk())
+    if args.embedder == "hashing":  # tests / CI / demos: instant, no model, NOT semantic
+        from chatcore.nlu.hashing import HashingEmbedder
+
+        log.warning("--embedder hashing: matching by character n-grams only; never serve real users with it")
+        inner: Embedder = HashingEmbedder()
+    else:
+        inner = SentenceEmbedder()
+    embedder = BatchedEmbedder(inner, keepalive_ms=args.keep_warm_ms)
+    host = BotHost(default_repository(), default_store(), embedder, args.artifacts, bulk_embedder=embedder.bulk(),
+                   min_f1=args.min_f1)
     host.start()
     for directory in args.bot:
         host.seed(directory)
