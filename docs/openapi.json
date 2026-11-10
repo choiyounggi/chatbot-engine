@@ -175,6 +175,7 @@
             "default": {
               "ambiguity_margin": 0.1,
               "intent_threshold": 0.3,
+              "keyword_match": false,
               "max_attempts": 3,
               "max_stack_depth": 5,
               "max_steps_per_turn": 20,
@@ -667,6 +668,11 @@
       "Intent": {
         "additionalProperties": false,
         "properties": {
+          "exact_only": {
+            "default": false,
+            "title": "Exact Only",
+            "type": "boolean"
+          },
           "examples": {
             "items": {
               "type": "string"
@@ -1094,6 +1100,7 @@
           "matched_by": {
             "enum": [
               "exact",
+              "keyword",
               "classifier"
             ],
             "title": "Matched By",
@@ -1470,6 +1477,11 @@
             "title": "Intent Threshold",
             "type": "number"
           },
+          "keyword_match": {
+            "default": false,
+            "title": "Keyword Match",
+            "type": "boolean"
+          },
           "max_attempts": {
             "default": 3,
             "maximum": 10.0,
@@ -1497,6 +1509,24 @@
             "minimum": 0.0,
             "title": "Rerun Window",
             "type": "integer"
+          },
+          "similarity_level": {
+            "anyOf": [
+              {
+                "enum": [
+                  "low",
+                  "normal",
+                  "somewhat_high",
+                  "high",
+                  "very_high"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Similarity Level"
           },
           "similarity_threshold": {
             "default": 0.39,

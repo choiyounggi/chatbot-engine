@@ -94,7 +94,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - needs 
     bot = load_bot(args.bot)
     convs = load_conversations(args.bot / "conversations.yaml")
     model = NluModel.load(bot, args.artifacts / bot.id / bot.version, SentenceEmbedder(), today=FIXED_NOW.date)
-    passed, failures = run(bot, NluInterpreter(model.parse), convs)
+    # model.bot carries the thresholds meta.json was trained with (NluModel.load).
+    passed, failures = run(model.bot, NluInterpreter(model.parse), convs)
     for f in failures:
         print(f"FAIL {f.conversation} / turn {f.turn} {f.user!r}: expected {f.expected}, got {f.got} (rule {f.rule})")
     print(f"{passed}/{len(convs)} conversations passed")
