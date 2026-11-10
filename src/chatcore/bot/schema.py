@@ -32,7 +32,7 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-# Builder's 5-step similarity dial (engine-core-plan.md "빌더 단계 E13"): a target out-of-scope
+# Builder's 5-step similarity dial (engine-core-plan.md "빌더 단계 E-B4"): a target out-of-scope
 # rejection rate, not a fixed number. Deploy training searches intent_threshold/similarity_threshold
 # for the pair that best meets it (chatcore.nlu.train._search_thresholds).
 SimilarityLevel = Literal["low", "normal", "somewhat_high", "high", "very_high"]

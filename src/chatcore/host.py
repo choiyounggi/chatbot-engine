@@ -377,7 +377,7 @@ class BotHost:
         except ModelMismatch as exc:
             raise NotTrained(str(exc)) from exc
         # model.bot carries the thresholds meta.json was trained with (NluModel.load, docs/
-        # engine-core-plan.md "빌더 단계 E13"), not necessarily the document's own numbers.
+        # engine-core-plan.md "빌더 단계 E-B4"), not necessarily the document's own numbers.
         served = model.bot
         return BotRuntime(served, TurnProcessor(served, self.store, NluInterpreter(model.parse), self.actions), model)
 

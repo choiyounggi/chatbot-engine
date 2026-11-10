@@ -184,7 +184,7 @@ def keyword_keys(bot: BotDefinition, matcher: KeywordMatcher) -> dict[tuple[str,
 @dataclass(frozen=True)
 class Thresholds:
     """The OOS-decision thresholds a model was evaluated at (bot/schema.py Settings.similarity_level,
-    docs/engine-core-plan.md "빌더 단계 E13"). `level` is None for the document's own numbers
+    docs/engine-core-plan.md "빌더 단계 E-B4"). `level` is None for the document's own numbers
     (no level asked, or deploy training found no out_of_scope examples to search against)."""
 
     intent_threshold: float
@@ -243,7 +243,7 @@ class NluModel:
     @staticmethod
     def thresholds(meta: dict[str, Any], bot: BotDefinition) -> Thresholds:
         """The thresholds the stored model was evaluated at: meta.json's `thresholds` (deploy
-        training, docs/engine-core-plan.md "빌더 단계 E13") when present, else the bot document's
+        training, docs/engine-core-plan.md "빌더 단계 E-B4") when present, else the bot document's
         own settings (test builds, and models trained before this field existed)."""
         raw = meta.get("thresholds")
         if not isinstance(raw, dict):

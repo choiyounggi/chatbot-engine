@@ -54,7 +54,7 @@ INTENT_GRID = tuple(round(x, 2) for x in np.arange(0.0, 0.90 + 1e-9, 0.05))
 SIMILARITY_GRID = tuple(round(x, 2) for x in np.arange(0.0, 0.95 + 1e-9, 0.01))
 
 # Measured on the sample bot with the real embedding model (dragonkue/snowflake-arctic-embed-l-
-# v2.0-ko, docs/engine-core-plan.md "빌더 단계 E13"): of the bot's 36 in-scope intent pairs, the
+# v2.0-ko, docs/engine-core-plan.md "빌더 단계 E-B4"): of the bot's 36 in-scope intent pairs, the
 # top 9 (0.762-0.946, led by temperature<->weather and bye<->greeting) are genuinely related or
 # share templated phrasing; similarity falls off smoothly from there (0.70 at rank 11, 0.54 at
 # rank 23), so 0.75 flags the clearly confusable pairs without flagging most of the 36.

@@ -360,7 +360,7 @@ def test_evaluate_with_similarity_level_searches_thresholds(sample_bot, fake_emb
 
 def test_similarity_levels_are_monotonic_in_rejection_and_recall(sample_bot, fake_embedder):
     """Raising the level never lowers the achieved out-of-scope rejection and never raises
-    in-scope recall (docs/engine-core-plan.md "빌더 단계 E13")."""
+    in-scope recall (docs/engine-core-plan.md "빌더 단계 E-B4")."""
     results = []
     for level in ("low", "normal", "somewhat_high", "high", "very_high"):
         leveled = sample_bot.model_copy(
