@@ -261,7 +261,7 @@ def validate(bot: BotDefinition, actions: Iterable[str] | None = None) -> Report
             if ex in seen and seen[ex] != iid:
                 errors.append(f"example {ex!r} is in both intents {seen[ex]} and {iid}")
             seen[ex] = iid
-        if len(intent.examples) < MIN_EXAMPLES:
+        if len(intent.examples) < MIN_EXAMPLES and not intent.exact_only:
             warnings.append(f"intent {iid} has only {len(intent.examples)} examples (recommend >= {MIN_EXAMPLES})")
     return Report(errors, warnings)
 

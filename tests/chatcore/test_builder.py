@@ -500,6 +500,27 @@ def test_versions_have_numbers_and_the_history_keeps_notes(client):
     assert client.post(f"{B}/deploy", json={"version": body["live"], "note": "x" * 101}).status_code == 422
 
 
+def test_train_version_result_includes_thresholds_and_confusable_pairs(client):
+    job = train(client)
+    assert job["status"] == "done", job
+    result = job["result"]
+    assert result["thresholds"]["level"] is None  # the sample bot sets no similarity_level
+    assert isinstance(result["confusable"], list)
+
+
+def test_test_build_result_includes_confusable_pairs(client):
+    job = finish(client, client.post(f"{B}/test-builds"))
+    assert job["status"] == "done", job
+    assert isinstance(job["result"]["confusable"], list)
+
+
+def test_host_confusable_needs_a_draft(host):
+    from chatcore.host import NoDraft
+
+    with pytest.raises(NoDraft):
+        host.confusable("nodraft")
+
+
 def test_job_endpoints_and_the_event_stream(client):
     assert client.get(f"/v1/builder/jobs/{'0' * 32}").status_code == 404
     assert client.get(f"/v1/builder/jobs/{'0' * 32}/events").status_code == 404

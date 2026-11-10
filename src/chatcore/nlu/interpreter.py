@@ -107,7 +107,7 @@ class NluInterpreter:
         passes = top.score >= s.intent_threshold and r.similarity >= s.similarity_threshold
         confident = top.intent != OOS and passes
         surely_out = top.intent == OOS and top.score >= s.switch_threshold  # "부산 맛집 추천해줘"
-        ambiguous = (r.matched_by != "exact" and second is not None and second.intent != OOS
+        ambiguous = (r.matched_by not in ("exact", "keyword") and second is not None and second.intent != OOS
                      and top.score - second.score < s.ambiguity_margin)
         target = scenario_of.get(top.intent) if confident else None
         entities = relevant(r.entities, bot)

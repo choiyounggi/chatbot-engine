@@ -82,6 +82,12 @@ def test_few_examples_is_a_warning_not_error():
     assert report.errors == [] and any("only 1 examples" in w for w in report.warnings)
 
 
+def test_exact_only_intent_is_exempt_from_the_few_examples_warning():
+    report = validate(bot(intents={"a": {"examples": ["하나"], "exact_only": True},
+                                    "b": {"examples": ["6", "7", "8", "9", "10"]}}))
+    assert report.errors == [] and not any("intent a has" in w for w in report.warnings)
+
+
 @pytest.mark.parametrize(
     "steps",
     [[{"collect": "c", "respond": "done"}], [{"unknown": 1}], ["respond"], []],
@@ -102,6 +108,14 @@ def test_bad_ids_and_regex_are_rejected():
         bot(scenarios={"Bad-Id": {"steps": [{"respond": "done"}]}})
     with pytest.raises(ValueError, match="invalid regex"):
         bot(entities={"p": {"kind": "regex", "pattern": "("}})
+
+
+def test_similarity_level_and_keyword_match_default_off_and_validate_the_literal():
+    b = bot()
+    assert b.settings.similarity_level is None and b.settings.keyword_match is False
+    assert bot(settings={"similarity_level": "high"}).settings.similarity_level == "high"
+    with pytest.raises(ValueError):
+        bot(settings={"similarity_level": "sky_high"})
 
 
 def test_dictionary_canonical_lookup():

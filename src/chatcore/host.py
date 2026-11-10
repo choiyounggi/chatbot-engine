@@ -35,7 +35,7 @@ from chatcore.dialogue.values import ActionRegistry
 from chatcore.nlu.entities import EntityExtractor, bare
 from chatcore.nlu.interpreter import NluInterpreter
 from chatcore.nlu.model import CachedEmbedder, Embedder, ModelMismatch, NluModel
-from chatcore.nlu.train import Report, fit_only, train
+from chatcore.nlu.train import ConfusablePair, Report, confusable_intents, fit_only, train
 from chatcore.runtime import BotRuntime
 from chatcore.store.base import TrackerStore
 
@@ -238,6 +238,15 @@ class BotHost:
             raise BelowBar(report, self.min_f1)
         return self.repository.add_version(bot_id, bot.version, document, report.macro_f1), report
 
+    def confusable(self, bot_id: str) -> list[ConfusablePair]:
+        """Confusable intent pairs in the current draft (train.py confusable_intents); for a
+        test build's job result, since fit_only() does no cross-validation of its own."""
+        document = self.repository.get_draft(bot_id)
+        if document is None:
+            raise NoDraft(bot_id)
+        bot = bot_from_document(document, self.actions.names())
+        return confusable_intents(bot, self.bulk)
+
     def deploy(self, bot_id: str, version: str, note: str = "") -> None:
         """Build the runtime first (NotTrained / VersionNotFound / BotError leave everything as
         it was), record the deployment, then switch new sessions to it."""
@@ -347,7 +356,10 @@ class BotHost:
                                   EntityExtractor(bot))
         except ModelMismatch as exc:
             raise NotTrained(str(exc)) from exc
-        return BotRuntime(bot, TurnProcessor(bot, self.store, NluInterpreter(model.parse), self.actions), model)
+        # model.bot carries the thresholds meta.json was trained with (NluModel.load, docs/
+        # engine-core-plan.md "빌더 단계 E13"), not necessarily the document's own numbers.
+        served = model.bot
+        return BotRuntime(served, TurnProcessor(served, self.store, NluInterpreter(model.parse), self.actions), model)
 
 
 def _remove(directories: list[Path]) -> None:

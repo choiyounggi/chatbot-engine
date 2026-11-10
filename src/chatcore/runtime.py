@@ -32,7 +32,9 @@ def build_runtime(bot_dir: Path, artifacts: Path, embedder: Embedder, store: Tra
     actions = actions or builtin_registry()
     bot = load_bot(bot_dir, actions=actions.names())
     model = NluModel.load(bot, artifacts / bot.id / bot.version, embedder, EntityExtractor(bot))
-    return BotRuntime(bot, TurnProcessor(bot, store, NluInterpreter(model.parse), actions), model)
+    # model.bot carries the thresholds meta.json was trained with (NluModel.load).
+    served = model.bot
+    return BotRuntime(served, TurnProcessor(served, store, NluInterpreter(model.parse), actions), model)
 
 
 def default_repository() -> BotRepository:

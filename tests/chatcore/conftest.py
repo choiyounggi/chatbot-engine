@@ -50,6 +50,7 @@ class PooledKiwi:
 @pytest.fixture(autouse=True)
 def pooled_kiwi(monkeypatch):
     monkeypatch.setattr("chatcore.nlu.entities.Kiwi", PooledKiwi)
+    monkeypatch.setattr("chatcore.nlu.keyword.Kiwi", PooledKiwi)
 
 
 @pytest.fixture(scope="session")

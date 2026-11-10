@@ -108,7 +108,7 @@ class ParseOut(BaseModel):
     text: str
     intents: list[tuple[str, float]]  # top 3: (intent, probability)
     similarity: float  # cosine to the nearest example of any intent
-    matched_by: Literal["exact", "classifier"]
+    matched_by: Literal["exact", "keyword", "classifier"]
     entities: list[dict[str, Any]]
 
 
@@ -578,7 +578,8 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
                 raise JobFailed("no_draft", {"detail": f"{bot!r} has no draft"}) from exc
             return {"version": info.version, "number": info.number, "macro_f1": report.macro_f1,
                     "clarify_rate": report.clarify_rate, "per_intent_f1": report.per_intent_f1,
-                    "warnings": report.warnings}
+                    "warnings": report.warnings, "thresholds": asdict(report.thresholds),
+                    "confusable": [asdict(c) for c in report.confusable]}
 
         return jobs.submit("version", bot, run).to_dict()
 
@@ -589,7 +590,9 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
 
         def run() -> dict[str, Any]:
             try:
-                return {"build": host.build_test(bot)}
+                build = host.build_test(bot)
+                confusable = host.confusable(bot)
+                return {"build": build, "confusable": [asdict(c) for c in confusable]}
             except BotError as exc:
                 raise JobFailed("invalid_draft", {"detail": "the draft is invalid", "errors": exc.problems}) from exc
             except TrainingError as exc:  # fewer than two intents, nothing in scope
