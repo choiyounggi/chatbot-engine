@@ -37,6 +37,11 @@ class Restart:
 
 
 @dataclass(frozen=True)
+class Escape:
+    """The bot's escape phrase: end every running scenario, then run the escape block."""
+
+
+@dataclass(frozen=True)
 class Clarify:
     intents: tuple[str, ...]
 
@@ -55,7 +60,7 @@ class Fallback:
     pass
 
 
-Command = StartScenario | SetSlot | CancelScenario | Restart | Clarify | RerunScenario | Fallback
+Command = StartScenario | SetSlot | CancelScenario | Restart | Escape | Clarify | RerunScenario | Fallback
 
 
 class CommandFormatError(ValueError):
@@ -72,6 +77,8 @@ def to_dict(cmd: Command) -> dict[str, Any]:
             return {"cancel": True}
         case Restart():
             return {"restart": True}
+        case Escape():
+            return {"escape": True}
         case Clarify(intents):
             return {"clarify": list(intents)}
         case RerunScenario(scenario, slot, value):
@@ -111,7 +118,7 @@ def from_dict(d: Mapping[str, Any]) -> Command:
         if not isinstance(intents, list) or len(intents) < 2:
             raise CommandFormatError(f"clarify needs a list of at least two intents: {d!r}")
         return Clarify(tuple(str(i) for i in intents))
-    for key, cls in (("cancel", CancelScenario), ("restart", Restart), ("fallback", Fallback)):
+    for key, cls in (("cancel", CancelScenario), ("restart", Restart), ("escape", Escape), ("fallback", Fallback)):
         if key in d:
             return cls()
     raise CommandFormatError(f"unknown command: {d!r}")

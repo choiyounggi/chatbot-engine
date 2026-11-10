@@ -1,9 +1,10 @@
 """Context-first interpretation: NLU result + dialogue state -> commands
 (docs/engine-core-plan.md §3.2, rules 1-6, first match wins).
 
-1. exact system phrase ("취소", "처음으로")            -> CancelScenario / Restart
+1. exact system phrase: the bot's escape phrases      -> Escape
+   ("취소", "처음으로")                                 -> CancelScenario / Restart
 2. a slot is pending and the input carries its entity  -> SetSlot (unless a confident,
-   different intent wins by switch_threshold)
+   different intent wins by switch_threshold); a pending sys.text slot takes the whole input
    (an input that is only an entity plus particles — "부산은?", "제주도는 어때?" — goes
    to rule 4 before rule 3, and may only start a scenario that takes that entity:
    classifiers give such short inputs confident but meaningless intents)
@@ -29,6 +30,7 @@ from chatcore.dialogue.commands import (
     CancelScenario,
     Clarify,
     Command,
+    Escape,
     Fallback,
     RerunScenario,
     Restart,
@@ -40,6 +42,19 @@ from chatcore.dialogue.state import DialogueState
 from chatcore.dialogue.turn import Interpretation
 from chatcore.nlu.entities import EntityMatch, bare, normalize, pick
 from chatcore.nlu.model import OOS, NluResult
+
+TEXT = "sys.text"  # never extracted: it is the whole answer to a pending question
+# System entities every bot has always seen; the newer ones count only for bots whose slots use them,
+# so an old bot decides exactly as before ("주말은 어때?" must not become an entity-only follow-up).
+BASE_SYSTEM = frozenset({"sys.number", "sys.date", "sys.time"})
+
+
+def relevant(entities: tuple[EntityMatch, ...], bot: BotDefinition) -> tuple[EntityMatch, ...]:
+    """The matches of entity types this bot knows: its own entities, the base system entities,
+    and the system entities its slots use."""
+    used = {slot.entity for sc in bot.scenarios.values() for slot in sc.slots.values()}
+    known = set(bot.entities) | BASE_SYSTEM | used
+    return tuple(m for m in entities if m.entity in known)
 
 CANCEL_PHRASES = frozenset(
     {"취소", "취소할게", "취소해줘", "그만", "그만할래", "그만할게", "됐어", "안 할래", "안할래", "중단"}
@@ -79,6 +94,9 @@ class NluInterpreter:
     def _decide(self, text: str, r: NluResult, state: DialogueState, bot: BotDefinition) -> tuple[str, list[Command]]:
         s = bot.settings
         phrase = bare(text)
+        escape = bot.system.escape
+        if escape is not None and phrase in {bare(p) for p in escape.phrases} - {""}:  # "..." is not an escape
+            return "system", [Escape()]
         if phrase in CANCEL_PHRASES:
             return "system", [CancelScenario()]
         if phrase in RESTART_PHRASES:
@@ -92,7 +110,8 @@ class NluInterpreter:
         ambiguous = (r.matched_by != "exact" and second is not None and second.intent != OOS
                      and top.score - second.score < s.ambiguity_margin)
         target = scenario_of.get(top.intent) if confident else None
-        bare_entities = entity_only(text, r.entities)
+        entities = relevant(r.entities, bot)
+        bare_entities = entity_only(text, entities)
         if bare_entities and target is not None:
             types = {slot.entity for slot in bot.scenarios[target].slots.values()}
             if not any(m.entity in types for m in bare_entities):
@@ -103,25 +122,27 @@ class NluInterpreter:
         if frame is not None and frame.awaiting is not None:
             waiting = bot.scenarios[frame.scenario]
             slot = waiting.slots[frame.awaiting]
-            found = pick(list(r.entities), {slot.entity})
+            found = pick(list(entities), {slot.entity})
             switching = (target is not None and target != frame.scenario and not ambiguous
                          and top.score >= s.switch_threshold)
+            if slot.entity == TEXT and not switching:  # any answer is the value
+                return "slot", [SetSlot(frame.awaiting, normalize(text))]
             if found and not switching:
                 return "slot", [SetSlot(frame.awaiting, found[0].value)]
 
         # 4a. entity-only follow-up on a recently finished scenario (before trusting the intent)
         if bare_entities and not surely_out:
-            rerun = self._rerun(state, bot, r.entities)
+            rerun = self._rerun(state, bot, entities)
             if rerun is not None:
                 return "rerun", [rerun]
 
         # 3. a clear intent
         if target is not None and not ambiguous:
-            return "intent", [StartScenario(target, self._slots_for(bot.scenarios[target], r.entities))]
+            return "intent", [StartScenario(target, self._slots_for(bot.scenarios[target], entities))]
 
         # 4. follow-up on a recently finished scenario (not when the input is clearly about something else)
         if (not confident or target is None) and not surely_out:
-            rerun = self._rerun(state, bot, r.entities)
+            rerun = self._rerun(state, bot, entities)
             if rerun is not None:
                 return "rerun", [rerun]
 

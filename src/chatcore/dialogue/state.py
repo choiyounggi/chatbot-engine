@@ -52,6 +52,7 @@ class DialogueState:
     bot_id: str | None = None
     bot_version: str | None = None
     turns: int = 0  # user turns so far
+    last_active: str | None = None  # ISO time of the last user message or session start, when recorded
     stack: list[Frame] = field(default_factory=list)
     completed: list[Completed] = field(default_factory=list)  # most recent last
 
@@ -81,10 +82,12 @@ def _top(state: DialogueState, event: Event, scenario: str) -> Frame:
 def apply(state: DialogueState, event: Event) -> DialogueState:
     """Apply one event in place and return the state."""
     match event:
-        case SessionStarted(bot_id=bot_id, bot_version=version):
+        case SessionStarted(bot_id=bot_id, bot_version=version, at=at):
             state.bot_id, state.bot_version = bot_id, version
-        case UserUttered():
+            state.last_active = at or state.last_active
+        case UserUttered(at=at):
             state.turns += 1
+            state.last_active = at or state.last_active
         case ScenarioStarted(scenario=sid, called=called):
             state.stack.append(Frame(sid, called=called))
         case StepEntered(scenario=sid, index=i):

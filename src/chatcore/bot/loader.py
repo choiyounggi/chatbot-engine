@@ -30,8 +30,12 @@ from chatcore.bot.schema import (
     DictionaryEntity,
     RespondStep,
 )
+from chatcore.dialogue.values import SlotValueError, normalize_slot
 
 MIN_EXAMPLES = 5
+# Kakao channel limits: warnings only, the engine itself serves any channel
+KAKAO_BUBBLES, KAKAO_QUICK_REPLIES, KAKAO_LABEL = 3, 10, 14
+KAKAO_CARD_BUTTONS, KAKAO_LIST_ITEMS, KAKAO_CAROUSEL = 3, 5, 10
 LOOSE_PLACEHOLDER = re.compile(r"\{\{.*?\}\}")
 
 
@@ -172,6 +176,12 @@ def validate(bot: BotDefinition, actions: Iterable[str] | None = None) -> Report
     if missing:
         errors.append(f"missing required responses: {missing}")
     errors += _template_errors(bot)
+    system_errors, system_warnings = _system_problems(bot)
+    errors += system_errors
+    warnings += system_warnings
+    response_errors, response_warnings = _response_problems(bot)
+    errors += response_errors
+    warnings += response_warnings
 
     triggered: dict[str, str] = {}
     for sid, sc in bot.scenarios.items():
@@ -188,13 +198,28 @@ def validate(bot: BotDefinition, actions: Iterable[str] | None = None) -> Report
         if sc.on_error is not None and sc.on_error not in bot.responses:
             errors.append(f"{where}: on_error response {sc.on_error!r} is not defined")
         for name, slot in sc.slots.items():
-            if slot.entity not in bot.entities and slot.entity not in SYSTEM_ENTITIES:
+            known_entity = slot.entity in bot.entities or slot.entity in SYSTEM_ENTITIES
+            if not known_entity:
                 errors.append(f"{where}: slot {name!r} uses unknown entity {slot.entity!r}")
-            if slot.ask not in bot.responses:
+            if slot.ask is not None and slot.ask not in bot.responses:
                 errors.append(f"{where}: slot {name!r} asks with unknown response {slot.ask!r}")
+            if slot.default is not None and known_entity:
+                try:
+                    normalize_slot(bot, slot.entity, slot.default)
+                except SlotValueError as exc:
+                    errors.append(f"{where}: slot {name!r} default {slot.default!r} is not a {slot.entity}: {exc}")
+            if slot.validation is not None:
+                check = slot.validation
+                if known_actions is not None and check.action not in known_actions:
+                    errors.append(f"{where}: slot {name!r} is validated by unknown action {check.action!r}")
+                if check.fail not in bot.responses:
+                    errors.append(f"{where}: slot {name!r} fails validation with unknown response {check.fail!r}")
         for name, slot in sc.slots.items():
-            if slot.ask in bot.responses and f"slots.{name}" in _paths_of(bot.responses[slot.ask].bodies()):
+            if slot.ask in bot.responses and f"slots.{name}" in _paths_of(bot.responses[slot.ask].texts(replies=False)):
                 errors.append(f"{where}: response {slot.ask!r} asks for slot {name!r} but also shows it")
+        bubbles = sum(isinstance(step, RespondStep) for step in sc.steps)
+        if bubbles > KAKAO_BUBBLES:
+            warnings.append(f"{where}: {bubbles} responses in one block; a Kakao channel shows at most {KAKAO_BUBBLES}")
         for i, step in enumerate(sc.steps):
             at = f"{where} step {i}"
             if isinstance(step, CollectStep) and step.collect not in sc.slots:
@@ -241,6 +266,64 @@ def validate(bot: BotDefinition, actions: Iterable[str] | None = None) -> Report
     return Report(errors, warnings)
 
 
+def _system_problems(bot: BotDefinition) -> tuple[list[str], list[str]]:
+    """welcome / escape / timeout refer to things that exist; escape phrases do not shadow examples."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    system = bot.system
+    if system.welcome is not None and system.welcome not in bot.scenarios:
+        errors.append(f"system.welcome: unknown scenario {system.welcome!r}")
+    if system.escape is not None:
+        if system.escape.scenario is not None and system.escape.scenario not in bot.scenarios:
+            errors.append(f"system.escape: unknown scenario {system.escape.scenario!r}")
+        phrases = {_squash(p) for p in system.escape.phrases}
+        empty = [p for p in system.escape.phrases if not _squash(p)]
+        if empty:
+            errors.append(f"system.escape: phrases with only punctuation never match: {empty}")
+        shadowed = sorted({ex for intent in bot.intents.values() for ex in intent.examples if _squash(ex) in phrases})
+        if shadowed:
+            warnings.append(f"system.escape: these examples are escape phrases, so they always escape: {shadowed}")
+    notice = system.timeout.notice if system.timeout is not None else None
+    if notice is not None:
+        if notice not in bot.responses:
+            errors.append(f"system.timeout: unknown notice response {notice!r}")
+        elif _paths_of(bot.responses[notice].texts()):
+            errors.append(f"system.timeout: notice {notice!r} is said after the conversation is gone; "
+                          "remove its variables")
+    return errors, warnings
+
+
+def _squash(text: str) -> str:
+    """Roughly what the interpreter compares exact phrases by (bare()), without loading Kiwi."""
+    return re.sub(r"\s+", " ", text).strip(" .,!?~…·'\"()[]")
+
+
+def _response_problems(bot: BotDefinition) -> tuple[list[str], list[str]]:
+    """Block buttons point at scenarios; Kakao's size limits as warnings."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    for rid, r in bot.responses.items():
+        where = f"response {rid!r}"
+        errors += [f"{where}: block button to unknown scenario {t!r}" for t in sorted(r.block_targets())
+                   if t not in bot.scenarios]
+        replies = r.replies()
+        if len(replies) > KAKAO_QUICK_REPLIES:
+            warnings.append(f"{where}: {len(replies)} quick replies; Kakao shows at most {KAKAO_QUICK_REPLIES}")
+        long = [q.label for q in replies if len(q.label) > KAKAO_LABEL] + [
+            b.label for b in r.buttons() if len(b.label) > KAKAO_LABEL]
+        if long:
+            warnings.append(f"{where}: labels longer than {KAKAO_LABEL} characters are cut on Kakao: {long}")
+        cards = ([r.basic_card] if r.basic_card else []) + (r.carousel.items if r.carousel else [])
+        if any(len(c.buttons) > KAKAO_CARD_BUTTONS for c in cards) or (
+                r.list_card is not None and len(r.list_card.buttons) > KAKAO_CARD_BUTTONS):
+            warnings.append(f"{where}: a card has more than {KAKAO_CARD_BUTTONS} buttons (Kakao's limit)")
+        if r.list_card is not None and len(r.list_card.items) > KAKAO_LIST_ITEMS:
+            warnings.append(f"{where}: {len(r.list_card.items)} list items; Kakao shows at most {KAKAO_LIST_ITEMS}")
+        if r.carousel is not None and len(r.carousel.items) > KAKAO_CAROUSEL:
+            warnings.append(f"{where}: {len(r.carousel.items)} carousel cards; Kakao shows at most {KAKAO_CAROUSEL}")
+    return errors, warnings
+
+
 def _paths_of(texts: Iterable[str]) -> set[str]:
     return {m.group(1) for t in texts for m in PLACEHOLDER.finditer(t)}
 
@@ -260,7 +343,7 @@ def _template_errors(bot: BotDefinition) -> list[str]:
         return path
 
     errors = []
-    for where, texts in [(f"response {rid!r}", r.bodies() + r.quick_replies) for rid, r in bot.responses.items()] + [
+    for where, texts in [(f"response {rid!r}", r.texts()) for rid, r in bot.responses.items()] + [
         (f"scenario {sid} step {i}", list(st.args.values()))
         for sid, sc in bot.scenarios.items() for i, st in enumerate(sc.steps) if isinstance(st, ActionStep)
     ]:
@@ -272,7 +355,7 @@ def _template_errors(bot: BotDefinition) -> list[str]:
         filters = {m.group(2) for t in texts for m in PLACEHOLDER.finditer(t) if m.group(2)}
         errors += [f"{where}: unknown particle filter |{f}" for f in sorted(filters - PARTICLES)]
     for rid, resp in bot.responses.items():
-        texts = resp.bodies() + resp.quick_replies
+        texts = resp.texts()
         paths = _paths_of(texts)
         if rid in REQUIRED_RESPONSES and paths:
             errors.append(f"response {rid!r} is rendered by the engine itself; remove variables {sorted(paths)}")

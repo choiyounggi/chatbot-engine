@@ -1,6 +1,7 @@
 """HTTP API (docs/engine-core-plan.md Phase 5).
 
-    POST /v1/bots/{bot}/sessions/{session}/messages   {"text": "..."} -> bot messages
+    POST /v1/bots/{bot}/sessions/{session}/messages   {"text": "...", "block_id"?: "..."} -> bot messages
+    POST /v1/bots/{bot}/sessions/{session}/open       the user opened the chat -> welcome messages
     POST /v1/bots/{bot}/nlu/parse                     {"text": "..."} -> NLU result only
     GET  /healthz
     /v1/builder/...                                    drafts, training jobs, test builds, deploy (admin)
@@ -31,9 +32,9 @@ from pydantic import BaseModel, Field
 
 from chatcore.bot.loader import BotError, document_version
 from chatcore.bot.repository import RevisionConflict, VersionNotFound
-from chatcore.bot.schema import BotDocument
+from chatcore.bot.schema import BasicCard, BotDocument, Carousel, ListCard, SimpleImage
 from chatcore.dialogue.state import fold
-from chatcore.dialogue.turn import MAX_INPUT_CHARS, TurnResult
+from chatcore.dialogue.turn import MAX_INPUT_CHARS, TurnResult, UnknownBlock
 from chatcore.host import BelowBar, BotHost, Host, NoDraft, NoEarlierDeployment, NotTrained
 from chatcore.jobs import JobFailed, JobRunner
 from chatcore.nlu.train import TrainingError
@@ -60,12 +61,29 @@ TEST_SESSION_SEP = "~"  # test-build sessions are "<bot>~<session>": never "<bot
 
 class MessageIn(BaseModel):
     text: str = Field(max_length=10_000)  # the engine itself answers input_invalid above 1,000 characters
+    # the user pressed a quick reply / button with action "block": start this scenario without understanding
+    block_id: str | None = Field(None, pattern=r"^[a-z][a-z0-9_]{0,63}$")
+
+
+class QuickReplyOut(BaseModel):
+    """A quick reply as said (not length-checked: a clarify label or a filled-in template may be long)."""
+
+    label: str
+    action: Literal["message", "block"]
+    message_text: str | None
+    block_id: str | None
 
 
 class MessageOut(BaseModel):
     response: str
-    text: str
-    quick_replies: list[str]
+    text: str  # the text; for a rich message a plain-text summary
+    quick_replies: list[str]  # labels (quick_reply_items has their actions)
+    type: Literal["text", "simple_image", "basic_card", "list_card", "carousel"] = "text"
+    simple_image: SimpleImage | None = None
+    basic_card: BasicCard | None = None
+    list_card: ListCard | None = None
+    carousel: Carousel | None = None
+    quick_reply_items: list[QuickReplyOut] = Field(default_factory=list)
 
 
 class TurnOut(BaseModel):
@@ -232,7 +250,7 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
         if rt is None:
             raise HTTPException(404, f"unknown bot {bot!r}")
         started = time.perf_counter()
-        result = run_turn(rt, key, body.text)
+        result = run_turn(rt, key, body.text, body.block_id)
         if isinstance(result, JSONResponse):
             return result
         nlu = next((e.nlu for e in reversed(result.events) if e.type == "commands_received"), None)
@@ -243,6 +261,23 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
             "responses": [m.response for m in result.messages],
         }, ensure_ascii=False))
         return TurnOut(bot=bot, session=session, messages=messages_out(result), nlu=nlu if debug else None)
+
+    @app.post("/v1/bots/{bot}/sessions/{session}/open", response_model=TurnOut)
+    def open_session(bot: str = BOT_ID, session: str = SESSION_ID) -> Any:
+        """The user opened the conversation: a new session answers with the welcome block (if any);
+        an existing one with no messages."""
+        key = f"{bot}:{session}"
+        try:
+            rt = host.runtime_for_session(bot, key)
+        except UNAVAILABLE:
+            log.exception("storage unavailable for %s/%s", bot, session)
+            return JSONResponse({"detail": "temporarily unavailable, please retry"}, status_code=503)
+        if rt is None:
+            raise HTTPException(404, f"unknown bot {bot!r}")
+        result = run_turn(rt, key, None)
+        if isinstance(result, JSONResponse):
+            return result
+        return TurnOut(bot=bot, session=session, messages=messages_out(result))
 
     @app.post("/v1/bots/{bot}/nlu/parse", response_model=ParseOut)
     def parse(body: MessageIn, bot: str = BOT_ID) -> Any:
@@ -280,9 +315,12 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
     return app
 
 
-def run_turn(rt: BotRuntime, key: str, text: str) -> TurnResult | JSONResponse:
+def run_turn(rt: BotRuntime, key: str, text: str | None, block: str | None = None) -> TurnResult | JSONResponse:
+    """One message (or, with text None, opening the session) with the API's error mapping."""
     try:
-        return rt.processor.handle(key, text)
+        return rt.processor.open(key) if text is None else rt.processor.handle(key, text, block)
+    except UnknownBlock:
+        return JSONResponse({"detail": "block_id is not a block any response of this bot offers"}, status_code=422)
     except SessionBusy:
         return JSONResponse({"detail": "this session is still answering the previous message"}, status_code=409)
     except UNAVAILABLE:  # database/network down: worth retrying
@@ -294,7 +332,16 @@ def run_turn(rt: BotRuntime, key: str, text: str) -> TurnResult | JSONResponse:
 
 
 def messages_out(result: TurnResult) -> list[MessageOut]:
-    return [MessageOut(response=m.response, text=m.text, quick_replies=list(m.quick_replies)) for m in result.messages]
+    out = []
+    for m in result.messages:
+        items = [QuickReplyOut(label=r.label, action=r.action, message_text=r.message_text, block_id=r.block_id)
+                 for r in m.replies]
+        message = MessageOut(response=m.response, text=m.text, quick_replies=list(m.quick_replies),
+                             quick_reply_items=items)
+        if m.rich is not None:
+            message = message.model_copy(update={"type": m.kind, m.kind: m.rich})
+        out.append(message)
+    return out
 
 
 def etag(revision: int) -> str:
@@ -455,11 +502,20 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
               response_model=TestTurnOut)
     def test_message(body: MessageIn, bot: str = BOT_ID, build: str = VERSION, session: str = SESSION_ID) -> Any:
         """Chat with a test build. 410 once it expired or was replaced: never falls back to the live bot."""
+        return test_turn(bot, build, session, body.text, body.block_id)
+
+    @app.post("/v1/builder/bots/{bot}/test/{build}/sessions/{session}/open", dependencies=deps,
+              response_model=TestTurnOut)
+    def test_open(bot: str = BOT_ID, build: str = VERSION, session: str = SESSION_ID) -> Any:
+        """Open a test chat: the welcome block of a new session (410 like messages)."""
+        return test_turn(bot, build, session, None, None)
+
+    def test_turn(bot: str, build: str, session: str, text: str | None, block: str | None) -> Any:
         rt = host.test_runtime(bot, build)
         if rt is None:
             raise HTTPException(410, "this test build expired; save the draft again")
         key = f"{bot}{TEST_SESSION_SEP}{session}"
-        result = run_turn(rt, key, body.text)
+        result = run_turn(rt, key, text, block)
         if isinstance(result, JSONResponse):
             return result
         events = result.events

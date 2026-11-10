@@ -15,7 +15,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 ID = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$", max_length=64)]
 # {{ path }} or {{ path|은 }} (a Korean particle chosen by the value's final consonant, see bot/josa.py)
 PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)\s*(?:\|\s*([가-힣]+)\s*)?\}\}")
-SYSTEM_ENTITIES = frozenset({"sys.number", "sys.date", "sys.time"})
+SYSTEM_ENTITIES = frozenset({
+    "sys.number", "sys.date", "sys.time", "sys.text", "sys.url",
+    "sys.number.ordinal", "sys.number.age", "sys.number.percent", "sys.date.period", "sys.time.period",
+    "sys.unit.currency", "sys.unit.length", "sys.unit.weight", "sys.unit.volume", "sys.unit.temperature",
+    "sys.unit.speed",
+})
+# A link or image address: http(s), or a template that renders one (checked again after rendering).
+URL = re.compile(r"https?://\S+")
+MAX_QUICK_REPLY = 40  # characters; longer is an error (Kakao's 14 is only a warning, bot/loader.py)
 # Responses the engine itself needs; every bot must define them.
 REQUIRED_RESPONSES = frozenset({"fallback", "cancelled", "restarted", "error", "clarify", "input_invalid"})
 
@@ -74,30 +82,251 @@ class RegexEntity(Model):
 Entity = Annotated[DictionaryEntity | RegexEntity, Field(discriminator="kind")]
 
 
+SlotDefault = str | int | float
+
+
+class Validation(Model):
+    """Check a value with an action before accepting it (Kakao: parameter validation)."""
+
+    action: str  # called with {"value": <the value as text>, "slot": <slot name>}; must return {"valid": bool}
+    fail: str  # response ID said when the value is rejected; the slot is then asked again
+
+
 class Slot(Model):
-    entity: str  # an entity ID or sys.number / sys.date / sys.time
-    ask: str  # response ID used to ask for the value
+    entity: str  # an entity ID or one of SYSTEM_ENTITIES
+    ask: str | None = None  # response ID used to ask for the value (required slots only)
+    required: bool = True  # optional slots take a value from the user's words but are never asked for
+    default: SlotDefault | None = None  # optional slots: the value when the user gave none
+    validation: Validation | None = None
+
+    @field_validator("default", mode="before")
+    @classmethod
+    def _no_bool(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("a default must be text or a number, not true/false")
+        return v
+
+    @model_validator(mode="after")
+    def _ask_or_optional(self) -> Slot:
+        if self.required and self.ask is None:
+            raise ValueError("a required slot needs 'ask' (the response that asks for it)")
+        if self.required and self.default is not None:
+            raise ValueError("a required slot cannot have a default (it would never be asked); set required: false")
+        return self
+
+
+# ---------------------------------------------------------------- responses
+# Rich bodies follow Kakao's skill response format field for field, in snake_case
+# (simpleImage -> simple_image, basicCard.thumbnail.imageUrl -> basic_card.thumbnail.image_url,
+# blockId -> block_id), so a Kakao channel adapter is a key rename. A "block" is a scenario ID.
+
+
+def _text(v: str | None, what: str) -> str | None:
+    if v is not None and not v.strip():
+        raise ValueError(f"{what} must not be empty")
+    return v
+
+
+def _url(v: str | None, what: str) -> str | None:
+    if v is not None and not (v.strip().startswith("{{") or URL.fullmatch(PLACEHOLDER.sub("x", v.strip()))):
+        raise ValueError(f"{what} must start with http:// or https:// (or be a {{{{ template }}}})")
+    return v
+
+
+class Link(Model):
+    web: str
+
+    @field_validator("web")
+    @classmethod
+    def _web(cls, v: str) -> str:
+        return _url(v, "link.web") or v
+
+
+class Thumbnail(Model):
+    image_url: str
+    alt_text: str | None = None
+    link: Link | None = None
+    fixed_ratio: bool = False
+
+    @field_validator("image_url")
+    @classmethod
+    def _image(cls, v: str) -> str:
+        return _url(v, "image_url") or v
+
+
+class Button(Model):
+    """Kakao card button: webLink / message / block / phone."""
+
+    label: str = Field(min_length=1, max_length=MAX_QUICK_REPLY)
+    action: Literal["web_link", "message", "block", "phone"]
+    web_link_url: str | None = None
+    message_text: str | None = None  # message and block: what the user is shown to say (default: label)
+    block_id: str | None = None  # scenario ID
+    phone_number: str | None = None
+
+    @model_validator(mode="after")
+    def _fields_for_action(self) -> Button:
+        _check_action(self.action, {"web_link": self.web_link_url, "block": self.block_id,
+                                    "phone": self.phone_number}, "button")
+        _url(self.web_link_url, "web_link_url")
+        if self.phone_number is not None and not re.fullmatch(r"\+?[0-9][0-9 -]{1,30}", self.phone_number):
+            raise ValueError("phone_number must be digits (with optional +, spaces and hyphens)")
+        _text(self.message_text, "message_text")
+        if self.action not in ("message", "block") and self.message_text is not None:
+            raise ValueError(f"a {self.action} button takes no message_text")
+        return self
+
+
+class QuickReply(Model):
+    """Kakao quick reply (바로연결): sends a message, or starts a block without understanding."""
+
+    label: str = Field(min_length=1, max_length=MAX_QUICK_REPLY)
+    action: Literal["message", "block"] = "message"
+    message_text: str | None = None  # default: label
+    block_id: str | None = None  # scenario ID, for action "block"
+
+    @model_validator(mode="after")
+    def _fields_for_action(self) -> QuickReply:
+        if not self.label.strip():
+            raise ValueError("a quick reply label must not be empty")
+        _check_action(self.action, {"block": self.block_id}, "quick reply")
+        _text(self.message_text, "message_text")
+        return self
+
+
+def _check_action(action: str, targets: dict[str, str | None], what: str) -> None:
+    """The field an action needs is set, and no other action's field is."""
+    for name, value in targets.items():
+        if name == action and value is None:
+            raise ValueError(f"a {what} with action {action!r} needs its target field")
+        if name != action and value is not None:
+            raise ValueError(f"a {what} with action {action!r} cannot set the {name!r} target")
+
+
+class SimpleImage(Model):
+    image_url: str
+    alt_text: str = Field(min_length=1)  # what text-only channels show
+
+    @field_validator("image_url")
+    @classmethod
+    def _image(cls, v: str) -> str:
+        return _url(v, "image_url") or v
+
+
+class BasicCard(Model):
+    title: str | None = None
+    description: str | None = None
+    thumbnail: Thumbnail | None = None
+    buttons: list[Button] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _has_content(self) -> BasicCard:
+        _text(self.title, "title")
+        _text(self.description, "description")
+        if self.title is None and self.description is None and self.thumbnail is None:
+            raise ValueError("a card needs a title, a description or a thumbnail")
+        return self
+
+
+class ListItem(Model):
+    title: str = Field(min_length=1)
+    description: str | None = None
+    image_url: str | None = None
+    link: Link | None = None
+
+    @field_validator("image_url")
+    @classmethod
+    def _image(cls, v: str | None) -> str | None:
+        return _url(v, "image_url")
+
+
+class ListHeader(Model):
+    title: str = Field(min_length=1)
+
+
+class ListCard(Model):
+    header: ListHeader
+    items: list[ListItem] = Field(min_length=1)
+    buttons: list[Button] = Field(default_factory=list)
+
+
+class Carousel(Model):
+    type: Literal["basic_card"] = "basic_card"
+    items: list[BasicCard] = Field(min_length=1)
+
+
+RichBody = SimpleImage | BasicCard | ListCard | Carousel
+RICH_KINDS = ("simple_image", "basic_card", "list_card", "carousel")
 
 
 class Response(Model):
+    """One speech bubble: text (or random variants) or one rich body, plus quick replies."""
+
     text: str | None = None
     variants: list[str] | None = None  # one is picked at random
-    quick_replies: list[str] = Field(default_factory=list)
+    simple_image: SimpleImage | None = None
+    basic_card: BasicCard | None = None
+    list_card: ListCard | None = None
+    carousel: Carousel | None = None
+    quick_replies: list[str | QuickReply] = Field(default_factory=list)  # a plain string sends itself
 
     @model_validator(mode="after")
     def _exactly_one_body(self) -> Response:
-        if (self.text is None) == (self.variants is None):
-            raise ValueError("a response needs exactly one of 'text' or 'variants'")
+        given = [k for k in ("text", "variants", *RICH_KINDS) if getattr(self, k) is not None]
+        if len(given) != 1:
+            raise ValueError("a response needs exactly one of 'text', 'variants', "
+                             f"{', '.join(repr(k) for k in RICH_KINDS)}; got {given or 'none'}")
         if self.variants is not None and (not self.variants or any(not v.strip() for v in self.variants)):
             raise ValueError("'variants' must be non-empty strings")
         if self.text is not None and not self.text.strip():
             raise ValueError("'text' must not be empty")
-        if any(not q.strip() or len(q) > 40 for q in self.quick_replies):
-            raise ValueError("quick replies must be 1-40 characters")
+        if any(isinstance(q, str) and (not q.strip() or len(q) > MAX_QUICK_REPLY) for q in self.quick_replies):
+            raise ValueError(f"quick replies must be 1-{MAX_QUICK_REPLY} characters")
         return self
 
+    @property
+    def kind(self) -> str:
+        return next((k for k in RICH_KINDS if getattr(self, k) is not None), "text")
+
+    @property
+    def rich(self) -> RichBody | None:
+        return self.simple_image or self.basic_card or self.list_card or self.carousel
+
     def bodies(self) -> list[str]:
+        """The text bodies (one is said); empty for a rich response."""
         return [self.text] if self.text is not None else list(self.variants or [])
+
+    def replies(self) -> list[QuickReply]:
+        return [QuickReply(label=q) if isinstance(q, str) else q for q in self.quick_replies]
+
+    def buttons(self) -> list[Button]:
+        cards = ([self.basic_card] if self.basic_card else []) + (self.carousel.items if self.carousel else [])
+        return [b for c in cards for b in c.buttons] + (self.list_card.buttons if self.list_card else [])
+
+    def block_targets(self) -> set[str]:
+        """Scenario IDs this response offers to start directly (quick replies and buttons)."""
+        targets = [q.block_id for q in self.replies()] + [b.block_id for b in self.buttons()]
+        return {t for t in targets if t is not None}
+
+    def texts(self, replies: bool = True) -> list[str]:
+        """Every string that may hold a {{ template }}: bodies, rich fields and (unless
+        replies=False) quick replies."""
+        out = list(self.bodies())
+        if self.rich is not None:
+            out += _strings(self.rich.model_dump(exclude_none=True))
+        for q in self.replies() if replies else []:
+            out += [q.label] + ([q.message_text] if q.message_text else [])
+        return out
+
+
+def _strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for k, v in value.items() if k not in ("action", "type") for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    return []
 
 
 class CollectStep(Model):
@@ -139,6 +368,7 @@ class Trigger(Model):
 
 class Scenario(Model):
     label: str = ""
+    group: str | None = Field(None, min_length=1, max_length=50)  # the builder's folder for this block
     trigger: Trigger | None = None  # None: only reachable through call/branch
     exclusive: bool = False  # starting it ends every running scenario first (e.g. a goodbye)
     slots: dict[str, Slot] = Field(default_factory=dict)
@@ -162,12 +392,42 @@ class Scenario(Model):
         return parsed
 
 
+class Escape(Model):
+    """Kakao's 탈출 block: these exact phrases end every running scenario."""
+
+    phrases: list[str] = Field(min_length=1)  # compared like other exact phrases (spacing and edge punctuation ignored)
+    scenario: str | None = None  # run afterwards; None: say the "cancelled" response
+
+    @field_validator("phrases")
+    @classmethod
+    def _non_empty(cls, v: list[str]) -> list[str]:
+        if any(not p.strip() for p in v):
+            raise ValueError("escape phrases must not be empty")
+        return v
+
+
+class SessionTimeout(Model):
+    """A session idle longer than this starts over at its next message (Kakao: 최대 대기 시간)."""
+
+    minutes: int = Field(ge=1, le=1440)
+    notice: str | None = None  # response ID said when a conversation in progress is dropped; default "restarted"
+
+
+class System(Model):
+    """System blocks (all optional; a document without them behaves as before)."""
+
+    welcome: str | None = None  # scenario run when a session is opened (POST .../sessions/{id}/open)
+    escape: Escape | None = None
+    timeout: SessionTimeout | None = None
+
+
 class BotDocument(Model):
     """What a builder edits and stores: a bot without its computed version."""
 
     id: ID
     label: str = ""
     settings: Settings = Settings()
+    system: System = System()
     intents: dict[ID, Intent] = Field(default_factory=dict)
     entities: dict[ID, Entity] = Field(default_factory=dict)
     scenarios: dict[ID, Scenario] = Field(min_length=1)
@@ -176,3 +436,7 @@ class BotDocument(Model):
 
 class BotDefinition(BotDocument):
     version: str  # content hash of the document (bot/loader.py document_version)
+
+    def block_targets(self) -> set[str]:
+        """Scenarios a client may start directly, because a response offers them as a block button."""
+        return {t for r in self.responses.values() for t in r.block_targets()}

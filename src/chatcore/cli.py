@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from typing import TextIO
 
+from chatcore.dialogue.values import BotMessage
 from chatcore.runtime import BotRuntime
 
 
@@ -18,6 +19,7 @@ def chat(rt: BotRuntime, read: Callable[[], str], out: TextIO) -> int:
     session = f"cli-{uuid.uuid4().hex[:8]}"
     debug = False
     out.write(f"{rt.bot.label or rt.bot.id} — /debug 로 해석 결과 보기, /quit 로 끝내기\n")
+    show(rt.processor.open(session).messages, out)  # the welcome block, if the bot has one
     while True:
         try:
             text = read()
@@ -32,13 +34,17 @@ def chat(rt: BotRuntime, read: Callable[[], str], out: TextIO) -> int:
             out.write(f"(debug {'on' if debug else 'off'})\n")
             continue
         result = rt.processor.handle(session, text)
-        for message in result.messages:
-            out.write(f"봇> {message.text}\n")
-            if message.quick_replies:
-                out.write(f"    [{' | '.join(message.quick_replies)}]\n")
+        show(result.messages, out)
         if debug:
             nlu = next((e.nlu for e in reversed(result.events) if e.type == "commands_received"), {})
             out.write(f"    ({nlu.get('rule')} {nlu.get('intents', [[None]])[0]} entities={nlu.get('entities')})\n")
+
+
+def show(messages: Sequence[BotMessage], out: TextIO) -> None:
+    for message in messages:
+        out.write(f"봇> {message.text}\n")
+        if message.quick_replies:
+            out.write(f"    [{' | '.join(message.quick_replies)}]\n")
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - loads the real model
