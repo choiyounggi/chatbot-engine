@@ -23,7 +23,7 @@ from chatcore.dialogue.events import (
     UserUttered,
 )
 from chatcore.dialogue.state import DialogueState, apply, fold
-from chatcore.dialogue.values import ActionRegistry, BotMessage
+from chatcore.dialogue.values import CURRENT_TURN, ActionRegistry, BotMessage, TurnContext
 from chatcore.store.base import TrackerStore
 
 log = logging.getLogger(__name__)
@@ -117,7 +117,7 @@ class TurnProcessor:
                     return Interpretation([StartScenario(block)], {"rule": "block", "text": clean, "block": block})
                 return self.interpreter.interpret(clean, state, self.bot)
 
-            new, messages = self._run(session_id, state, understand, new, emit)
+            new, messages = self._run(session_id, state, understand, new, emit, clean)
             tracker.append(new)
         return TurnResult(notices + messages, new)
 
@@ -139,7 +139,7 @@ class TurnProcessor:
             messages: list[BotMessage] = []
             if welcome is not None:
                 new, messages = self._run(session_id, state, lambda: Interpretation(
-                    [StartScenario(welcome)], {"rule": "welcome"}), new, emit)
+                    [StartScenario(welcome)], {"rule": "welcome"}), new, emit, "")
             tracker.append(new)
         return TurnResult(messages, new)
 
@@ -166,9 +166,11 @@ class TurnProcessor:
         return msg
 
     def _run(self, session_id: str, state: DialogueState, understand: Callable[[], Interpretation],
-             new: list[Event], emit: Callable[[Event], None]) -> tuple[list[Event], list[BotMessage]]:
-        """Understand and run the engine; returns (events to store, messages)."""
+             new: list[Event], emit: Callable[[Event], None], utterance: str) -> tuple[list[Event], list[BotMessage]]:
+        """Understand and run the engine; returns (events to store, messages). Actions see the
+        utterance and session (CURRENT_TURN) while it runs."""
         prefix = list(new)
+        token = CURRENT_TURN.set(TurnContext(utterance, session_id))
         try:
             interpretation = understand()
             commands = list(interpretation.commands)
@@ -181,3 +183,5 @@ class TurnProcessor:
             return prefix + [TurnFailed(reason=type(exc).__name__),
                              BotUttered(response=msg.response, text=msg.text,
                                         quick_replies=list(msg.quick_replies))], [msg]
+        finally:
+            CURRENT_TURN.reset(token)

@@ -435,6 +435,42 @@ class System(Model):
     timeout: SessionTimeout | None = None
 
 
+# {{ secret.NAME }}: a value from the bot's secret store (chatcore/skills.py), usable in skill headers only
+SECRET_REF = re.compile(r"\{\{\s*secret\.([A-Za-z_][A-Za-z0-9_]{0,63})\s*\}\}")
+SECRET_NAME = r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")  # an HTTP token (RFC 9110)
+SKILL_URL = re.compile(r"^https?://[^\s/?#]+[^\s]*$")
+
+
+class Skill(Model):
+    """An HTTP skill (builder plan E10): an action the bot's scenarios call by its id."""
+
+    label: str = ""
+    url: str = Field(max_length=2000)
+    test_url: str | None = Field(None, max_length=2000)  # the builder's test run calls this one when set
+    headers: dict[str, str] = Field(default_factory=dict)  # values may hold {{ secret.NAME }}
+    timeout_ms: int = Field(3000, ge=100, le=10_000)
+
+    @field_validator("url", "test_url")
+    @classmethod
+    def _http_url(cls, v: str | None) -> str | None:
+        if v is not None and not SKILL_URL.match(v):
+            raise ValueError("a skill URL must start with http:// or https:// and have a host")
+        return v
+
+    @field_validator("headers")
+    @classmethod
+    def _headers(cls, v: dict[str, str]) -> dict[str, str]:
+        for name, value in v.items():
+            if not HEADER_NAME.match(name):
+                raise ValueError(f"{name!r} is not a header name")
+            if any(c in value for c in "\r\n\0"):
+                raise ValueError(f"header {name!r} has a line break")
+            if "{{" in SECRET_REF.sub("", value):
+                raise ValueError(f"header {name!r}: only {{{{ secret.NAME }}}} may be used in headers")
+        return v
+
+
 class BotDocument(Model):
     """What a builder edits and stores: a bot without its computed version."""
 
@@ -446,6 +482,7 @@ class BotDocument(Model):
     entities: dict[ID, Entity] = Field(default_factory=dict)
     scenarios: dict[ID, Scenario] = Field(min_length=1)
     responses: dict[ID, Response] = Field(min_length=1)
+    skills: dict[ID, Skill] = Field(default_factory=dict)
 
 
 class BotDefinition(BotDocument):

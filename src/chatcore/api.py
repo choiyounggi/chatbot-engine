@@ -288,6 +288,52 @@ class MarksOut(BaseModel):
     items: list[MarkOut]  # newest first
 
 
+class SkillErrorOut(BaseModel):
+    at: str
+    skill: str
+    kind: Literal["blocked", "network", "timeout", "http_status", "invalid_response", "too_large", "secret_missing"]
+    status: int | None
+    detail: str
+    ms: int
+    test: bool
+
+
+class SkillErrorsOut(BaseModel):
+    bot: str
+    items: list[SkillErrorOut]  # newest first, at most 100
+
+
+class SkillTestIn(BaseModel):
+    params: dict[str, Annotated[str, Field(max_length=MAX_INPUT_CHARS)]] = Field(default_factory=dict, max_length=50)
+    utterance: str = Field("", max_length=MAX_INPUT_CHARS)
+
+
+class SkillTestOut(BaseModel):
+    ok: bool
+    status: int | None
+    ms: int
+    result: dict[str, Any] | None
+    error: SkillErrorOut | None
+
+
+class SecretOut(BaseModel):
+    name: str
+    updated_at: str
+
+
+class SecretsOut(BaseModel):
+    bot: str
+    items: list[SecretOut]  # names only: values are never sent back
+
+
+class SecretIn(BaseModel):
+    value: str = Field(min_length=1, max_length=4000)
+
+
+SECRET = PathParam(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+SKILL_ID = PathParam(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+
+
 # The draft is stored as written (even when invalid), so it is described with the bot
 # document's schema but not validated against it.
 DOCUMENT_SCHEMA = {"$ref": "#/components/schemas/BotDocument"}
@@ -576,6 +622,47 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
         known(bot)
         return {"bot": bot, "items": [asdict(m) for m in host.repository.utterance_marks(bot, limit)]}
 
+    @app.get("/v1/builder/bots/{bot}/skills/errors", dependencies=deps, response_model=SkillErrorsOut)
+    def skill_errors(bot: str = BOT_ID, limit: int = Query(100, ge=1, le=100)) -> Any:
+        """스킬 오류 내역: the newest failed skill calls (test runs included), at most 100."""
+        known(bot)
+        return {"bot": bot, "items": host.repository.skill_errors(bot, limit)}
+
+    @app.post("/v1/builder/bots/{bot}/skills/{skill}/test", dependencies=deps, response_model=SkillTestOut)
+    def test_skill(body: SkillTestIn, bot: str = BOT_ID, skill: str = SKILL_ID) -> Any:
+        """Call a skill of the saved draft once (its test_url when set) and show what came back."""
+        known(bot)
+        try:
+            outcome = host.test_skill(bot, skill, body.params, body.utterance)
+        except NoDraft as exc:
+            raise HTTPException(404, f"{bot!r} has no draft") from exc
+        except BotError as exc:
+            raise HTTPException(422, exc.problems) from exc
+        except KeyError as exc:
+            raise HTTPException(404, f"the saved draft has no skill {skill!r}") from exc
+        return asdict(outcome)
+
+    @app.get("/v1/builder/bots/{bot}/secrets", dependencies=deps, response_model=SecretsOut)
+    def secrets(bot: str = BOT_ID) -> Any:
+        """The bot's secret names (for {{ secret.NAME }} in skill headers). Values are write-only."""
+        known(bot)
+        return {"bot": bot, "items": [asdict(s) for s in host.repository.secrets(bot)]}
+
+    @app.put("/v1/builder/bots/{bot}/secrets/{name}", dependencies=deps, status_code=204)
+    def set_secret(body: SecretIn, bot: str = BOT_ID, name: str = SECRET) -> Response:
+        known(bot)
+        if any(c in body.value for c in "\r\n\0"):
+            raise HTTPException(422, "a secret value cannot have line breaks (it is sent in a header)")
+        host.repository.set_secret(bot, name, body.value)
+        return Response(status_code=204)
+
+    @app.delete("/v1/builder/bots/{bot}/secrets/{name}", dependencies=deps, status_code=204)
+    def delete_secret(bot: str = BOT_ID, name: str = SECRET) -> Response:
+        known(bot)
+        if not host.repository.delete_secret(bot, name):
+            raise HTTPException(404, f"no secret {name!r}")
+        return Response(status_code=204)
+
     @app.post("/v1/builder/bots/{bot}/versions", dependencies=deps, status_code=202, response_model=JobOut)
     def train_version(bot: str = BOT_ID) -> Any:
         """Start training the draft as a deployable version; follow it at /v1/builder/jobs/{id}."""
@@ -748,6 +835,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
                         help="hashing: a fast stand-in for tests and CI (use a separate --artifacts directory)")
     parser.add_argument("--min-f1", type=float, default=0.90,
                         help="macro-F1 a trained version needs to be deployable (the hashing embedder needs 0)")
+    parser.add_argument("--skill-allow-private", action="store_true",
+                        help="let HTTP skills call internal addresses (127.0.0.1, 10.x, 169.254.x ...): development "
+                             "and tests only — on a server this lets anyone with the admin token reach its network")
     parser.add_argument("--keep-warm-ms", type=float, default=None,
                         help="when idle, run the model this often so the first request after a pause stays fast "
                              "(keeps the GPU busy; see docs/benchmarks/api_latency.md)")
@@ -762,7 +852,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
         inner = SentenceEmbedder()
     embedder = BatchedEmbedder(inner, keepalive_ms=args.keep_warm_ms)
     host = BotHost(default_repository(), default_store(), embedder, args.artifacts, bulk_embedder=embedder.bulk(),
-                   min_f1=args.min_f1)
+                   min_f1=args.min_f1, skill_allow_private=args.skill_allow_private)
+    if args.skill_allow_private:
+        log.warning("--skill-allow-private: HTTP skills may call internal addresses; never use this on a shared server")
     host.start()
     for directory in args.bot:
         host.seed(directory)

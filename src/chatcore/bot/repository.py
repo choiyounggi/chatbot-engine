@@ -72,6 +72,13 @@ class Mark:
 
 
 MARK_STATUSES = ("added", "ignored", "pending")
+SKILL_ERRORS_KEPT = 100  # per bot, like Kakao's 오류 내역
+
+
+@dataclass(frozen=True)
+class SecretInfo:
+    name: str
+    updated_at: str  # the value itself is never read back through the builder API
 
 
 class BotRepository(Protocol):
@@ -91,6 +98,12 @@ class BotRepository(Protocol):
         ...
     def utterance_marks(self, bot_id: str, limit: int | None = None) -> list[Mark]: ...  # newest first
     def latest_marks(self, bot_id: str) -> list[Mark]: ...  # the newest mark of each sentence
+    def set_secret(self, bot_id: str, name: str, value: str) -> None: ...
+    def delete_secret(self, bot_id: str, name: str) -> bool: ...  # False: there was none
+    def secret(self, bot_id: str, name: str) -> str | None: ...  # for skill calls only
+    def secrets(self, bot_id: str) -> list[SecretInfo]: ...  # names, sorted
+    def add_skill_error(self, bot_id: str, error: dict[str, Any]) -> None: ...  # keeps the newest SKILL_ERRORS_KEPT
+    def skill_errors(self, bot_id: str, limit: int = SKILL_ERRORS_KEPT) -> list[dict[str, Any]]: ...  # newest first
     def add_version(
         self, bot_id: str, version: str, document: dict[str, Any], macro_f1: float | None
     ) -> VersionInfo: ...
@@ -123,6 +136,8 @@ class InMemoryRepository:
         self._deployments: dict[str, list[Deployment]] = {}
         self._edits: dict[str, list[Edit]] = {}  # newest first
         self._marks: dict[str, list[Mark]] = {}  # newest first
+        self._secrets: dict[str, dict[str, tuple[str, str]]] = {}  # bot -> name -> (value, updated_at)
+        self._skill_errors: dict[str, list[dict[str, Any]]] = {}  # newest first
         self._lock = threading.Lock()
 
     def bots(self) -> list[str]:
@@ -167,6 +182,33 @@ class InMemoryRepository:
         with self._lock:
             marks = list(self._marks.get(bot_id, []))
         return marks if limit is None else marks[:max(limit, 0)]
+
+    def set_secret(self, bot_id: str, name: str, value: str) -> None:
+        with self._lock:
+            self._secrets.setdefault(bot_id, {})[name] = (value, _now())
+
+    def delete_secret(self, bot_id: str, name: str) -> bool:
+        with self._lock:
+            return self._secrets.get(bot_id, {}).pop(name, None) is not None
+
+    def secret(self, bot_id: str, name: str) -> str | None:
+        with self._lock:
+            entry = self._secrets.get(bot_id, {}).get(name)
+        return entry[0] if entry is not None else None
+
+    def secrets(self, bot_id: str) -> list[SecretInfo]:
+        with self._lock:
+            return [SecretInfo(n, at) for n, (_, at) in sorted(self._secrets.get(bot_id, {}).items())]
+
+    def add_skill_error(self, bot_id: str, error: dict[str, Any]) -> None:
+        with self._lock:
+            errors = self._skill_errors.setdefault(bot_id, [])
+            errors.insert(0, dict(error))
+            del errors[SKILL_ERRORS_KEPT:]
+
+    def skill_errors(self, bot_id: str, limit: int = SKILL_ERRORS_KEPT) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(e) for e in self._skill_errors.get(bot_id, [])[:max(limit, 0)]]
 
     def latest_marks(self, bot_id: str) -> list[Mark]:
         latest: dict[str, Mark] = {}
@@ -261,6 +303,19 @@ CREATE TABLE IF NOT EXISTS bot_utterance_marks (
     marked_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS bot_utterance_marks_bot ON bot_utterance_marks (bot_id, id DESC);
+CREATE TABLE IF NOT EXISTS bot_secrets (
+    bot_id     text NOT NULL,
+    name       text NOT NULL,
+    value      text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (bot_id, name)
+);
+CREATE TABLE IF NOT EXISTS bot_skill_errors (
+    id      bigserial PRIMARY KEY,
+    bot_id  text NOT NULL,
+    error   jsonb NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bot_skill_errors_bot ON bot_skill_errors (bot_id, id DESC);
 """
 
 
@@ -406,3 +461,39 @@ class PostgresRepository:
                 "JOIN bot_versions v ON v.bot_id = d.bot_id AND v.version = d.version "
                 "WHERE d.bot_id = %s ORDER BY d.id DESC", (bot_id,)).fetchall()
         return [Deployment(str(v), int(n), str(note), _iso(at)) for v, n, note, at in rows]
+
+    def set_secret(self, bot_id: str, name: str, value: str) -> None:
+        with self._connect() as conn:
+            conn.execute("INSERT INTO bot_secrets (bot_id, name, value) VALUES (%s, %s, %s) ON CONFLICT (bot_id, name) "
+                         "DO UPDATE SET value = EXCLUDED.value, updated_at = now()", (bot_id, name, value))
+
+    def delete_secret(self, bot_id: str, name: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("DELETE FROM bot_secrets WHERE bot_id = %s AND name = %s RETURNING name",
+                               (bot_id, name)).fetchone()
+        return row is not None
+
+    def secret(self, bot_id: str, name: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM bot_secrets WHERE bot_id = %s AND name = %s",
+                               (bot_id, name)).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def secrets(self, bot_id: str) -> list[SecretInfo]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT name, updated_at FROM bot_secrets WHERE bot_id = %s ORDER BY name",
+                                (bot_id,)).fetchall()
+        return [SecretInfo(str(n), _iso(at)) for n, at in rows]
+
+    def add_skill_error(self, bot_id: str, error: dict[str, Any]) -> None:
+        with self._connect() as conn:  # one transaction: add, then keep only the newest ones
+            conn.execute("INSERT INTO bot_skill_errors (bot_id, error) VALUES (%s, %s)", (bot_id, Jsonb(error)))
+            conn.execute("DELETE FROM bot_skill_errors WHERE bot_id = %s AND id NOT IN "
+                         "(SELECT id FROM bot_skill_errors WHERE bot_id = %s ORDER BY id DESC LIMIT %s)",
+                         (bot_id, bot_id, SKILL_ERRORS_KEPT))
+
+    def skill_errors(self, bot_id: str, limit: int = SKILL_ERRORS_KEPT) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT error FROM bot_skill_errors WHERE bot_id = %s ORDER BY id DESC LIMIT %s",
+                                (bot_id, max(limit, 0))).fetchall()
+        return [dict(r[0]) for r in rows]
