@@ -323,9 +323,14 @@ def test_one_mark_per_sentence_and_the_queue_reads_only_the_latest_marks(client,
 def test_test_build_confusable_pairs_describe_the_built_draft(client, host):
     build = finish(client, client.post(f"{B}/test-builds"))["result"]["build"]
     doc = draft(client)
-    doc["intents"]["greeting"]["examples"] = ["완전히 다른 문장 하나"] * 1
-    assert save(client, doc).status_code == 200  # the draft moves on after the build
-    built = host.test_runtime("sample", build)
-    assert built is not None
-    assert host.confusable("sample", build) == host.confusable_of(built.bot)
+    # after the build, two intents get nearly the same sentence: only the new draft has that pair
+    doc["intents"]["greeting"]["examples"].append("오늘 기분이 정말 좋아서 인사드려요")
+    doc["intents"]["thanks"]["examples"].append("오늘 기분이 정말 좋아서 인사드려요 고마워요")
+    assert save(client, doc).status_code == 200
+    from chatcore.bot.loader import bot_from_document  # noqa: PLC0415
+
+    now = {(c.a, c.b) for c in host.confusable_of(bot_from_document(draft(client)))}
+    built = {(c.a, c.b) for c in host.confusable("sample", build)}
+    assert ("greeting", "thanks") in now or ("thanks", "greeting") in now  # the pair exists in the draft
+    assert ("greeting", "thanks") not in built and ("thanks", "greeting") not in built  # not in what was built
     assert host.confusable("sample", "0" * 12) == []  # unknown build: nothing to describe
