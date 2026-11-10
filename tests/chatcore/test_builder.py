@@ -601,3 +601,24 @@ def test_postgres_versions_tolerate_rows_without_a_number_and_backfill_after_the
     assert repo.deployments(bot) == ["bbbbbbbbbbbb"] and repo.history(bot)[0].number == 0
     repo.ensure_schema()  # the backfill numbers it after the existing maximum
     assert [(v.version, v.number) for v in repo.versions(bot)] == [("bbbbbbbbbbbb", 8), ("aaaaaaaaaaaa", 7)]
+
+
+def test_the_bot_list_shows_deployed_and_draft_only_bots(client):
+    (sample,) = client.get("/v1/builder/bots").json()["bots"]
+    versions = client.get(f"{B}/versions").json()
+    assert sample == {"id": "sample", "label": draft(client)["label"], "live": versions["live"], "live_number": 1,
+                      "serving": versions["live"], "draft_revision": 1, "undeployed_changes": False}
+    doc = draft(client)
+    doc["label"] = "바뀐 이름"
+    save(client, doc)
+    client.put("/v1/builder/bots/fresh/draft", json={**doc, "id": "fresh"})
+    bots = {b["id"]: b for b in client.get("/v1/builder/bots").json()["bots"]}
+    assert bots["sample"]["label"] == "바뀐 이름" and bots["sample"]["undeployed_changes"] is True
+    assert bots["fresh"] == {"id": "fresh", "label": "바뀐 이름", "live": None, "live_number": None, "serving": None,
+                             "draft_revision": 1, "undeployed_changes": True}
+
+
+def test_the_bot_list_needs_the_admin_token_and_handles_an_empty_repository(host, fake_embedder, tmp_path):
+    assert TestClient(create_app(host, admin_token="s3cret")).get("/v1/builder/bots").status_code == 401
+    empty = BotHost(InMemoryRepository(), InMemoryStore(), fake_embedder, tmp_path / "empty", actions=synthetic_actions)
+    assert TestClient(create_app(empty)).get("/v1/builder/bots").json() == {"bots": []}

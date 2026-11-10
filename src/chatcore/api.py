@@ -29,7 +29,7 @@ from fastapi import Path as PathParam
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from chatcore.bot.loader import BotError
+from chatcore.bot.loader import BotError, document_version
 from chatcore.bot.repository import RevisionConflict, VersionNotFound
 from chatcore.dialogue.state import fold
 from chatcore.dialogue.turn import MAX_INPUT_CHARS, TurnResult
@@ -203,6 +203,32 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
     def known(bot: str) -> None:
         if bot not in host.repository.bots():
             raise HTTPException(404, f"unknown bot {bot!r}")
+
+    @app.get("/v1/builder/bots", dependencies=deps)
+    def list_bots() -> Any:
+        """Every bot in the repository, with or without a deployment (the builder's bot list)."""
+        live = host.bots()
+        items = []
+        for bot in host.repository.bots():
+            draft = host.repository.draft(bot)
+            history = host.repository.history(bot)
+            current = history[0] if history else None
+            label = (draft.document.get("label") if draft is not None else None) or (
+                host.repository.get_version(bot, current.version).get("label") if current is not None else None)
+            try:
+                draft_version = document_version(draft.document) if draft is not None else None
+            except BotError:  # not even plain JSON: the draft cannot become a version as it is
+                draft_version = None
+            items.append({
+                "id": bot, "label": label or "",
+                "live": current.version if current is not None else None,
+                "live_number": current.number if current is not None else None,
+                "serving": live.get(bot),  # what this server answers with (None: not loaded here)
+                "draft_revision": draft.revision if draft is not None else None,
+                # the draft differs from what is live: there is something to deploy
+                "undeployed_changes": draft is not None and draft_version != (current.version if current else None),
+            })
+        return {"bots": items}
 
     @app.get("/v1/builder/bots/{bot}/draft", dependencies=deps)
     def get_draft(response: Response, bot: str = BOT_ID) -> Any:
