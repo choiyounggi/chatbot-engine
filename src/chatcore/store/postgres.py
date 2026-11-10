@@ -8,14 +8,16 @@ If the turn raises, the transaction rolls back and nothing is stored.
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from chatcore.dialogue.events import Event, from_json, to_json
-from chatcore.store.base import SessionBusy, Tracker, check_session_id
+from chatcore.store.base import SessionBusy, Tracker, Utterance, check_session_id
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chat_events (
@@ -26,6 +28,7 @@ CREATE TABLE IF NOT EXISTS chat_events (
     created_at  timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (session_id, seq)
 );
+CREATE INDEX IF NOT EXISTS chat_events_type_time ON chat_events (type, created_at DESC);
 """
 
 
@@ -76,6 +79,26 @@ class PostgresStore:
             if not isinstance(payload, dict):
                 raise TypeError(f"chat_events.payload must be a JSON object, got {type(payload).__name__}")
             out.append((str(sid), from_json(payload)))
+        return out
+
+    def utterances(self, prefix: str, since: dt.datetime | None, until: dt.datetime | None,
+                   limit: int) -> list[Utterance]:
+        if limit < 1:
+            return []
+        pattern = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT session_id, created_at, payload FROM chat_events WHERE type = 'commands_received' "
+                "AND session_id LIKE %s AND (%s::timestamptz IS NULL OR created_at >= %s) "
+                "AND (%s::timestamptz IS NULL OR created_at < %s) ORDER BY created_at DESC, seq DESC LIMIT %s",
+                (pattern, since, since, until, until, limit),
+            ).fetchall()
+        out: list[Utterance] = []
+        for sid, at, payload in rows:
+            if not isinstance(payload, dict) or not isinstance(at, dt.datetime):
+                raise TypeError("chat_events rows must hold a JSON object and a timestamp")
+            nlu: Any = payload.get("nlu", {})
+            out.append(Utterance(str(sid), at.astimezone(dt.UTC), dict(nlu) if isinstance(nlu, dict) else {}))
         return out
 
     def events(self, session_id: str) -> list[Event]:

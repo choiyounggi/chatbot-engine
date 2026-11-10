@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from chatcore.dialogue.events import Event
 
@@ -28,6 +29,15 @@ class Tracker:
         self.pending.extend(events)
 
 
+@dataclass(frozen=True)
+class Utterance:
+    """How one user message was understood (a commands_received event) and when it was stored."""
+
+    session_id: str
+    at: dt.datetime  # timezone-aware, UTC
+    nlu: dict[str, Any]
+
+
 class TrackerStore(Protocol):
     def session(self, session_id: str) -> AbstractContextManager[Tracker]:
         """Lock the session (SessionBusy if already locked) and yield its tracker."""
@@ -39,6 +49,12 @@ class TrackerStore(Protocol):
 
     def recent(self, prefix: str, event_type: str, limit: int) -> list[tuple[str, Event]]:
         """Newest committed events of one type across sessions whose id starts with `prefix`."""
+        ...
+
+    def utterances(self, prefix: str, since: dt.datetime | None, until: dt.datetime | None,
+                   limit: int) -> list[Utterance]:
+        """Understood user messages of sessions whose id starts with `prefix`, stored in
+        [since, until) (None: unbounded), newest first, at most `limit`."""
         ...
 
 

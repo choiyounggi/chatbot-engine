@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime as dt
 import hmac
 import json
 import logging
@@ -22,10 +23,11 @@ import sys
 import time
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi import Path as PathParam
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -35,11 +37,13 @@ from chatcore.bot.repository import RevisionConflict, VersionNotFound
 from chatcore.bot.schema import BasicCard, BotDocument, Carousel, ListCard, SimpleImage
 from chatcore.dialogue.state import fold
 from chatcore.dialogue.turn import MAX_INPUT_CHARS, TurnResult, UnknownBlock
-from chatcore.host import BelowBar, BotHost, Host, NoDraft, NoEarlierDeployment, NotTrained
+from chatcore.host import BelowBar, BotHost, ExampleTaken, Host, NoDraft, NoEarlierDeployment, NotTrained
 from chatcore.jobs import JobFailed, JobRunner
 from chatcore.nlu.train import TrainingError
 from chatcore.runtime import BotRuntime
 from chatcore.store.base import SessionBusy
+from chatcore.training_queue import RuleFilter, StatusFilter, group
+from chatcore.training_queue import key as queue_key
 
 try:  # storage errors that mean "try again later"
     from psycopg import OperationalError as _DbDown
@@ -56,6 +60,7 @@ SESSION_ID = PathParam(pattern=r"^[A-Za-z0-9_-]{1,63}$")
 BOT_ID = PathParam(pattern=r"^[a-z][a-z0-9_]{0,63}$")
 VERSION = PathParam(pattern=r"^[0-9a-f]{12}$")
 JOB_ID = PathParam(pattern=r"^[0-9a-f]{32}$")
+UTTERANCE_SCAN = 20_000  # user messages the training queue reads per request (newest first)
 TEST_SESSION_SEP = "~"  # test-build sessions are "<bot>~<session>": never "<bot>:...", so no stats or misunderstood
 
 
@@ -201,6 +206,76 @@ class VersionsOut(BaseModel):
 class LiveOut(BaseModel):
     bot: str
     live: str
+
+
+class ChangeOut(BaseModel):
+    area: Literal["bot", "settings", "system", "block", "intent", "entity", "response"]
+    id: str
+    label: str
+    action: Literal["added", "removed", "changed"]
+    examples_added: int | None = None  # intents only
+    examples_removed: int | None = None
+
+
+class EditOut(BaseModel):
+    revision: int
+    saved_at: str
+    changes: list[ChangeOut]
+
+
+class EditsOut(BaseModel):
+    bot: str
+    items: list[EditOut]  # newest first
+
+
+class UtteranceOut(BaseModel):
+    key: str  # the sentence as grouped; send `text` back to act on it
+    text: str
+    count: int
+    sessions: int
+    first_seen: str
+    last_seen: str
+    rule: str  # how the latest one was handled (fallback, clarify, intent, slot, ...)
+    intent: str | None  # the classifier's top intent the latest time
+    score: float | None
+    status: Literal["pending", "ignored", "added"]
+    status_intent: str | None
+
+
+class UtterancesOut(BaseModel):
+    bot: str
+    scanned: int  # user messages read
+    truncated: bool  # more messages exist in the period than were read (narrow the period)
+    items: list[UtteranceOut]
+
+
+QueueText = Field(min_length=1, max_length=MAX_INPUT_CHARS)
+
+
+class SentencesIn(BaseModel):
+    texts: list[Annotated[str, QueueText]] = Field(min_length=1, max_length=200)
+
+
+class AddExamplesIn(SentencesIn):
+    intent: str = Field(pattern=r"^[a-z][a-z0-9_]*$", max_length=64)
+
+
+class MarkedOut(BaseModel):
+    bot: str
+    marked: int
+
+
+class MarkOut(BaseModel):
+    key: str
+    text: str
+    status: Literal["pending", "ignored", "added"]
+    intent: str | None
+    marked_at: str
+
+
+class MarksOut(BaseModel):
+    bot: str
+    items: list[MarkOut]  # newest first
 
 
 # The draft is stored as written (even when invalid), so it is described with the bot
@@ -421,6 +496,69 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
         response.headers["ETag"] = etag(check.revision)
         return {"bot": bot, "version": check.version, "revision": check.revision, "valid": not check.errors,
                 "errors": check.errors, "warnings": check.warnings}
+
+    @app.get("/v1/builder/bots/{bot}/edits", dependencies=deps, response_model=EditsOut)
+    def edits(bot: str = BOT_ID, limit: int = Query(50, ge=1, le=500)) -> Any:
+        """작업이력: what each draft save changed, newest first."""
+        known(bot)
+        return {"bot": bot, "items": [{"revision": e.revision, "saved_at": e.saved_at, "changes": e.changes}
+                                      for e in host.repository.edits(bot, limit)]}
+
+    @app.get("/v1/builder/bots/{bot}/utterances", dependencies=deps, response_model=UtterancesOut)
+    def utterances(bot: str = BOT_ID, since: dt.datetime | None = None, until: dt.datetime | None = None,
+                   rule: RuleFilter = "misunderstood", intent: str | None = Query(None, max_length=64),
+                   status: StatusFilter = "pending", limit: int = Query(100, ge=1, le=500)) -> Any:
+        """학습대기: what users said in [since, until), grouped by sentence, most frequent first.
+        Test-chat sessions are not included. Reads at most the newest UTTERANCE_SCAN messages."""
+        known(bot)
+        if (since and since.tzinfo is None) or (until and until.tzinfo is None):
+            raise HTTPException(422, "since and until need a time zone (e.g. 2026-11-10T00:00:00+09:00)")
+        found = host.store.utterances(f"{bot}:", since, until, UTTERANCE_SCAN + 1)
+        items = group(found[:UTTERANCE_SCAN], host.repository.utterance_marks(bot), rule, intent, status, limit)
+        return {"bot": bot, "scanned": min(len(found), UTTERANCE_SCAN), "truncated": len(found) > UTTERANCE_SCAN,
+                "items": [asdict(i) for i in items]}
+
+    def mark(bot: str, body: SentencesIn, status: str) -> dict[str, Any]:
+        known(bot)
+        host.repository.mark_utterances(bot, [(queue_key(t), t) for t in body.texts], status)
+        return {"bot": bot, "marked": len(body.texts)}
+
+    @app.post("/v1/builder/bots/{bot}/utterances/ignore", dependencies=deps, response_model=MarkedOut)
+    def ignore(body: SentencesIn, bot: str = BOT_ID) -> Any:
+        """Hide sentences from the queue (they come back with "restore")."""
+        return mark(bot, body, "ignored")
+
+    @app.post("/v1/builder/bots/{bot}/utterances/restore", dependencies=deps, response_model=MarkedOut)
+    def restore(body: SentencesIn, bot: str = BOT_ID) -> Any:
+        return mark(bot, body, "pending")
+
+    @app.post("/v1/builder/bots/{bot}/utterances/add", dependencies=deps, response_model=DraftSavedOut)
+    def add_examples(body: AddExamplesIn, response: Response, bot: str = BOT_ID,
+                     if_match: str | None = Header(default=None)) -> Any:
+        """Add sentences to an intent of the draft as examples, like a save: needs the draft's ETag
+        (428 without, 412 when it moved on). 404 unknown intent, 409 already another intent's example."""
+        known(bot)
+        expected = parse_if_match(if_match)
+        if expected is None:
+            raise HTTPException(428, "send the draft's ETag in If-Match")
+        try:
+            check = host.add_examples(bot, body.texts, body.intent, expected)
+        except KeyError as exc:
+            raise HTTPException(404, f"the draft has no intent {body.intent!r}") from exc
+        except ExampleTaken as exc:
+            return JSONResponse({"detail": "already examples of another intent", "texts": exc.texts}, status_code=409)
+        except RevisionConflict as exc:
+            return JSONResponse({"detail": "the draft was changed elsewhere; reload it", "revision": exc.current},
+                                status_code=412)
+        response.headers["ETag"] = etag(check.revision)
+        return {"bot": bot, "version": check.version, "revision": check.revision, "valid": not check.errors,
+                "errors": check.errors, "warnings": check.warnings}
+
+    @app.get("/v1/builder/bots/{bot}/utterances/marks", dependencies=deps, response_model=MarksOut)
+    def marks(bot: str = BOT_ID, limit: int = Query(100, ge=1, le=1000)) -> Any:
+        """학습이력: sentences added, ignored or restored, newest first."""
+        known(bot)
+        return {"bot": bot, "items": [asdict(m) for m in host.repository.utterance_marks(bot, limit)]}
 
     @app.post("/v1/builder/bots/{bot}/versions", dependencies=deps, status_code=202, response_model=JobOut)
     def train_version(bot: str = BOT_ID) -> Any:

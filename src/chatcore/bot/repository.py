@@ -50,14 +50,46 @@ class Draft:
     revision: int  # 1 on first save, +1 on every save
 
 
+@dataclass(frozen=True)
+class Edit:
+    """One draft save and what it changed (bot/changes.py summarize), for the builder's 작업이력."""
+
+    revision: int
+    saved_at: str  # ISO 8601, UTC
+    changes: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class Mark:
+    """What the builder did with a user sentence from the training queue (학습대기): added it to an
+    intent as an example, ignored it, or put it back (pending)."""
+
+    key: str  # the sentence as grouped (training_queue.key)
+    text: str
+    status: str  # "added" | "ignored" | "pending"
+    intent: str | None  # for "added"
+    marked_at: str  # ISO 8601, UTC
+
+
+MARK_STATUSES = ("added", "ignored", "pending")
+
+
 class BotRepository(Protocol):
     def bots(self) -> list[str]: ...
     def get_draft(self, bot_id: str) -> dict[str, Any] | None: ...
     def draft(self, bot_id: str) -> Draft | None: ...
-    def save_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None) -> int:
+    def save_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None,
+                   changes: list[dict[str, Any]] | None = None) -> int:
         """Store the draft and return its new revision. With expected_revision, raise
-        RevisionConflict unless the stored draft is at that revision (0: must not exist yet)."""
+        RevisionConflict unless the stored draft is at that revision (0: must not exist yet).
+        Non-empty `changes` are recorded as that revision's edit, in the same write."""
         ...
+    def edits(self, bot_id: str, limit: int = 50) -> list[Edit]: ...  # newest first
+    def mark_utterances(self, bot_id: str, items: list[tuple[str, str]], status: str,
+                        intent: str | None = None) -> None:
+        """Record a status for (key, text) pairs from the training queue."""
+        ...
+    def utterance_marks(self, bot_id: str, limit: int | None = None) -> list[Mark]: ...  # newest first
     def add_version(
         self, bot_id: str, version: str, document: dict[str, Any], macro_f1: float | None
     ) -> VersionInfo: ...
@@ -66,6 +98,13 @@ class BotRepository(Protocol):
     def deploy(self, bot_id: str, version: str, note: str = "") -> None: ...
     def deployments(self, bot_id: str) -> list[str]: ...  # newest first; [0] is live
     def history(self, bot_id: str) -> list[Deployment]: ...  # newest first
+
+
+def _check_mark(status: str, intent: str | None) -> None:
+    if status not in MARK_STATUSES:
+        raise ValueError(f"status must be one of {MARK_STATUSES}")
+    if (status == "added") != (intent is not None):
+        raise ValueError("an intent is given exactly when the status is 'added'")
 
 
 def _now() -> str:
@@ -81,6 +120,8 @@ class InMemoryRepository:
         self._drafts: dict[str, Draft] = {}
         self._versions: dict[str, dict[str, tuple[VersionInfo, dict[str, Any]]]] = {}
         self._deployments: dict[str, list[Deployment]] = {}
+        self._edits: dict[str, list[Edit]] = {}  # newest first
+        self._marks: dict[str, list[Mark]] = {}  # newest first
         self._lock = threading.Lock()
 
     def bots(self) -> list[str]:
@@ -96,14 +137,35 @@ class InMemoryRepository:
             draft = self._drafts.get(bot_id)
             return Draft(dict(draft.document), draft.revision) if draft is not None else None
 
-    def save_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None) -> int:
+    def save_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None,
+                   changes: list[dict[str, Any]] | None = None) -> int:
         with self._lock:
             current = self._drafts.get(bot_id)
             at = current.revision if current is not None else 0
             if expected_revision is not None and expected_revision != at:
                 raise RevisionConflict(at or None)
             self._drafts[bot_id] = Draft(dict(document), at + 1)
+            if changes:
+                self._edits.setdefault(bot_id, []).insert(0, Edit(at + 1, _now(), [dict(c) for c in changes]))
             return at + 1
+
+    def edits(self, bot_id: str, limit: int = 50) -> list[Edit]:
+        with self._lock:
+            return list(self._edits.get(bot_id, []))[:max(limit, 0)]
+
+    def mark_utterances(self, bot_id: str, items: list[tuple[str, str]], status: str,
+                        intent: str | None = None) -> None:
+        _check_mark(status, intent)
+        with self._lock:
+            marks = self._marks.setdefault(bot_id, [])
+            now = _now()
+            for key, text in items:
+                marks.insert(0, Mark(key, text, status, intent, now))
+
+    def utterance_marks(self, bot_id: str, limit: int | None = None) -> list[Mark]:
+        with self._lock:
+            marks = list(self._marks.get(bot_id, []))
+        return marks if limit is None else marks[:max(limit, 0)]
 
     def add_version(self, bot_id: str, version: str, document: dict[str, Any], macro_f1: float | None) -> VersionInfo:
         with self._lock:
@@ -175,6 +237,23 @@ UPDATE bot_versions v SET number = r.n
           FROM bot_versions b WHERE b.number IS NULL) r
  WHERE v.bot_id = r.bot_id AND v.version = r.version;
 CREATE UNIQUE INDEX IF NOT EXISTS bot_versions_number ON bot_versions (bot_id, number);
+CREATE TABLE IF NOT EXISTS bot_draft_edits (
+    bot_id    text NOT NULL,
+    revision  integer NOT NULL,
+    changes   jsonb NOT NULL,
+    saved_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (bot_id, revision)
+);
+CREATE TABLE IF NOT EXISTS bot_utterance_marks (
+    id         bigserial PRIMARY KEY,
+    bot_id     text NOT NULL,
+    key        text NOT NULL,
+    text       text NOT NULL,
+    status     text NOT NULL,
+    intent     text,
+    marked_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS bot_utterance_marks_bot ON bot_utterance_marks (bot_id, id DESC);
 """
 
 
@@ -207,8 +286,9 @@ class PostgresRepository:
             row = conn.execute("SELECT document, revision FROM bot_drafts WHERE bot_id = %s", (bot_id,)).fetchone()
         return Draft(dict(row[0]), int(row[1])) if row else None
 
-    def save_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None) -> int:
-        with self._connect() as conn:
+    def save_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None,
+                   changes: list[dict[str, Any]] | None = None) -> int:
+        with self._connect() as conn:  # one transaction: the draft and its edit record together
             if expected_revision is None:
                 row = conn.execute(
                     "INSERT INTO bot_drafts (bot_id, document) VALUES (%s, %s) ON CONFLICT (bot_id) DO UPDATE "
@@ -226,7 +306,33 @@ class PostgresRepository:
             if row is None:
                 current = conn.execute("SELECT revision FROM bot_drafts WHERE bot_id = %s", (bot_id,)).fetchone()
                 raise RevisionConflict(int(current[0]) if current else None)
+            if changes:
+                conn.execute("INSERT INTO bot_draft_edits (bot_id, revision, changes) VALUES (%s, %s, %s) "
+                             "ON CONFLICT (bot_id, revision) DO UPDATE SET changes = EXCLUDED.changes",
+                             (bot_id, int(row[0]), Jsonb(changes)))
         return int(row[0])
+
+    def edits(self, bot_id: str, limit: int = 50) -> list[Edit]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT revision, saved_at, changes FROM bot_draft_edits WHERE bot_id = %s "
+                                "ORDER BY revision DESC LIMIT %s", (bot_id, max(limit, 0))).fetchall()
+        return [Edit(int(r), _iso(at), list(c)) for r, at, c in rows]
+
+    def mark_utterances(self, bot_id: str, items: list[tuple[str, str]], status: str,
+                        intent: str | None = None) -> None:
+        _check_mark(status, intent)
+        if not items:
+            return
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.executemany("INSERT INTO bot_utterance_marks (bot_id, key, text, status, intent) "
+                            "VALUES (%s, %s, %s, %s, %s)",
+                            [(bot_id, key, text, status, intent) for key, text in items])
+
+    def utterance_marks(self, bot_id: str, limit: int | None = None) -> list[Mark]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT key, text, status, intent, marked_at FROM bot_utterance_marks "
+                                "WHERE bot_id = %s ORDER BY id DESC LIMIT %s", (bot_id, limit)).fetchall()
+        return [Mark(str(k), str(t), str(s), i, _iso(at)) for k, t, s, i, at in rows]
 
     def add_version(self, bot_id: str, version: str, document: dict[str, Any], macro_f1: float | None) -> VersionInfo:
         for attempt in range(3):  # two new versions of one bot at once can pick the same number
