@@ -33,7 +33,7 @@ def bare(text: str) -> str:
 
 @dataclass(frozen=True)
 class EntityMatch:
-    entity: str  # entity ID or sys.number / sys.date / sys.time
+    entity: str  # entity ID or sys.number / sys.date / sys.time and the E9 sys.* system entities
     value: str | int | float  # canonical value
     text: str  # the matched surface text
     start: int
@@ -89,7 +89,19 @@ class EntityExtractor:
             out += [EntityMatch(eid, m.group(0), m.group(0), m.start(), m.end())
                     for m in rx.finditer(text) if m.group(0)]
         system = (("sys.date", sysentities.find_dates(text, today)), ("sys.time", sysentities.find_times(text)),
-                  ("sys.number", sysentities.find_numbers(text)))
+                  ("sys.number", sysentities.find_numbers(text)),
+                  ("sys.number.ordinal", sysentities.find_ordinals(text)),
+                  ("sys.number.age", sysentities.find_ages(text)),
+                  ("sys.number.percent", sysentities.find_percents(text)),
+                  ("sys.date.period", sysentities.find_date_periods(text, today)),
+                  ("sys.time.period", sysentities.find_time_periods(text)),
+                  ("sys.url", sysentities.find_urls(text)),
+                  ("sys.unit.currency", sysentities.find_currency(text)),
+                  ("sys.unit.length", sysentities.find_length(text)),
+                  ("sys.unit.weight", sysentities.find_weight(text)),
+                  ("sys.unit.volume", sysentities.find_volume(text)),
+                  ("sys.unit.temperature", sysentities.find_temperature(text)),
+                  ("sys.unit.speed", sysentities.find_speed(text)))
         for entity, found in system:
             out += [EntityMatch(entity, f.value, text[f.start:f.end], f.start, f.end) for f in found]
         return sorted(out, key=lambda e: (e.start, -e.length, e.entity))

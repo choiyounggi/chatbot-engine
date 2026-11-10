@@ -37,6 +37,19 @@ def test_regex_entities():
     assert values(EntityExtractor(bot).extract("주문 AB1234 확인", TODAY), "order") == ["AB1234"]
 
 
+def test_new_system_entities_are_extracted_with_correct_spans(extractor):
+    text = "https://a.com 25살이고 3만원 있고 www.naver.com 봐요"
+    found = extractor.extract(text, TODAY)
+    by_entity = {m.entity: m for m in found}
+    urls = [m.value for m in found if m.entity == "sys.url"]
+    assert urls == ["https://a.com", "https://www.naver.com"]
+    assert by_entity["sys.number.age"].value == 25
+    assert text[by_entity["sys.number.age"].start:by_entity["sys.number.age"].end] == "25살"
+    assert by_entity["sys.unit.currency"].value == "30000 KRW"
+    assert text[by_entity["sys.unit.currency"].start:by_entity["sys.unit.currency"].end] == "3만원"
+    assert "sys.text" not in {m.entity for m in found}
+
+
 def test_normalize_and_bare():
     assert normalize(" 날씨　 알려줘 ") == "날씨 알려줘"
     assert bare("  취소!!  ") == "취소" and bare("...") == ""

@@ -8,7 +8,7 @@ import math
 import random
 import re
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
@@ -17,8 +17,21 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from chatcore.bot.josa import attach
-from chatcore.bot.schema import PLACEHOLDER, BotDefinition, DictionaryEntity, RegexEntity, Response
+from chatcore.bot.schema import (
+    PLACEHOLDER,
+    BasicCard,
+    BotDefinition,
+    Carousel,
+    DictionaryEntity,
+    ListCard,
+    QuickReply,
+    RegexEntity,
+    Response,
+    RichBody,
+    SimpleImage,
+)
 from chatcore.dialogue.commands import SlotValue
+from chatcore.nlu import sysentities
 
 # ---------------------------------------------------------------- slot values
 
@@ -45,6 +58,11 @@ def normalize_slot(bot: BotDefinition, entity: str, raw: SlotValue) -> SlotValue
         if isinstance(number, float) and not math.isfinite(number):
             raise SlotValueError(f"{raw!r} is not a finite number")
         return number
+    if entity in sysentities.NEW_ENTITIES:
+        try:
+            return sysentities.normalize(entity, raw)
+        except ValueError as exc:
+            raise SlotValueError(str(exc)) from exc
     text = str(raw).strip()
     if not text:
         raise SlotValueError("empty value")
@@ -109,16 +127,68 @@ def render(template: str, context: Mapping[str, Any]) -> str:
     return PLACEHOLDER.sub(sub, template)
 
 
+class RenderError(ValueError):
+    """A rendered rich response is not valid any more (e.g. a template gave an image address that is not a URL)."""
+
+
 @dataclass(frozen=True)
 class BotMessage:
     response: str  # response ID
-    text: str
-    quick_replies: tuple[str, ...] = ()
+    text: str  # the text, or for a rich response a plain-text summary (for text-only channels and logs)
+    replies: tuple[QuickReply, ...] = ()
+    rich: RichBody | None = None  # the rendered card/image/list/carousel
+    kind: str = "text"  # "text" or one of RICH_KINDS
+
+    @property
+    def quick_replies(self) -> tuple[str, ...]:
+        """The quick reply labels."""
+        return tuple(r.label for r in self.replies)
+
+
+def label_replies(labels: Sequence[str]) -> tuple[QuickReply, ...]:
+    """Message quick replies from bare labels (built by the engine, e.g. clarify; not length-checked)."""
+    return tuple(QuickReply.model_construct(label=label, action="message", message_text=None, block_id=None)
+                 for label in labels)
 
 
 def render_response(response_id: str, response: Response, context: Mapping[str, Any], rng: random.Random) -> BotMessage:
-    body = rng.choice(response.bodies())
-    return BotMessage(response_id, render(body, context), tuple(render(q, context) for q in response.quick_replies))
+    """MissingVariable when a template's value is absent, RenderError when a rendered rich body is invalid."""
+    replies = tuple(
+        QuickReply.model_construct(label=render(q.label, context), action=q.action, block_id=q.block_id,
+                                   message_text=render(q.message_text, context) if q.message_text else None)
+        for q in response.replies())
+    rich = response.rich
+    if rich is None:
+        return BotMessage(response_id, render(rng.choice(response.bodies()), context), replies)
+    try:
+        rendered = type(rich).model_validate(_render_all(rich.model_dump(exclude_none=True), context))
+    except ValidationError as exc:
+        raise RenderError(f"{response_id}: {exc.errors()[0]['msg']}") from exc
+    return BotMessage(response_id, summary(rendered), replies, rendered, response.kind)
+
+
+def _render_all(value: Any, context: Mapping[str, Any], key: str = "") -> Any:
+    if isinstance(value, str):
+        return value if key in ("action", "type", "block_id") else render(value, context)
+    if isinstance(value, dict):
+        return {k: _render_all(v, context, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_render_all(v, context, key) for v in value]
+    return value
+
+
+def summary(body: RichBody) -> str:
+    """Plain text for a rich body: what a text-only channel shows."""
+    match body:
+        case SimpleImage(alt_text=alt):
+            return alt
+        case BasicCard(title=title, description=description, thumbnail=thumb):
+            parts = [p for p in (title, description) if p]
+            return "\n".join(parts) if parts else ((thumb.alt_text or "") if thumb else "")
+        case ListCard(header=header, items=items):
+            return "\n".join([header.title, *(f"- {i.title}" for i in items)])
+        case Carousel(items=cards):
+            return "\n\n".join(summary(c) for c in cards)
 
 
 # ---------------------------------------------------------------- actions

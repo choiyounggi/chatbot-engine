@@ -5,6 +5,7 @@ import random
 
 import pytest
 
+from chatcore.bot.schema import Escape, Scenario, System
 from chatcore.dialogue.commands import (
     CancelScenario,
     Clarify,
@@ -14,6 +15,7 @@ from chatcore.dialogue.commands import (
     SetSlot,
     StartScenario,
 )
+from chatcore.dialogue.commands import Escape as EscapeCommand
 from chatcore.dialogue.events import PromptIssued, ScenarioCompleted, ScenarioStarted, UserUttered
 from chatcore.dialogue.state import fold
 from chatcore.dialogue.turn import TurnProcessor
@@ -188,3 +190,64 @@ def test_entity_only_followup_stays_on_the_finished_scenario(sample_bot, extract
     # leans to temperature (whose scenario also takes a location).
     out = interp(extractor, [("temperature", 0.6)]).interpret("부산은?", finished_weather(turns_since=1), sample_bot)
     assert out.commands == [RerunScenario("check_weather", "location", "부산")]
+
+
+# ---------------------------------------------------------------- E-B: escape phrases and free-text slots
+
+
+def with_escape_and_memo(bot, phrases):
+    """The sample bot plus escape phrases and a scenario that asks for any text."""
+    memo = Scenario.model_validate({"slots": {"note": {"entity": "sys.text", "ask": "ask_location"}},
+                                    "steps": [{"collect": "note"}]})
+    return bot.model_copy(update={"system": System(escape=Escape(phrases=phrases)),
+                                  "scenarios": {**bot.scenarios, "memo": memo}})
+
+
+def waiting_for_note():
+    return fold([UserUttered(text="메모"), ScenarioStarted(scenario="memo"), PromptIssued(scenario="memo", slot="note")])
+
+
+@pytest.mark.parametrize("text", ["나가기", " 나가기! ", "취소"])
+def test_rule1_escape_phrases_come_first(sample_bot, extractor, text):
+    bot = with_escape_and_memo(sample_bot, ["나가기", "취소"])  # the bot's escape wins over the built-in cancel
+    out = interp(extractor, [("weather", 0.99)]).interpret(text, waiting_for_note(), bot)
+    assert out.commands == [EscapeCommand()] and out.info["rule"] == "system"
+
+
+def test_without_escape_phrases_cancel_is_unchanged(sample_bot, extractor):
+    out = interp(extractor, [(OOS, 0.9)]).interpret("나가기", fold([]), sample_bot)
+    assert out.commands == [Fallback()]
+
+
+def test_a_pending_free_text_slot_takes_the_whole_answer(sample_bot, extractor):
+    bot = with_escape_and_memo(sample_bot, ["나가기"])
+    out = interp(extractor, [(OOS, 0.6)]).interpret("내일  우유 사기 ", waiting_for_note(), bot)
+    assert out.commands == [SetSlot("note", "내일 우유 사기")] and out.info["rule"] == "slot"
+
+
+def test_a_free_text_slot_yields_to_a_confident_other_intent_and_to_cancel(sample_bot, extractor):
+    bot = with_escape_and_memo(sample_bot, ["나가기"])
+    switched = interp(extractor, [("weather", 0.95)]).interpret("부산 날씨 알려줘", waiting_for_note(), bot)
+    assert switched.commands == [StartScenario("check_weather", {"location": "부산"})]
+    assert interp(extractor, [(OOS, 0.6)]).interpret("취소", waiting_for_note(), bot).commands == [CancelScenario()]
+
+
+@pytest.mark.parametrize("text", ["주말은 어때?", "이번 주는 어때?", "25도는?", "50%"])
+def test_new_entity_types_do_not_change_an_old_bots_decisions(sample_bot, extractor, text):
+    # the sample bot's slots use none of the E9 entities: they must not make the input "entity-only"
+    out = interp(extractor, [("weather", 0.95)]).interpret(text, fold([]), sample_bot)
+    assert out.commands == [StartScenario("check_weather", {})] and out.info["rule"] == "intent"
+
+
+def test_new_entity_types_count_for_bots_whose_slots_use_them(sample_bot, extractor):
+    plan = Scenario.model_validate({"trigger": {"intent": "help"}, "slots": {
+        "when": {"entity": "sys.date.period", "ask": "ask_location"}}, "steps": [{"collect": "when"}]})
+    bot = sample_bot.model_copy(update={"scenarios": {**sample_bot.scenarios, "show_help": plan}})
+    out = interp(extractor, [("help", 0.95)]).interpret("다음 주 일정 도와줘", fold([]), bot)
+    assert out.commands == [StartScenario("show_help", {"when": "2026-11-16/2026-11-22"})]
+
+
+def test_punctuation_only_escape_phrases_never_match(sample_bot, extractor):
+    bot = with_escape_and_memo(sample_bot, ["...", "나가기"])
+    out = interp(extractor, [(OOS, 0.9)]).interpret("???", waiting_for_note(), bot)
+    assert out.commands == [SetSlot("note", "???")]  # an answer, not an escape

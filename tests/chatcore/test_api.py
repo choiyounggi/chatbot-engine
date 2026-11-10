@@ -63,7 +63,9 @@ def test_conversation_over_http(client):
     assert [m["response"] for m in first.json()["messages"]] == ["ask_location"]
     assert first.json()["messages"][0]["quick_replies"] == ["서울", "부산", "제주"]
     second = say(client, "부산").json()
-    assert second["messages"] == [{"response": "weather_report", "text": "부산은 지금 맑음이에요.", "quick_replies": []}]
+    assert second["messages"] == [{"response": "weather_report", "text": "부산은 지금 맑음이에요.", "quick_replies": [],
+                                   "type": "text", "simple_image": None, "basic_card": None, "list_card": None,
+                                   "carousel": None, "quick_reply_items": []}]
     assert second["nlu"] is None
 
 

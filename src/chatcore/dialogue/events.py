@@ -23,11 +23,13 @@ class SessionStarted(_Event):
     type: Literal["session_started"] = "session_started"
     bot_id: str
     bot_version: str
+    at: str | None = None  # ISO 8601 time (absent in logs written before session timeouts existed)
 
 
 class UserUttered(_Event):
     type: Literal["user_uttered"] = "user_uttered"
     text: str
+    at: str | None = None  # ISO 8601 time
 
 
 class CommandsReceived(_Event):

@@ -537,11 +537,13 @@ def test_a_busy_test_session_is_409(client, host, monkeypatch):
     build = finish(client, client.post(f"{B}/test-builds"))["result"]["build"]
     runtime = host.test_runtime("sample", build)
 
-    def busy(key, text):
+    def busy(key, *args):
         raise SessionBusy(key)
 
     monkeypatch.setattr(runtime.processor, "handle", busy)
+    monkeypatch.setattr(runtime.processor, "open", busy)
     assert client.post(f"{B}/test/{build}/sessions/t/messages", json={"text": "안녕"}).status_code == 409
+    assert client.post(f"{B}/test/{build}/sessions/t/open").status_code == 409
 
 
 def test_training_and_test_builds_embed_through_the_bulk_lane(fake_embedder, tmp_path):
@@ -622,3 +624,52 @@ def test_the_bot_list_needs_the_admin_token_and_handles_an_empty_repository(host
     assert TestClient(create_app(host, admin_token="s3cret")).get("/v1/builder/bots").status_code == 401
     empty = BotHost(InMemoryRepository(), InMemoryStore(), fake_embedder, tmp_path / "empty", actions=synthetic_actions)
     assert TestClient(create_app(empty)).get("/v1/builder/bots").json() == {"bots": []}
+
+
+# ---------------------------------------------------------------- E-B: welcome, block buttons, rich responses
+
+
+def welcome_block(doc):
+    """A welcome block that shows a card whose button and quick reply start weather directly."""
+    doc["system"] = {"welcome": "welcome"}
+    doc["scenarios"]["welcome"] = {"label": "웰컴", "group": "기본", "steps": [{"respond": "welcome_card"}]}
+    doc["responses"]["welcome_card"] = {
+        "basic_card": {"title": "어서 오세요", "description": "무엇이든 물어보세요",
+                       "thumbnail": {"image_url": "https://example.com/hi.png", "alt_text": "인사"},
+                       "buttons": [{"label": "날씨 보기", "action": "block", "block_id": "check_weather"}]},
+        "quick_replies": [{"label": "날씨", "action": "block", "block_id": "check_weather"}, "도움말"]}
+    return doc
+
+
+def test_test_chat_opens_with_the_welcome_block_and_block_buttons_skip_understanding(client):
+    assert save(client, welcome_block(draft(client))).json()["valid"]
+    build = finish(client, client.post(f"{B}/test-builds"))["result"]["build"]
+    opened = client.post(f"{B}/test/{build}/sessions/w1/open")
+    assert opened.status_code == 200, opened.text
+    (card,) = opened.json()["messages"]
+    assert card["type"] == "basic_card" and card["basic_card"]["title"] == "어서 오세요"
+    assert card["text"] == "어서 오세요\n무엇이든 물어보세요" and card["quick_replies"] == ["날씨", "도움말"]
+    assert card["quick_reply_items"][0] == {"label": "날씨", "action": "block", "message_text": None,
+                                            "block_id": "check_weather"}
+    assert client.post(f"{B}/test/{build}/sessions/w1/open").json()["messages"] == []  # already open
+    pressed = client.post(f"{B}/test/{build}/sessions/w1/messages", json={"text": "날씨", "block_id": "check_weather"})
+    assert pressed.json()["nlu"]["rule"] == "block" and pressed.json()["stack"][0]["awaiting"] == "location"
+    bad = client.post(f"{B}/test/{build}/sessions/w1/messages", json={"text": "x", "block_id": "greet"})
+    assert bad.status_code == 422  # greet exists, but no button offers it
+    assert client.post(f"{B}/test/{'0' * 12}/sessions/w1/open").status_code == 410
+
+
+def test_users_open_sessions_and_press_blocks_on_the_deployed_bot(client):
+    plain = client.post("/v1/bots/sample/sessions/u0/open")
+    assert plain.status_code == 200 and plain.json()["messages"] == []  # the sample bot has no welcome block
+    ship(client, welcome_block(draft(client)))
+    opened = client.post("/v1/bots/sample/sessions/u1/open").json()
+    assert [m["response"] for m in opened["messages"]] == ["welcome_card"]
+    r = client.post("/v1/bots/sample/sessions/u1/messages", json={"text": "날씨", "block_id": "check_weather"})
+    assert [m["response"] for m in r.json()["messages"]] == ["ask_location"]
+    assert r.json()["messages"][0]["type"] == "text" and r.json()["messages"][0]["basic_card"] is None
+    assert client.post("/v1/bots/sample/sessions/u1/messages",
+                       json={"text": "x", "block_id": "nope"}).status_code == 422
+    assert client.post("/v1/bots/sample/sessions/u1/messages",
+                       json={"text": "x", "block_id": "Bad-Id"}).status_code == 422
+    assert client.post("/v1/bots/nobot/sessions/u1/open").status_code == 404

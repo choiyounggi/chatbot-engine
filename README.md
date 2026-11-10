@@ -7,7 +7,7 @@ intents with example sentences, entities with synonyms, scenarios, response temp
 engine understands Korean input with a frozen sentence-embedding model plus a small classifier,
 then follows the scenario deterministically. A builder UI for editing that data comes later.
 
-> Status: builder step E-A — HTTP API (`make serve`), terminal chat (`make chat`) and a builder API (`/v1/builder/...`: drafts with ETag, background training jobs with SSE progress, test builds with a test chat, deploy with notes and version numbers, roll back, misunderstood sentences) over the scenario engine with Korean NLU. Set `CHATCORE_ADMIN_TOKEN` to protect the builder API. The builder UI lives in [chatbot-builder](https://github.com/choiyounggi/chatbot-builder).
+> Status: builder step E-B — HTTP API (`make serve`), terminal chat (`make chat`) and a builder API (`/v1/builder/...`: drafts with ETag, background training jobs with SSE progress, test builds with a test chat, deploy with notes and version numbers, roll back, misunderstood sentences). Bots can have Kakao-style welcome / escape blocks, a session timeout, optional and validated slots, quick replies and buttons that start a block directly, image / card / list / carousel responses, and 16 system entities (dates, times, numbers, periods, ordinals, ages, percents, URLs, units, free text) over the scenario engine with Korean NLU. Set `CHATCORE_ADMIN_TOKEN` to protect the builder API. The builder UI lives in [chatbot-builder](https://github.com/choiyounggi/chatbot-builder).
 > Design and roadmap: [docs/engine-core-plan.md](docs/engine-core-plan.md).
 
 ## Quick start

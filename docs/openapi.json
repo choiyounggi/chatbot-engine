@@ -45,6 +45,52 @@
         "title": "ActionStep",
         "type": "object"
       },
+      "BasicCard": {
+        "additionalProperties": false,
+        "properties": {
+          "buttons": {
+            "items": {
+              "$ref": "#/components/schemas/Button"
+            },
+            "title": "Buttons",
+            "type": "array"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "thumbnail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Thumbnail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "BasicCard",
+        "type": "object"
+      },
       "BotDocument": {
         "additionalProperties": false,
         "description": "What a builder edits and stores: a bot without its computed version.",
@@ -136,6 +182,10 @@
               "similarity_threshold": 0.39,
               "switch_threshold": 0.8
             }
+          },
+          "system": {
+            "$ref": "#/components/schemas/System",
+            "default": {}
           }
         },
         "required": [
@@ -280,6 +330,78 @@
         "title": "BranchStep",
         "type": "object"
       },
+      "Button": {
+        "additionalProperties": false,
+        "description": "Kakao card button: webLink / message / block / phone.",
+        "properties": {
+          "action": {
+            "enum": [
+              "web_link",
+              "message",
+              "block",
+              "phone"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "block_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Id"
+          },
+          "label": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "message_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Text"
+          },
+          "phone_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone Number"
+          },
+          "web_link_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Web Link Url"
+          }
+        },
+        "required": [
+          "label",
+          "action"
+        ],
+        "title": "Button",
+        "type": "object"
+      },
       "CallStep": {
         "additionalProperties": false,
         "properties": {
@@ -292,6 +414,30 @@
           "call"
         ],
         "title": "CallStep",
+        "type": "object"
+      },
+      "Carousel": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BasicCard"
+            },
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          },
+          "type": {
+            "const": "basic_card",
+            "default": "basic_card",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "Carousel",
         "type": "object"
       },
       "CollectStep": {
@@ -437,6 +583,36 @@
           "warnings"
         ],
         "title": "DraftSavedOut",
+        "type": "object"
+      },
+      "Escape": {
+        "additionalProperties": false,
+        "description": "Kakao's 탈출 block: these exact phrases end every running scenario.",
+        "properties": {
+          "phrases": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Phrases",
+            "type": "array"
+          },
+          "scenario": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scenario"
+          }
+        },
+        "required": [
+          "phrases"
+        ],
+        "title": "Escape",
         "type": "object"
       },
       "FrameOut": {
@@ -588,6 +764,111 @@
         "title": "JobOut",
         "type": "object"
       },
+      "Link": {
+        "additionalProperties": false,
+        "properties": {
+          "web": {
+            "title": "Web",
+            "type": "string"
+          }
+        },
+        "required": [
+          "web"
+        ],
+        "title": "Link",
+        "type": "object"
+      },
+      "ListCard": {
+        "additionalProperties": false,
+        "properties": {
+          "buttons": {
+            "items": {
+              "$ref": "#/components/schemas/Button"
+            },
+            "title": "Buttons",
+            "type": "array"
+          },
+          "header": {
+            "$ref": "#/components/schemas/ListHeader"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ListItem"
+            },
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "header",
+          "items"
+        ],
+        "title": "ListCard",
+        "type": "object"
+      },
+      "ListHeader": {
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "ListHeader",
+        "type": "object"
+      },
+      "ListItem": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Link"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "ListItem",
+        "type": "object"
+      },
       "LiveOut": {
         "properties": {
           "bot": {
@@ -608,6 +889,18 @@
       },
       "MessageIn": {
         "properties": {
+          "block_id": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Id"
+          },
           "text": {
             "maxLength": 10000,
             "title": "Text",
@@ -622,6 +915,36 @@
       },
       "MessageOut": {
         "properties": {
+          "basic_card": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BasicCard"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "carousel": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Carousel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "list_card": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ListCard"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "quick_replies": {
             "items": {
               "type": "string"
@@ -629,12 +952,41 @@
             "title": "Quick Replies",
             "type": "array"
           },
+          "quick_reply_items": {
+            "items": {
+              "$ref": "#/components/schemas/QuickReplyOut"
+            },
+            "title": "Quick Reply Items",
+            "type": "array"
+          },
           "response": {
             "title": "Response",
             "type": "string"
           },
+          "simple_image": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SimpleImage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "text": {
             "title": "Text",
+            "type": "string"
+          },
+          "type": {
+            "default": "text",
+            "enum": [
+              "text",
+              "simple_image",
+              "basic_card",
+              "list_card",
+              "carousel"
+            ],
+            "title": "Type",
             "type": "string"
           }
         },
@@ -767,6 +1119,101 @@
         "title": "ParseOut",
         "type": "object"
       },
+      "QuickReply": {
+        "additionalProperties": false,
+        "description": "Kakao quick reply (바로연결): sends a message, or starts a block without understanding.",
+        "properties": {
+          "action": {
+            "default": "message",
+            "enum": [
+              "message",
+              "block"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "block_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Id"
+          },
+          "label": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "message_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Text"
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "title": "QuickReply",
+        "type": "object"
+      },
+      "QuickReplyOut": {
+        "description": "A quick reply as said (not length-checked: a clarify label or a filled-in template may be long).",
+        "properties": {
+          "action": {
+            "enum": [
+              "message",
+              "block"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "block_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Id"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "message_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Text"
+          }
+        },
+        "required": [
+          "label",
+          "action",
+          "message_text",
+          "block_id"
+        ],
+        "title": "QuickReplyOut",
+        "type": "object"
+      },
       "RegexEntity": {
         "additionalProperties": false,
         "properties": {
@@ -808,13 +1255,61 @@
       },
       "Response": {
         "additionalProperties": false,
+        "description": "One speech bubble: text (or random variants) or one rich body, plus quick replies.",
         "properties": {
+          "basic_card": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BasicCard"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "carousel": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Carousel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "list_card": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ListCard"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "quick_replies": {
             "items": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/components/schemas/QuickReply"
+                }
+              ]
             },
             "title": "Quick Replies",
             "type": "array"
+          },
+          "simple_image": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SimpleImage"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "text": {
             "anyOf": [
@@ -852,6 +1347,19 @@
             "default": false,
             "title": "Exclusive",
             "type": "boolean"
+          },
+          "group": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group"
           },
           "label": {
             "default": "",
@@ -917,6 +1425,34 @@
         "title": "Scenario",
         "type": "object"
       },
+      "SessionTimeout": {
+        "additionalProperties": false,
+        "description": "A session idle longer than this starts over at its next message (Kakao: 최대 대기 시간).",
+        "properties": {
+          "minutes": {
+            "maximum": 1440.0,
+            "minimum": 1.0,
+            "title": "Minutes",
+            "type": "integer"
+          },
+          "notice": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notice"
+          }
+        },
+        "required": [
+          "minutes"
+        ],
+        "title": "SessionTimeout",
+        "type": "object"
+      },
       "Settings": {
         "additionalProperties": false,
         "properties": {
@@ -980,23 +1516,120 @@
         "title": "Settings",
         "type": "object"
       },
-      "Slot": {
+      "SimpleImage": {
         "additionalProperties": false,
         "properties": {
-          "ask": {
-            "title": "Ask",
+          "alt_text": {
+            "minLength": 1,
+            "title": "Alt Text",
             "type": "string"
           },
-          "entity": {
-            "title": "Entity",
+          "image_url": {
+            "title": "Image Url",
             "type": "string"
           }
         },
         "required": [
-          "entity",
-          "ask"
+          "image_url",
+          "alt_text"
+        ],
+        "title": "SimpleImage",
+        "type": "object"
+      },
+      "Slot": {
+        "additionalProperties": false,
+        "properties": {
+          "ask": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ask"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default"
+          },
+          "entity": {
+            "title": "Entity",
+            "type": "string"
+          },
+          "required": {
+            "default": true,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "validation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Validation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "entity"
         ],
         "title": "Slot",
+        "type": "object"
+      },
+      "System": {
+        "additionalProperties": false,
+        "description": "System blocks (all optional; a document without them behaves as before).",
+        "properties": {
+          "escape": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Escape"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timeout": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionTimeout"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "welcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Welcome"
+          }
+        },
+        "title": "System",
         "type": "object"
       },
       "TestTurnOut": {
@@ -1059,6 +1692,46 @@
         "title": "TestTurnOut",
         "type": "object"
       },
+      "Thumbnail": {
+        "additionalProperties": false,
+        "properties": {
+          "alt_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alt Text"
+          },
+          "fixed_ratio": {
+            "default": false,
+            "title": "Fixed Ratio",
+            "type": "boolean"
+          },
+          "image_url": {
+            "title": "Image Url",
+            "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Link"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "image_url"
+        ],
+        "title": "Thumbnail",
+        "type": "object"
+      },
       "Trigger": {
         "additionalProperties": false,
         "properties": {
@@ -1109,6 +1782,26 @@
           "messages"
         ],
         "title": "TurnOut",
+        "type": "object"
+      },
+      "Validation": {
+        "additionalProperties": false,
+        "description": "Check a value with an action before accepting it (Kakao: parameter validation).",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "fail": {
+            "title": "Fail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "fail"
+        ],
+        "title": "Validation",
         "type": "object"
       },
       "ValidationError": {
@@ -1378,6 +2071,57 @@
           }
         },
         "summary": "Message"
+      }
+    },
+    "/v1/bots/{bot}/sessions/{session}/open": {
+      "post": {
+        "description": "The user opened the conversation: a new session answers with the welcome block (if any);\nan existing one with no messages.",
+        "operationId": "open_session_v1_bots__bot__sessions__session__open_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,63}$",
+              "title": "Session",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Open Session"
       }
     },
     "/v1/builder/bots": {
@@ -1899,6 +2643,83 @@
           }
         },
         "summary": "Test Message"
+      }
+    },
+    "/v1/builder/bots/{bot}/test/{build}/sessions/{session}/open": {
+      "post": {
+        "description": "Open a test chat: the welcome block of a new session (410 like messages).",
+        "operationId": "test_open_v1_builder_bots__bot__test__build__sessions__session__open_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "build",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{12}$",
+              "title": "Build",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,63}$",
+              "title": "Session",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestTurnOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Test Open"
       }
     },
     "/v1/builder/bots/{bot}/versions": {

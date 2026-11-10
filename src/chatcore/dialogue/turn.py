@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import random
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from chatcore.bot.loader import BotError, validate
 from chatcore.bot.schema import BotDefinition
-from chatcore.dialogue.commands import Command, Fallback, to_dict
+from chatcore.dialogue.commands import Command, Fallback, StartScenario, to_dict
 from chatcore.dialogue.engine import ScenarioEngine
 from chatcore.dialogue.events import (
     BotUttered,
@@ -57,33 +58,49 @@ class TurnResult:
     events: list[Event]  # events stored by this turn (empty if the input was rejected)
 
 
+class UnknownBlock(ValueError):
+    """A direct block start names a scenario that no response offers as a block button."""
+
+
+Clock = Callable[[], dt.datetime]
+
+
+def utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.UTC)
+
+
 class TurnProcessor:
     def __init__(self, bot: BotDefinition, store: TrackerStore, interpreter: Interpreter,
-                 actions: ActionRegistry, rng: random.Random | None = None) -> None:
+                 actions: ActionRegistry, rng: random.Random | None = None, clock: Clock = utc_now) -> None:
         report = validate(bot, actions.names())
         if report.errors:
             raise BotError(report.errors)
-        self.bot, self.store, self.interpreter = bot, store, interpreter
+        self.bot, self.store, self.interpreter, self.clock = bot, store, interpreter, clock
         self.engine = ScenarioEngine(bot, actions, rng)
+        self.blocks = bot.block_targets()
 
-    def handle(self, session_id: str, text: str) -> TurnResult:
-        """Process one user message. Raises SessionBusy if the session is
-        mid-turn; store errors propagate (nothing is stored then)."""
+    def handle(self, session_id: str, text: str, block: str | None = None) -> TurnResult:
+        """Process one user message. `block`: the user pressed a quick reply or button that starts
+        this scenario directly (no understanding; UnknownBlock unless a response offers it).
+        Raises SessionBusy if the session is mid-turn; store errors propagate (nothing is stored then)."""
+        if block is not None and block not in self.blocks:
+            raise UnknownBlock(block)
         clean = " ".join(text.split()) if isinstance(text, str) else ""
         if not clean or len(clean) > MAX_INPUT_CHARS:
             return TurnResult([self.engine.render_system("input_invalid")], [])
 
         with self.store.session(session_id) as tracker:
             state = fold(tracker.events)
+            now = self.clock().isoformat()
             new: list[Event] = []
 
             def emit(event: Event) -> None:
                 new.append(event)
                 apply(state, event)
 
-            notices: list[BotMessage] = []
+            notices = self._expire(state, emit)
             if not state.started:
-                emit(SessionStarted(bot_id=self.bot.id, bot_version=self.bot.version))
+                emit(SessionStarted(bot_id=self.bot.id, bot_version=self.bot.version, at=now))
             elif state.bot_version != self.bot.version:
                 # The session's version is no longer served. A scenario in progress may have
                 # changed in any way (steps, slots, order), so start over and say so; an idle
@@ -91,25 +108,76 @@ class TurnProcessor:
                 if state.stack:
                     log.info("session %s: bot version changed mid-scenario; restarting", session_id)
                     emit(SessionRestarted())
-                    notice = self.engine.render_system("restarted")
-                    emit(BotUttered(response=notice.response, text=notice.text,
-                                    quick_replies=list(notice.quick_replies)))
-                    notices.append(notice)
-                emit(SessionStarted(bot_id=self.bot.id, bot_version=self.bot.version))
-            emit(UserUttered(text=clean))
-            prefix = list(new)
-            try:
-                interpretation = self.interpreter.interpret(clean, state, self.bot)
-                commands = list(interpretation.commands)
-                emit(CommandsReceived(commands=[to_dict(c) for c in commands], nlu=interpretation.info))
-                outcome = self.engine.run(state, commands)
-                new += outcome.events
-                messages = notices + outcome.messages
-            except Exception as exc:  # a bug must not wedge the session: log, answer, keep only safe events
-                log.exception("turn failed for session %s", session_id)
-                msg = self.engine.render_system("error")
-                new = prefix + [TurnFailed(reason=type(exc).__name__),
-                                BotUttered(response=msg.response, text=msg.text, quick_replies=list(msg.quick_replies))]
-                messages = notices + [msg]
+                    notices.append(self._notice("restarted", emit))
+                emit(SessionStarted(bot_id=self.bot.id, bot_version=self.bot.version, at=now))
+            emit(UserUttered(text=clean, at=now))
+
+            def understand() -> Interpretation:
+                if block is not None:
+                    return Interpretation([StartScenario(block)], {"rule": "block", "text": clean, "block": block})
+                return self.interpreter.interpret(clean, state, self.bot)
+
+            new, messages = self._run(session_id, state, understand, new, emit)
+            tracker.append(new)
+        return TurnResult(notices + messages, new)
+
+    def open(self, session_id: str) -> TurnResult:
+        """The user opened the conversation (Kakao: entering the chat room). A new session starts
+        and runs the welcome scenario, if the bot has one; an existing session gets nothing."""
+        with self.store.session(session_id) as tracker:
+            state = fold(tracker.events)
+            if state.started:
+                return TurnResult([], [])
+            new: list[Event] = []
+
+            def emit(event: Event) -> None:
+                new.append(event)
+                apply(state, event)
+
+            emit(SessionStarted(bot_id=self.bot.id, bot_version=self.bot.version, at=self.clock().isoformat()))
+            welcome = self.bot.system.welcome
+            messages: list[BotMessage] = []
+            if welcome is not None:
+                new, messages = self._run(session_id, state, lambda: Interpretation(
+                    [StartScenario(welcome)], {"rule": "welcome"}), new, emit)
             tracker.append(new)
         return TurnResult(messages, new)
+
+    def _expire(self, state: DialogueState, emit: Callable[[Event], None]) -> list[BotMessage]:
+        """Start an idle session over (system.timeout). A dropped conversation is announced;
+        an idle one only forgets what it could re-run ("부산은?")."""
+        timeout = self.bot.system.timeout
+        if timeout is None or state.last_active is None or not (state.stack or state.completed):
+            return []
+        try:
+            idle = self.clock() - dt.datetime.fromisoformat(state.last_active)
+        except (ValueError, TypeError):  # unreadable or naive time in the log: do not guess
+            log.warning("unreadable session time %r", state.last_active)
+            return []
+        if idle <= dt.timedelta(minutes=timeout.minutes):
+            return []
+        dropped = bool(state.stack)
+        emit(SessionRestarted())
+        return [self._notice(timeout.notice or "restarted", emit)] if dropped else []
+
+    def _notice(self, response_id: str, emit: Callable[[Event], None]) -> BotMessage:
+        msg = self.engine.render_system(response_id)
+        emit(BotUttered(response=msg.response, text=msg.text, quick_replies=list(msg.quick_replies)))
+        return msg
+
+    def _run(self, session_id: str, state: DialogueState, understand: Callable[[], Interpretation],
+             new: list[Event], emit: Callable[[Event], None]) -> tuple[list[Event], list[BotMessage]]:
+        """Understand and run the engine; returns (events to store, messages)."""
+        prefix = list(new)
+        try:
+            interpretation = understand()
+            commands = list(interpretation.commands)
+            emit(CommandsReceived(commands=[to_dict(c) for c in commands], nlu=interpretation.info))
+            outcome = self.engine.run(state, commands)
+            return new + outcome.events, outcome.messages
+        except Exception as exc:  # a bug must not wedge the session: log, answer, keep only safe events
+            log.exception("turn failed for session %s", session_id)
+            msg = self.engine.render_system("error")
+            return prefix + [TurnFailed(reason=type(exc).__name__),
+                             BotUttered(response=msg.response, text=msg.text,
+                                        quick_replies=list(msg.quick_replies))], [msg]
