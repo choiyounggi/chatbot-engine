@@ -12,7 +12,6 @@ without restarting (docs/engine-core-plan.md §3.1, Phase 6):
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from collections import OrderedDict
@@ -225,11 +224,10 @@ class BotHost:
         if document is None:
             raise KeyError(bot_id)
         bot = bot_from_document(document, self.actions.names())
-        try:
-            self._load(bot)
-        except NotTrained:
+        try:  # only the files are checked here; deploy() loads the model once
+            meta = NluModel.check(bot, self.artifacts / bot.id / bot.version, self.embedder)
+        except ModelMismatch:
             return self.train_draft(bot_id)[0].version
-        meta = json.loads((self.artifacts / bot.id / bot.version / "meta.json").read_text(encoding="utf-8"))
         return self.repository.add_version(bot_id, bot.version, document, meta.get("macro_f1")).version
 
     def _build(self, bot_id: str, version: str) -> BotRuntime:

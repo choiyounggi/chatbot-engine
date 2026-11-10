@@ -320,6 +320,10 @@ def test_seeding_reuses_a_model_that_is_already_trained(host, fake_embedder, tmp
         raise AssertionError("retrained a model that was already in artifacts/")
 
     monkeypatch.setattr(fresh, "train_draft", no_training)
+    loads = []
+    real_load = fresh._load
+    monkeypatch.setattr(fresh, "_load", lambda bot: loads.append(bot.version) or real_load(bot))
     assert fresh.seed(SAMPLE) == "sample" and fresh.bots() == host.bots()
+    assert loads == [host.bots()["sample"]]  # loaded once, by the deploy (a load builds a Kiwi: ~0.3 s)
     (info,) = fresh.repository.versions("sample")
     assert info.macro_f1 == host.repository.versions("sample")[0].macro_f1  # taken from meta.json

@@ -196,6 +196,14 @@ class NluModel:
     @classmethod
     def load(cls, bot: BotDefinition, directory: Path, embedder: Embedder, extractor: EntityExtractor | None = None,
              today: Callable[[], dt.date] = dt.date.today) -> NluModel:
+        cls.check(bot, directory, embedder)
+        return cls(bot, IntentClassifier.load(directory / "classifier.npz"), embedder,
+                   extractor or EntityExtractor(bot), today)
+
+    @staticmethod
+    def check(bot: BotDefinition, directory: Path, embedder: Embedder) -> dict[str, Any]:
+        """The model's meta.json if `directory` holds a model trained for this bot version and
+        embedder; ModelMismatch otherwise. Cheap: nothing is loaded."""
         meta_file = directory / "meta.json"
         if not meta_file.is_file() or not (directory / "classifier.npz").is_file():
             raise ModelMismatch(f"no trained model in {directory}; run `make train`")
@@ -206,5 +214,4 @@ class NluModel:
         if meta.get("embedding_model") != embedder.model_id or meta.get("embedding_prompt") != embedder.prompt:
             raise ModelMismatch(f"model was trained with {meta.get('embedding_model')} / prompt "
                                 f"{meta.get('embedding_prompt')!r}, not {embedder.model_id} / {embedder.prompt!r}")
-        return cls(bot, IntentClassifier.load(directory / "classifier.npz"), embedder,
-                   extractor or EntityExtractor(bot), today)
+        return dict(meta)
