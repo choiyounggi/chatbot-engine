@@ -48,7 +48,7 @@ class ScriptedInterpreter:
     script: Mapping[str, Sequence[Command]] = field(default_factory=dict)
 
     def interpret(self, text: str, state: DialogueState, bot: BotDefinition) -> Interpretation:
-        return Interpretation(list(self.script.get(text, [Fallback()])), {"rule": "scripted"})
+        return Interpretation(list(self.script.get(text, [Fallback()])), {"rule": "scripted", "text": text})
 
 
 @dataclass(frozen=True)
@@ -66,13 +66,6 @@ class TurnProcessor:
         self.bot, self.store, self.interpreter = bot, store, interpreter
         self.engine = ScenarioEngine(bot, actions, rng)
 
-    def _stack_fits(self, state: DialogueState) -> bool:
-        for frame in state.stack:
-            scenario = self.bot.scenarios.get(frame.scenario)
-            if scenario is None or frame.step > len(scenario.steps) or not set(frame.slots) <= set(scenario.slots):
-                return False
-        return True
-
     def handle(self, session_id: str, text: str) -> TurnResult:
         """Process one user message. Raises SessionBusy if the session is
         mid-turn; store errors propagate (nothing is stored then)."""
@@ -88,14 +81,20 @@ class TurnProcessor:
                 new.append(event)
                 apply(state, event)
 
+            notices: list[BotMessage] = []
             if not state.started:
                 emit(SessionStarted(bot_id=self.bot.id, bot_version=self.bot.version))
             elif state.bot_version != self.bot.version:
-                # The bot was edited mid-conversation. Keep the session if its running
-                # scenarios still exist as they were; otherwise start over cleanly.
-                if not self._stack_fits(state):
-                    log.info("session %s: bot changed under its scenarios; restarting", session_id)
+                # The session's version is no longer served. A scenario in progress may have
+                # changed in any way (steps, slots, order), so start over and say so; an idle
+                # session just continues on this version.
+                if state.stack:
+                    log.info("session %s: bot version changed mid-scenario; restarting", session_id)
                     emit(SessionRestarted())
+                    notice = self.engine.render_system("restarted")
+                    emit(BotUttered(response=notice.response, text=notice.text,
+                                    quick_replies=list(notice.quick_replies)))
+                    notices.append(notice)
                 emit(SessionStarted(bot_id=self.bot.id, bot_version=self.bot.version))
             emit(UserUttered(text=clean))
             prefix = list(new)
@@ -105,12 +104,12 @@ class TurnProcessor:
                 emit(CommandsReceived(commands=[to_dict(c) for c in commands], nlu=interpretation.info))
                 outcome = self.engine.run(state, commands)
                 new += outcome.events
-                messages = outcome.messages
+                messages = notices + outcome.messages
             except Exception as exc:  # a bug must not wedge the session: log, answer, keep only safe events
                 log.exception("turn failed for session %s", session_id)
                 msg = self.engine.render_system("error")
                 new = prefix + [TurnFailed(reason=type(exc).__name__),
                                 BotUttered(response=msg.response, text=msg.text, quick_replies=list(msg.quick_replies))]
-                messages = [msg]
+                messages = notices + [msg]
             tracker.append(new)
         return TurnResult(messages, new)

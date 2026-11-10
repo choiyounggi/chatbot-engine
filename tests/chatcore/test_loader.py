@@ -116,7 +116,11 @@ def test_load_bot_merges_files_and_hashes_content(tmp_path):
     loaded = load_bot(write_bot(tmp_path, raw, nlu))
     assert loaded.intents.keys() == b.intents.keys()
     first = loaded.version
-    (tmp_path / "bot.yaml").write_text((tmp_path / "bot.yaml").read_text(encoding="utf-8") + "\n# edit\n", encoding="utf-8")
+    (tmp_path / "bot.yaml").write_text((tmp_path / "bot.yaml").read_text(encoding="utf-8") + "\n# comment only\n", encoding="utf-8")
+    assert load_bot(tmp_path).version == first  # the version hashes content, not formatting
+    text = (tmp_path / "bot.yaml").read_text(encoding="utf-8")
+    assert "label: ''" in text
+    (tmp_path / "bot.yaml").write_text(text.replace("label: ''", "label: 바뀐 이름", 1), encoding="utf-8")
     assert load_bot(tmp_path).version != first
 
 
@@ -224,3 +228,36 @@ def test_malformed_placeholder_in_action_args_is_an_error():
                              "steps": [{"collect": "c"}, {"action": "a", "args": {"q": "{{ slots.c|eun }}"}}]}},
             responses={**REQUIRED, "ask": {"text": "?"}, "done": {"text": "끝"}})
     assert any("malformed placeholder" in e for e in validate(b).errors)
+
+
+
+def test_document_version_ignores_key_order_and_rejects_explicit_version():
+    from chatcore.bot.loader import bot_from_document, document_version
+
+    doc = bot().model_dump(exclude={"version"})
+    assert document_version(doc) == document_version(dict(reversed(list(doc.items()))))
+    assert bot_from_document(doc).version == document_version(doc)
+    with pytest.raises(BotError, match="computed"):
+        bot_from_document({**doc, "version": "x"})
+    with pytest.raises(BotError, match="mapping"):
+        bot_from_document(["not", "a", "dict"])  # type: ignore[arg-type]
+
+
+def test_document_version_treats_1_0_as_1_and_rejects_non_json_values():
+    from chatcore.bot.loader import document_version
+
+    doc = bot().model_dump(exclude={"version"})
+    doc["settings"]["intent_threshold"] = 1.0
+    assert document_version(doc) == document_version({**doc, "settings": {**doc["settings"], "intent_threshold": 1}})
+    assert document_version(doc) != document_version({**doc, "settings": {**doc["settings"], "intent_threshold": 0.5}})
+    for bad in ({**doc, "settings": {**doc["settings"], "intent_threshold": float("nan")}}, {**doc, 1: "mixed keys"}, {**doc, "x": object()}):
+        with pytest.raises(BotError, match="plain JSON"):
+            document_version(bad)
+
+
+def test_yaml_dates_and_clock_times_stay_text(tmp_path):
+    from chatcore.bot.loader import read_document
+
+    (tmp_path / "bot.yaml").write_text("id: t\nintents:\n  when:\n    examples: [2026-01-01, 12:30, 1:30.5, 42, 0x1F, 1.5]\n", encoding="utf-8")
+    examples = read_document(tmp_path)["intents"]["when"]["examples"]
+    assert examples == ["2026-01-01", "12:30", "1:30.5", 42, 31, 1.5]  # plain numbers are still numbers

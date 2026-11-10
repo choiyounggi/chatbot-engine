@@ -61,6 +61,23 @@ class PostgresStore:
                         [(session_id, start + i, e.type, Jsonb(to_json(e))) for i, e in enumerate(tracker.pending)],
                     )
 
+    def recent(self, prefix: str, event_type: str, limit: int) -> list[tuple[str, Event]]:
+        if limit < 1:
+            return []
+        pattern = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT session_id, payload FROM chat_events WHERE session_id LIKE %s AND type = %s "
+                "ORDER BY created_at DESC, seq DESC LIMIT %s",
+                (pattern, event_type, limit),
+            ).fetchall()
+        out: list[tuple[str, Event]] = []
+        for sid, payload in rows:
+            if not isinstance(payload, dict):
+                raise TypeError(f"chat_events.payload must be a JSON object, got {type(payload).__name__}")
+            out.append((str(sid), from_json(payload)))
+        return out
+
     def events(self, session_id: str) -> list[Event]:
         check_session_id(session_id)
         with self._connect() as conn:

@@ -1,0 +1,243 @@
+"""Bot hosts: which runtime answers a session.
+
+`StaticHost` serves fixed runtimes (tests, simple setups). `BotHost` serves
+versions from a BotRepository and lets a builder train, deploy and roll back
+without restarting (docs/engine-core-plan.md §3.1, Phase 6):
+
+- a session stays on the version it started with while that version is
+  loaded (the deployed one plus the `keep` most recently used others);
+- when its version has been dropped, the deployed version takes over and the
+  turn processor restarts the conversation if its scenarios no longer fit.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import threading
+from collections import OrderedDict
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
+
+from chatcore.actions.builtin import builtin_registry
+from chatcore.bot.loader import BotError, bot_from_document, read_document, validate
+from chatcore.bot.repository import BotRepository, VersionInfo
+from chatcore.bot.schema import BotDefinition
+from chatcore.dialogue.events import SessionStarted
+from chatcore.dialogue.turn import TurnProcessor
+from chatcore.dialogue.values import ActionRegistry
+from chatcore.nlu.entities import EntityExtractor
+from chatcore.nlu.interpreter import NluInterpreter
+from chatcore.nlu.model import CachedEmbedder, Embedder, ModelMismatch, NluModel
+from chatcore.nlu.train import Report, train
+from chatcore.runtime import BotRuntime
+from chatcore.store.base import TrackerStore
+
+
+class Host(Protocol):
+    store: TrackerStore
+
+    def bots(self) -> dict[str, str]:
+        """bot id -> live version."""
+        ...
+
+    def runtime(self, bot_id: str) -> BotRuntime | None:
+        """The live runtime of a bot, or None if unknown."""
+        ...
+
+    def runtime_for_session(self, bot_id: str, session_key: str) -> BotRuntime | None:
+        """The runtime that should answer this session's next turn."""
+        ...
+
+
+class StaticHost:
+    def __init__(self, runtimes: dict[str, BotRuntime], store: TrackerStore) -> None:
+        self.runtimes, self.store = runtimes, store
+
+    def bots(self) -> dict[str, str]:
+        return {k: v.bot.version for k, v in self.runtimes.items()}
+
+    def runtime(self, bot_id: str) -> BotRuntime | None:
+        return self.runtimes.get(bot_id)
+
+    def runtime_for_session(self, bot_id: str, session_key: str) -> BotRuntime | None:
+        return self.runtimes.get(bot_id)
+
+
+log = logging.getLogger(__name__)
+
+
+class NoEarlierDeployment(Exception):
+    """Rollback asked for, but the bot has never been deployed with a different version."""
+
+
+class NotTrained(ValueError):
+    """Deploying a version whose model is not in artifacts/ (train it first)."""
+
+
+class BelowBar(ValueError):
+    def __init__(self, report: Report, min_f1: float) -> None:
+        super().__init__(f"macro-F1 {report.macro_f1:.3f} is below {min_f1}; not saved")
+        self.report = report
+
+
+@dataclass(frozen=True)
+class DraftCheck:
+    version: str | None  # None when the draft does not parse
+    errors: list[str]
+    warnings: list[str]
+
+
+class BotHost:
+    def __init__(self, repository: BotRepository, store: TrackerStore, embedder: Embedder, artifacts: Path,
+                 actions: Callable[[], ActionRegistry] = builtin_registry, keep: int = 2, min_f1: float = 0.90) -> None:
+        if keep < 1:
+            raise ValueError("keep must be >= 1")
+        self.repository, self.store, self.embedder, self.artifacts = repository, store, embedder, artifacts
+        self.actions, self.keep, self.min_f1 = actions(), keep, min_f1
+        self._loaded: dict[str, OrderedDict[str, BotRuntime]] = {}  # bot -> version -> runtime (LRU)
+        self._live: dict[str, str] = {}
+        self._lock = threading.RLock()  # guards _loaded/_live; held only briefly
+        self._deploying = threading.RLock()  # one deploy/rollback at a time, so memory matches the repository
+
+    # ------------------------------------------------------------ serving
+
+    def bots(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._live)
+
+    def runtime(self, bot_id: str) -> BotRuntime | None:
+        with self._lock:
+            version = self._live.get(bot_id)
+            return self._loaded[bot_id][version] if version else None
+
+    def runtime_for_session(self, bot_id: str, session_key: str) -> BotRuntime | None:
+        pinned = next((e.bot_version for e in reversed(self.store.events(session_key))
+                       if isinstance(e, SessionStarted)), None)
+        with self._lock:
+            loaded = self._loaded.get(bot_id)
+            if loaded is None or bot_id not in self._live:
+                return None
+            if pinned is not None and pinned in loaded:
+                loaded.move_to_end(pinned)
+                return loaded[pinned]
+            return loaded[self._live[bot_id]]
+
+    def start(self) -> None:
+        """Load every bot's deployed version (server start). A version whose model files are
+        missing (a new machine on the same database) is trained again from its stored document.
+        A bot that still cannot load is logged and left out, so it does not block the others."""
+        for bot_id in self.repository.bots():
+            history = self.repository.deployments(bot_id)
+            if not history:
+                continue
+            try:
+                try:
+                    runtime = self._build(bot_id, history[0])
+                except NotTrained:
+                    log.warning("%s@%s has no model files; training it again", bot_id, history[0])
+                    bot = bot_from_document(self.repository.get_version(bot_id, history[0]), self.actions.names())
+                    train(bot, CachedEmbedder(self.embedder), self.artifacts)  # it cleared the bar when stored
+                    runtime = self._build(bot_id, history[0])
+            except Exception:
+                log.exception("could not load %s@%s; the bot is not served", bot_id, history[0])
+                continue
+            self._activate(bot_id, history[0], runtime)
+
+    # ------------------------------------------------------------ builder
+
+    def check_draft(self, document: dict[str, Any]) -> DraftCheck:
+        from chatcore.bot.loader import parse_document
+
+        try:
+            bot = parse_document(document)
+        except BotError as exc:
+            return DraftCheck(None, exc.problems, [])
+        report = validate(bot, self.actions.names())
+        return DraftCheck(bot.version, report.errors, report.warnings)
+
+    def save_draft(self, bot_id: str, document: dict[str, Any]) -> DraftCheck:
+        """Save even an invalid draft (a builder saves work in progress); report its problems."""
+        if document.get("id") != bot_id:
+            raise BotError([f"the document's id must be {bot_id!r}"])
+        check = self.check_draft(document)
+        self.repository.save_draft(bot_id, document)
+        return check
+
+    def train_draft(self, bot_id: str) -> tuple[VersionInfo, Report]:
+        """Validate and train the draft; store it as a version if it clears min_f1."""
+        document = self.repository.get_draft(bot_id)
+        if document is None:
+            raise KeyError(bot_id)
+        bot = bot_from_document(document, self.actions.names())
+        directory, report = train(bot, CachedEmbedder(self.embedder), self.artifacts, min_f1=self.min_f1)
+        if directory is None:
+            raise BelowBar(report, self.min_f1)
+        return self.repository.add_version(bot_id, bot.version, document, report.macro_f1), report
+
+    def deploy(self, bot_id: str, version: str) -> None:
+        """Build the runtime first (NotTrained / VersionNotFound / BotError leave everything as
+        it was), record the deployment, then switch new sessions to it."""
+        with self._deploying:
+            runtime = self._build(bot_id, version)
+            self.repository.deploy(bot_id, version)
+            self._activate(bot_id, version, runtime)
+
+    def rollback(self, bot_id: str) -> str:
+        """Re-deploy the version that was live before the current one."""
+        with self._deploying:
+            history = self.repository.deployments(bot_id)
+            previous = next((v for v in history[1:] if v != history[0]), None)
+            if previous is None:
+                raise NoEarlierDeployment(bot_id)
+            self.deploy(bot_id, previous)
+            return previous
+
+    def seed(self, bot_dir: Path) -> str:
+        """First start: import a bot directory as draft and deploy it (reusing a model from
+        `make train` when there is one) unless the repository already has it. Returns the bot id."""
+        document = read_document(bot_dir)
+        bot_id = str(document.get("id"))
+        if self.repository.get_draft(bot_id) is None:
+            self.repository.save_draft(bot_id, document)
+        if not self.repository.deployments(bot_id):
+            self.deploy(bot_id, self._trained_draft(bot_id))
+        return bot_id
+
+    # ------------------------------------------------------------ internals
+
+    def _activate(self, bot_id: str, version: str, runtime: BotRuntime) -> None:
+        with self._lock:
+            loaded = self._loaded.setdefault(bot_id, OrderedDict())
+            loaded.setdefault(version, runtime)  # sessions pinned to an already loaded copy keep it
+            loaded.move_to_end(version)
+            self._live[bot_id] = version
+            while len(loaded) > self.keep + 1:  # the live version plus `keep` others
+                oldest = next(v for v in loaded if v != version)
+                del loaded[oldest]
+
+    def _trained_draft(self, bot_id: str) -> str:
+        """The draft as a stored version: reuse a model already in artifacts/ (`make train`),
+        otherwise train it now."""
+        document = self.repository.get_draft(bot_id)
+        if document is None:
+            raise KeyError(bot_id)
+        bot = bot_from_document(document, self.actions.names())
+        try:
+            self._load(bot)
+        except NotTrained:
+            return self.train_draft(bot_id)[0].version
+        meta = json.loads((self.artifacts / bot.id / bot.version / "meta.json").read_text(encoding="utf-8"))
+        return self.repository.add_version(bot_id, bot.version, document, meta.get("macro_f1")).version
+
+    def _build(self, bot_id: str, version: str) -> BotRuntime:
+        return self._load(bot_from_document(self.repository.get_version(bot_id, version), self.actions.names()))
+
+    def _load(self, bot: BotDefinition) -> BotRuntime:
+        try:
+            model = NluModel.load(bot, self.artifacts / bot.id / bot.version, self.embedder, EntityExtractor(bot))
+        except ModelMismatch as exc:
+            raise NotTrained(str(exc)) from exc
+        return BotRuntime(bot, TurnProcessor(bot, self.store, NluInterpreter(model.parse), self.actions), model)

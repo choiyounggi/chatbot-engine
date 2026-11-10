@@ -7,6 +7,7 @@ Errors block loading; warnings are advice (e.g. an intent with few examples).
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -38,7 +39,9 @@ class _BotYamlLoader(yaml.SafeLoader):
     """SafeLoader with two fixes for hand-written bot files:
     - mapping keys stay the exact text written (`on:`, `yes:`, `1:` are keys,
       not booleans/ints that silently collide), and
-    - only true/false are booleans (YAML 1.2), not yes/no/on/off."""
+    - only true/false are booleans (YAML 1.2), not yes/no/on/off, and
+    - dates and clock times stay text (`2026-01-01` and `12:30` in examples are sentences, not
+      a date and YAML 1.1's base-60 integer 750)."""
 
     def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[object, object]:
         mapping: dict[object, object] = {}
@@ -51,10 +54,23 @@ class _BotYamlLoader(yaml.SafeLoader):
         return mapping
 
 
+_REPLACED = {"tag:yaml.org,2002:" + t for t in ("bool", "timestamp", "int", "float")}
 _BotYamlLoader.yaml_implicit_resolvers = {
-    first: [(tag, rx) for tag, rx in resolvers if tag != "tag:yaml.org,2002:bool"]
+    first: [(tag, rx) for tag, rx in resolvers if tag not in _REPLACED]
     for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
+# SafeLoader's int/float patterns without their base-60 (`12:30`) branches
+_BotYamlLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:int",
+    re.compile(r"^(?:[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0x[0-9a-fA-F_]+)$"),
+    list("-+0123456789"),
+)
+_BotYamlLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:float",
+    re.compile(r"^(?:[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9_]+(?:[eE][-+][0-9]+)?"
+               r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$"),
+    list("-+0123456789."),
+)
 _BotYamlLoader.add_implicit_resolver(
     "tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
 )
@@ -87,27 +103,64 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def load_bot(directory: Path, actions: Iterable[str] | None = None) -> BotDefinition:
-    """Parse `directory/bot.yaml` (+ optional `nlu.yaml`) and validate it.
-    If `actions` is given, every action step must name one of them."""
+def read_document(directory: Path) -> dict[str, Any]:
+    """The bot document: `directory/bot.yaml` merged with the optional `nlu.yaml`."""
     bot_file, nlu_file = directory / "bot.yaml", directory / "nlu.yaml"
     if not bot_file.is_file():
         raise BotError([f"{bot_file} not found"])
-    files = [bot_file] + ([nlu_file] if nlu_file.is_file() else [])
     raw = _read_yaml(bot_file)
     nlu = _read_yaml(nlu_file) if nlu_file.is_file() else {}
     overlap = sorted(set(raw) & set(nlu))
     if overlap:
         raise BotError([f"keys defined in both bot.yaml and nlu.yaml: {overlap}"])
-    digest = hashlib.sha256(b"".join(f.read_bytes() for f in files)).hexdigest()[:12]
+    return {**raw, **nlu}
+
+
+def document_version(document: dict[str, Any]) -> str:
+    """Content hash of a bot document (key order and formatting do not matter; 1.0 and 1 are the
+    same number, as a JSON client may send either)."""
+
+    def plain(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: plain(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [plain(v) for v in value]
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        return value
+
     try:
-        bot = BotDefinition.model_validate({**raw, **nlu, "version": digest})
+        canonical = json.dumps(plain(document), ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                               allow_nan=False)
+    except (TypeError, ValueError) as exc:  # non-JSON values, mixed key types, NaN
+        raise BotError([f"the bot document is not plain JSON data: {exc}"]) from exc
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def parse_document(document: dict[str, Any]) -> BotDefinition:
+    """BotDefinition from a document, without semantic validation (BotError on schema errors)."""
+    if not isinstance(document, dict):
+        raise BotError(["a bot document must be a mapping"])
+    if "version" in document:
+        raise BotError(["'version' is computed from the content and cannot be set"])
+    try:
+        return BotDefinition.model_validate({**document, "version": document_version(document)})
     except ValidationError as exc:
         raise BotError([f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()]) from exc
+
+
+def bot_from_document(document: dict[str, Any], actions: Iterable[str] | None = None) -> BotDefinition:
+    """Parse and validate a bot document. If `actions` is given, every action step must name one of them."""
+    bot = parse_document(document)
     report = validate(bot, actions)
     if report.errors:
         raise BotError(report.errors)
     return bot
+
+
+def load_bot(directory: Path, actions: Iterable[str] | None = None) -> BotDefinition:
+    """Load and validate `directory/bot.yaml` (+ `nlu.yaml`)."""
+    return bot_from_document(read_document(directory), actions)
 
 
 def validate(bot: BotDefinition, actions: Iterable[str] | None = None) -> Report:

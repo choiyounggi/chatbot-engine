@@ -168,3 +168,22 @@ def test_model_load_needs_files_and_matching_prompt(sample_bot, fake_embedder, e
 
     with pytest.raises(ModelMismatch, match="prompt"):
         NluModel.load(sample_bot, directory, Prompted(), extractor)
+
+
+def test_training_the_same_version_again_swaps_in_complete_files(sample_bot, fake_embedder, extractor, tmp_path, monkeypatch):
+    emb = CachedEmbedder(fake_embedder)
+    directory, _ = train(sample_bot, emb, tmp_path)
+    first = json.loads((directory / "meta.json").read_text(encoding="utf-8"))["created_at"]
+    again, _ = train(sample_bot, emb, tmp_path)
+    assert again == directory and sorted(p.name for p in directory.parent.iterdir()) == [sample_bot.version]
+    assert json.loads((directory / "meta.json").read_text(encoding="utf-8"))["created_at"] >= first
+    NluModel.load(sample_bot, directory, emb, extractor)
+
+    def broken_save(self, path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(IntentClassifier, "save", broken_save)
+    with pytest.raises(OSError, match="disk full"):
+        train(sample_bot, emb, tmp_path)
+    assert sorted(p.name for p in directory.parent.iterdir()) == [sample_bot.version]  # no half-written leftovers
+    NluModel.load(sample_bot, directory, emb, extractor)  # the previous model is untouched

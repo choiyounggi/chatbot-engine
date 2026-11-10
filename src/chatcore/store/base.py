@@ -37,6 +37,10 @@ class TrackerStore(Protocol):
         """Committed events of a session (read-only, no lock)."""
         ...
 
+    def recent(self, prefix: str, event_type: str, limit: int) -> list[tuple[str, Event]]:
+        """Newest committed events of one type across sessions whose id starts with `prefix`."""
+        ...
+
 
 def check_session_id(session_id: str) -> str:
     if (not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 128
