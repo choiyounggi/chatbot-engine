@@ -24,7 +24,7 @@ from chatcore.runtime import BotRuntime, build_runtime, default_store
 from chatcore.serving import BatchedEmbedder
 from chatcore.store.memory import InMemoryStore
 
-from .conftest import SAMPLE
+from .conftest import ROOT, SAMPLE
 
 
 def static(rt):
@@ -233,3 +233,32 @@ def test_bulk_lane_of_batched_embedder_gives_the_same_vectors(fake_embedder):
     finally:
         batched.close()
 
+
+
+def test_docs_openapi_json_is_up_to_date():
+    from chatcore.openapi import render
+
+    stored = (ROOT / "docs/openapi.json").read_text(encoding="utf-8")
+    assert stored == render(), "docs/openapi.json is stale: run `make openapi`"
+
+
+def test_the_schema_describes_drafts_with_the_bot_document_model():
+    from chatcore.openapi import schema
+
+    spec = schema()
+    draft = spec["paths"]["/v1/builder/bots/{bot}/draft"]
+    assert draft["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/BotDocument"
+    assert draft["put"]["requestBody"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/BotDocument"
+    assert "version" not in spec["components"]["schemas"]["BotDocument"]["properties"]  # computed, never sent
+
+
+def test_hashing_embedder_is_deterministic_normalized_and_handles_empty_input():
+    import numpy as np
+
+    from chatcore.nlu.hashing import HashingEmbedder
+
+    emb = HashingEmbedder()
+    a, b = emb.encode(["날씨 어때", "날씨 어때"]), emb.encode(["날씨 어때"])
+    assert np.array_equal(a[0], b[0]) and np.isclose(np.linalg.norm(a[0]), 1.0)
+    assert emb.encode([""]).shape == (1, 256) and not emb.encode([""]).any()  # no n-grams: zero vector, no NaN
+    assert emb.encode([]).shape == (0, 256)

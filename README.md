@@ -25,6 +25,9 @@ Optional:
 ```sh
 make db-up   # Postgres 17 + pgvector on 127.0.0.1:5432 (Docker), used from Phase 2
 make bench   # Phase 0 NLU benchmark — Apple Silicon, downloads models, ~10 min
+make openapi # write docs/openapi.json — the builder generates its API types from it
+# a fast test server without the model (CI, end-to-end tests; NOT for real users):
+uv run python -m chatcore.api --bot bots/sample --embedder hashing --min-f1 0 --artifacts .e2e-artifacts
 ```
 
 ## Layout

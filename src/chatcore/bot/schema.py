@@ -162,12 +162,17 @@ class Scenario(Model):
         return parsed
 
 
-class BotDefinition(Model):
+class BotDocument(Model):
+    """What a builder edits and stores: a bot without its computed version."""
+
     id: ID
-    version: str  # content hash of the source files
     label: str = ""
     settings: Settings = Settings()
     intents: dict[ID, Intent] = Field(default_factory=dict)
     entities: dict[ID, Entity] = Field(default_factory=dict)
     scenarios: dict[ID, Scenario] = Field(min_length=1)
     responses: dict[ID, Response] = Field(min_length=1)
+
+
+class BotDefinition(BotDocument):
+    version: str  # content hash of the document (bot/loader.py document_version)
