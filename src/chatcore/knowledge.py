@@ -45,7 +45,7 @@ COSINE_THRESHOLD = 0.5  # hashing mode only (surface overlap; never used to serv
 MAX_FAQ, MAX_DOCUMENTS, MAX_DOCUMENT_CHARS = 2000, 200, 200_000
 ID = r"^[A-Za-z0-9_-]{1,64}$"
 MAX_PDF_PAGES = 500
-CHUNKER = 2  # stored with an index: a different chunker means the index is stale (built again)
+CHUNKER = 3  # stored with an index: a different chunker means the index is stale (built again)
 FloatArray = NDArray[np.float32]
 
 
@@ -164,6 +164,7 @@ class Entry:
     body: str  # FAQ answer, or the chunk's sentences
     source: str = ""  # the document's name (chunks)
     heading: str = ""  # a chunk's "<document title> - <section>" (its title may add " (2/3)"); FAQ: unused
+    section: str = ""  # a chunk's `##` section ("" before the first one); what its suggestion button says
 
     @property
     def judge_text(self) -> str:
@@ -218,7 +219,7 @@ def chunk_document(doc_id: str, name: str, text: str) -> list[Entry]:
             bodies.append(" ".join(current))
         for i, body in enumerate(bodies, 1):
             shown = head if len(bodies) == 1 else f"{head} ({i}/{len(bodies)})"
-            out.append(Entry(f"{doc_id}#{len(out)}", "doc", shown, body, name, head))
+            out.append(Entry(f"{doc_id}#{len(out)}", "doc", shown, body, name, head, section))
     return out
 
 
@@ -453,8 +454,7 @@ def _section(entry: Entry) -> str:
     document title; the "(2/3)" part of a title would not fit in 14 characters)."""
     if entry.kind == "faq":
         return entry.title
-    heading = entry.heading or entry.title
-    return heading.split(" - ", 1)[1] if " - " in heading else heading
+    return entry.section or entry.heading or entry.title  # no section: the document's title
 
 
 def compose(result: KbResult, settings: KbSettings) -> KbAnswer | None:
@@ -470,12 +470,13 @@ def compose(result: KbResult, settings: KbSettings) -> KbAnswer | None:
         best = result.answers[0].entry
         return KbAnswer(answer_text(best), (), (best.id,))
     first = list(best_of.values())[:SUGGESTIONS]
-    seen: dict[str, int] = {}
+    seen: dict[str, int] = {}  # by the label as shown: names that differ only after 14 characters look alike
     replies = []
     for e in first:
         name = _section(e)
-        seen[name] = seen.get(name, 0) + 1
-        replies.append((button_label(name, f" ({seen[name]})" if seen[name] > 1 else ""), e.title))
+        label = button_label(name)
+        seen[label] = seen.get(label, 0) + 1
+        replies.append((label if seen[label] == 1 else button_label(name, f" ({seen[label]})"), e.title))
     return KbAnswer(settings.suggest_text, tuple(replies), tuple(e.id for e in first))
 
 
