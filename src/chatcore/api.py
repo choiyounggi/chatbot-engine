@@ -794,6 +794,9 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
                 raise JobFailed("training", {"detail": str(exc)}) from exc
             except NoDraft as exc:
                 raise JobFailed("no_draft", {"detail": f"{bot!r} has no draft"}) from exc
+            except KnowledgeError as exc:  # the knowledge-base draft goes into the test build too
+                raise JobFailed("invalid_knowledge", {"detail": "the knowledge base is invalid",
+                                                      "errors": exc.problems}) from exc
 
         return jobs.submit("test_build", bot, run, urgent=True).to_dict()  # someone waits at the test chat
 

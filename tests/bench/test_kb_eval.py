@@ -288,3 +288,14 @@ def test_a_judged_chunk_never_overrides_a_sure_block_but_a_judged_faq_can() -> N
     assert final(sure, ("faq", 0), faq) == ("kb", ("faq", 0))  # 0.80 >= 0.70 + margin
     assert final(sure, ("faq", 1), faq) == ("block", None)  # its own cosine decides the override
     assert final(Nlu("fallback", None, 0.2), None, faq) == ("fallback", None)
+
+
+def test_the_engine_chunks_the_sample_documents_exactly_as_measured() -> None:
+    from bench.kb_eval import KB
+    from chatcore.knowledge import chunk_document as engine_chunks
+
+    docs = sorted((KB / "docs").glob("*.md"))
+    assert len(docs) == 6
+    for d in docs:
+        text = d.read_text(encoding="utf-8")
+        assert [c.text for c in chunk_document(d.name, text)] == [c.judge_text for c in engine_chunks(d.stem, d.name, text)]
