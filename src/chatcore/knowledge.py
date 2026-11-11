@@ -45,7 +45,7 @@ COSINE_THRESHOLD = 0.5  # hashing mode only (surface overlap; never used to serv
 MAX_FAQ, MAX_DOCUMENTS, MAX_DOCUMENT_CHARS = 2000, 200, 200_000
 ID = r"^[A-Za-z0-9_-]{1,64}$"
 MAX_PDF_PAGES = 500
-CHUNKER = 2  # stored with an index: a different chunker means the index is stale (built again)
+CHUNKER = 3  # stored with an index: a different chunker means the index is stale (built again)
 FloatArray = NDArray[np.float32]
 
 
@@ -164,6 +164,7 @@ class Entry:
     body: str  # FAQ answer, or the chunk's sentences
     source: str = ""  # the document's name (chunks)
     heading: str = ""  # a chunk's "<document title> - <section>" (its title may add " (2/3)"); FAQ: unused
+    section: str = ""  # a chunk's `##` section ("" before the first one); what its suggestion button says
 
     @property
     def judge_text(self) -> str:
@@ -218,7 +219,7 @@ def chunk_document(doc_id: str, name: str, text: str) -> list[Entry]:
             bodies.append(" ".join(current))
         for i, body in enumerate(bodies, 1):
             shown = head if len(bodies) == 1 else f"{head} ({i}/{len(bodies)})"
-            out.append(Entry(f"{doc_id}#{len(out)}", "doc", shown, body, name, head))
+            out.append(Entry(f"{doc_id}#{len(out)}", "doc", shown, body, name, head, section))
     return out
 
 
@@ -442,25 +443,41 @@ def answer_text(entry: Entry) -> str:
     return entry.body if entry.kind == "faq" else f"{entry.body}\n\n출처: {entry.source}"
 
 
-def button_label(title: str) -> str:
-    """Kakao shows 14 characters of a button; the button still sends the whole title."""
-    return title if len(title) <= KAKAO_LABEL else title[:KAKAO_LABEL - 1].rstrip() + "…"
+def button_label(text: str, suffix: str = "") -> str:
+    """Kakao shows 14 characters of a button (the button still sends the whole title); `suffix` is kept."""
+    room = KAKAO_LABEL - len(suffix)
+    return (text if len(text) <= room else text[:room - 1].rstrip() + "…") + suffix
+
+
+def _section(entry: Entry) -> str:
+    """What a suggestion button says: an FAQ question, or a chunk's section (its heading without the
+    document title; the "(2/3)" part of a title would not fit in 14 characters)."""
+    if entry.kind == "faq":
+        return entry.title
+    return entry.section or entry.heading or entry.title  # no section: the document's title
 
 
 def compose(result: KbResult, settings: KbSettings) -> KbAnswer | None:
-    """The message for a search result; None when nothing passed."""
+    """The message for a search result; None when nothing passed. 답안 추천형 offers one button per FAQ
+    entry or document section (its best chunk), up to SUGGESTIONS, with labels that differ."""
     if not result.answers:
         return None
-    titles = list(dict.fromkeys(h.entry.title for h in result.answers))
-    if settings.mode == "instant" or result.exact or len(titles) == 1:
+    best_of: dict[str, Entry] = {}
+    for h in result.answers:  # best first
+        e = h.entry
+        best_of.setdefault(e.id if e.kind == "faq" else f"{e.id.split('#')[0]}#{e.heading or e.title}", e)
+    if settings.mode == "instant" or result.exact or len(best_of) == 1:
         best = result.answers[0].entry
         return KbAnswer(answer_text(best), (), (best.id,))
-    best_of: dict[str, Entry] = {}
-    for h in result.answers:  # one button per title, best first
-        best_of.setdefault(h.entry.title, h.entry)
     first = list(best_of.values())[:SUGGESTIONS]
-    return KbAnswer(settings.suggest_text, tuple((button_label(e.title), e.title) for e in first),
-                    tuple(e.id for e in first))
+    seen: dict[str, int] = {}  # by the label as shown: names that differ only after 14 characters look alike
+    replies = []
+    for e in first:
+        name = _section(e)
+        label = button_label(name)
+        seen[label] = seen.get(label, 0) + 1
+        replies.append((label if seen[label] == 1 else button_label(name, f" ({seen[label]})"), e.title))
+    return KbAnswer(settings.suggest_text, tuple(replies), tuple(e.id for e in first))
 
 
 # ---------------------------------------------------------------- in a conversation

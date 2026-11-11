@@ -217,10 +217,13 @@ def test_an_embedder_that_needs_a_prompt_cannot_encode_passages() -> None:
 # ---------------------------------------------------------------- answers
 
 
-def hit(id_, title, kind="faq", body="답", source=""):
+def hit(id_, title, kind="faq", body="답", source="", heading=""):
+    """A judged entry; a chunk's section is what follows "<document title> - " in its heading or title."""
     from chatcore.knowledge import Hit
 
-    return Hit(Entry(id_, kind, title, body, source), 0.9, 0.9)
+    head = heading or title
+    section = head.split(" - ", 1)[1] if kind == "doc" and " - " in head else ""
+    return Hit(Entry(id_, kind, title, body, source, heading, section), 0.9, 0.9)
 
 
 def test_compose_instant_gives_the_best_answer_and_a_chunk_its_source() -> None:
@@ -238,7 +241,7 @@ def test_compose_suggest_offers_up_to_three_buttons_one_per_title() -> None:
     answer = compose(KbResult(hits, hits), KbSettings(mode="suggest"))
     assert answer.text == KbSettings().suggest_text and answer.items == ("a", "b", "c#0")
     assert answer.replies == (("구독을 해지하면 환불이…", "구독을 해지하면 환불이 되나요 연간도요"), ("짧은 질문", "짧은 질문"),
-                              ("문서 - 절", "문서 - 절"))
+                              ("절", "문서 - 절"))  # a chunk's button says its section
     assert all(len(label) <= 14 for label, _ in answer.replies)  # Kakao shows 14 characters
 
 
@@ -453,3 +456,48 @@ def test_two_documents_with_the_same_name_and_section_get_different_titles() -> 
     assert [c.heading for c in idx.chunks] == ["정책 - 환불", "정책 - 환불"]  # what is embedded stays as measured
     for c in idx.chunks:
         assert idx.search(c.title, vec(c.title), CosineJudge(0.99)).answers[0].entry.id == c.id
+
+
+
+def test_suggestions_offer_one_button_per_section_named_by_the_section() -> None:
+    hits = (hit("a#0", "센터 안내 - 우산 대여 (1/3)", "doc", heading="센터 안내 - 우산 대여"),
+            hit("a#2", "센터 안내 - 우산 대여 (3/3)", "doc", heading="센터 안내 - 우산 대여"),
+            hit("a#3", "센터 안내 - 주차", "doc", heading="센터 안내 - 주차"),
+            hit("a#1", "센터 안내 - 우산 대여 (2/3)", "doc", heading="센터 안내 - 우산 대여"))
+    answer = compose(KbResult(hits, hits), KbSettings(mode="suggest"))
+    assert answer.items == ("a#0", "a#3")  # the best chunk of each section
+    assert answer.replies == (("우산 대여", "센터 안내 - 우산 대여 (1/3)"), ("주차", "센터 안내 - 주차"))
+    one_section = hits[:2]
+    assert compose(KbResult(one_section, one_section), KbSettings(mode="suggest")).replies == ()  # answers directly
+
+
+def test_suggestion_labels_differ_and_fit_kakao() -> None:
+    hits = (hit("a#0", "정책 - 환불 · a", "doc", heading="정책 - 환불"), hit("b#0", "정책 - 환불 · b", "doc", heading="정책 - 환불"),
+            hit("c#0", "약관 - 아주아주아주 긴 절 이름은 잘라서 보여요", "doc", heading="약관 - 아주아주아주 긴 절 이름은 잘라서 보여요"))
+    answer = compose(KbResult(hits, hits), KbSettings(mode="suggest"))
+    labels = [label for label, _ in answer.replies]
+    assert labels == ["환불", "환불 (2)", "아주아주아주 긴 절 이름…"] and all(len(x) <= 14 for x in labels)
+    assert [m for _, m in answer.replies] == ["정책 - 환불 · a", "정책 - 환불 · b", "약관 - 아주아주아주 긴 절 이름은 잘라서 보여요"]
+
+
+def test_a_long_numbered_label_keeps_its_number_within_kakaos_width() -> None:
+    long = "약관 - 아주아주아주 긴 절 이름은 잘라서 보여요"
+    hits = (hit("a#0", f"{long} · a", "doc", heading=long), hit("b#0", f"{long} · b", "doc", heading=long))
+    (_, first), (second, _) = compose(KbResult(hits, hits), KbSettings(mode="suggest")).replies
+    assert second == "아주아주아주 긴… (2)" and len(second) <= 14
+
+
+def test_labels_that_only_differ_after_fourteen_characters_are_numbered() -> None:
+    hits = (hit("a", "배송은 얼마나 걸리나요? 보통 며칠인가요"), hit("b", "배송은 얼마나 걸리나요? 주말에도 오나요"))
+    labels = [label for label, _ in compose(KbResult(hits, hits), KbSettings(mode="suggest")).replies]
+    assert len(set(labels)) == 2 and all(len(x) <= 14 for x in labels)
+    assert labels[1].endswith(" (2)")
+
+
+def test_a_section_name_survives_a_document_title_with_a_dash() -> None:
+    idx = KnowledgeIndex.build({"documents": [
+        {"id": "a", "name": "2024 - 안내.md", "text": "# 센터 - 본관 이용 안내\n\n## 우산 대여\n\n우산은 정문에서 빌려요.\n\n## 주차\n\n주차는 지하 2층이에요."},
+        {"id": "b", "name": "2024 - 공지.md", "text": "제목 없는 공지 문장이에요."}]}, EMB)
+    hits = tuple(__import__("chatcore.knowledge", fromlist=["Hit"]).Hit(c, 0.9, 0.9) for c in idx.chunks)
+    labels = [label for label, _ in compose(KbResult(hits, hits), KbSettings(mode="suggest")).replies]
+    assert labels == ["우산 대여", "주차", "2024 - 공지.md"]
