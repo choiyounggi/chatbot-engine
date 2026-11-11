@@ -57,7 +57,8 @@ JUDGE_DEPTH = 3  # per pool: the cross-encoder judges the top 3 FAQ + top 3 chun
 JUDGE_GRID = np.round(np.arange(0.01, 1.0, 0.01), 2)
 OVERRIDE_MARGIN = 0.05  # plan §3.1: FAQ beats a sure block only by this much over its nearest example
 GRID = np.round(np.arange(0.30, 0.96, 0.01), 2)
-CRITERIA = {"recall3": 0.90, "fallback": 0.90, "kb_takes_block": 0.05, "block_takes_kb": 0.05, "p95_ms": 100.0}
+# p95: knowledge-base turns only; raised from the plan's 100 ms by 영기 (2026-11-11) for the cross-encoder judge
+CRITERIA = {"recall3": 0.90, "fallback": 0.90, "kb_takes_block": 0.05, "block_takes_kb": 0.05, "p95_ms": 200.0}
 BOOTSTRAP = 2000
 SEED = 7
 LATENCY_CHUNKS = 10_000
@@ -659,7 +660,7 @@ def report(results: dict[str, dict[str, Any]], latency: dict[str, list[float]], 
     lines += [
         "",
         f"기준: Recall@3 ≥ {CRITERIA['recall3']}, 답 없는 질문 폴백 ≥ {CRITERIA['fallback']}, 가로채기 각각 ≤ "
-        f"{CRITERIA['kb_takes_block']}, p95 ≤ {CRITERIA['p95_ms']:.0f}ms (문서 조각 {LATENCY_CHUNKS}개, 질문 벡터는 NLU 것을 재사용해 "
+        f"{CRITERIA['kb_takes_block']}, 지식베이스를 거치는 턴 p95 ≤ {CRITERIA['p95_ms']:.0f}ms (영기 결정 2026-11-11, 원래 100ms; 문서 조각 {LATENCY_CHUNKS}개, 질문 벡터는 NLU 것을 재사용해 "
         "시간에서 뺌). 두 절반 전체의 Recall@3/MRR(참고): "
         + ", ".join(f"{v} {pct(e['recall3_all'])}/{pct(e['mrr_all'])}" for v, e in results.items()) + ".",
         "",
