@@ -133,8 +133,8 @@ def test_run_items_sends_sentences_passages_and_pairs_to_the_right_model() -> No
     out = run_items(Prompted(), ce, ["문장", Passage("문서"), Pair("질문", "환불 규정"), "또 문장"])
     assert out[0].tolist() == [1, 1] and out[1].tolist() == [0, 0] and out[3].tolist() == [1, 1]
     assert out[2].tolist() == [0.9] and ce.pairs == [("질문", "환불 규정")]
-    with pytest.raises(RuntimeError, match="cross-encoder"):
-        run_items(Prompted(), None, [Pair("q", "t")])
+    (missing,) = run_items(Prompted(), None, [Pair("q", "t")])
+    assert isinstance(missing, RuntimeError) and "cross-encoder" in str(missing)
 
 
 def test_the_batched_embedder_runs_passages_and_the_judge_on_its_worker() -> None:
@@ -348,3 +348,90 @@ def test_a_stored_knowledge_base_that_no_longer_hashes_to_its_version_is_refused
     host.repository.add_kb_version("sample", "0123456789ab", KB, 2, 1)  # not KB's hash; no files either
     with pytest.raises(KnowledgeError, match="hashes to"):
         host.kb_index("sample", "0123456789ab")
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+def test_a_cross_encoder_failure_fails_only_its_own_items() -> None:
+    class Failing(FakeCrossEncoder):
+        def score_pairs(self, pairs):
+            raise RuntimeError("out of memory")
+
+    out = run_items(HashingEmbedder(), Failing(), ["문장", Pair("q", "t"), Passage("문서")])
+    assert out[0].shape == (HashingEmbedder.dims,) and out[2].shape == (HashingEmbedder.dims,)
+    assert isinstance(out[1], RuntimeError)
+    batched = BatchedEmbedder(HashingEmbedder(), cross_encoder=Failing())  # type: ignore[arg-type]
+    try:
+        with pytest.raises(RuntimeError, match="out of memory"):
+            batched.judge().score("q", KnowledgeIndex.build(KB, HashingEmbedder()).search(
+                "환불", HashingEmbedder().encode(["환불"])[0], CosineJudge(0)).candidates)
+        assert batched.encode(["문장"]).shape == (1, HashingEmbedder.dims)  # the worker survives
+    finally:
+        batched.close()
+
+
+def test_a_skill_named_knowledge_still_works_and_replaces_the_built_in(host, client) -> None:
+    doc = client.get(f"{B}/draft").json()
+    doc["skills"] = {"knowledge": {"url": "https://example.com/kb", "timeout_ms": 1000}}
+    tag = client.get(f"{B}/draft").headers["ETag"]
+    saved = client.put(f"{B}/draft", json=doc, headers={"If-Match": tag}).json()
+    assert saved["valid"], saved["errors"]
+    from chatcore.bot.loader import bot_from_document
+
+    bot = bot_from_document(doc, host.actions.names())
+    kb = KnowledgeIndex.build(KB, HashingEmbedder())
+    actions = host.actions_for(bot, Knowledge(kb, CosineJudge(), HashingEmbedder()))
+    assert actions._actions["knowledge"].timeout == 1.5  # the skill's own, not the built-in
+
+
+def test_kb_read_endpoints_report_an_unusable_stored_version_as_a_conflict(host, client) -> None:
+    host.repository.add_kb_version("sample", "0123456789ab", KB, 2, 1)
+    assert client.get(f"{B}/knowledge/versions/0123456789ab/entries").status_code == 409
+    assert client.post(f"{B}/knowledge/search", json={"query": "환불", "version": "0123456789ab"}).status_code == 409
+    r = client.post(f"{B}/deploy", json={"version": host.bots()["sample"], "knowledge_version": "fedcba987654"})
+    assert r.status_code == 404 and "fedcba987654" in r.json()["detail"]
+
+
+def test_a_deploy_without_knowledge_version_keeps_the_live_one_and_null_removes_it(host, client) -> None:
+    live = host.bots()["sample"]
+    version = built(client)
+    client.post(f"{B}/deploy", json={"version": live, "knowledge_version": version})
+    kept = client.post(f"{B}/deploy", json={"version": live, "note": "다시"}).json()
+    assert kept["knowledge_version"] == version and host.live("sample") == (live, version)
+    gone = client.post(f"{B}/deploy", json={"version": live, "knowledge_version": None}).json()
+    assert gone["knowledge_version"] is None and host.live("sample") == (live, None)
+
+
+def test_a_knowledge_base_that_cannot_load_at_start_leaves_the_bot_served_without_it(host, client, fake_embedder,
+                                                                                     tmp_path) -> None:
+    live = host.bots()["sample"]
+    host.repository.add_kb_version("sample", "0123456789ab", KB, 2, 1)  # hashes to something else; no files
+    host.repository.deploy("sample", live, "", "0123456789ab")
+    fresh = BotHost(host.repository, InMemoryStore(), fake_embedder, tmp_path, actions=synthetic_actions,
+                    min_f1=0.0, judge=CosineJudge(0.5))
+    fresh.start()
+    assert fresh.live("sample") == (live, None)
+
+
+def test_concurrent_cold_loads_of_one_index_build_it_once(host, client, monkeypatch, tmp_path) -> None:
+    import threading
+
+    version = built(client)
+    host._indexes.clear()
+    shutil.rmtree(tmp_path / "sample" / "kb")
+    builds = []
+    real = KnowledgeIndex.build
+
+    def slow(document, embedder):
+        builds.append(1)
+        threading.Event().wait(0.05)
+        return real(document, embedder)
+
+    monkeypatch.setattr(KnowledgeIndex, "build", staticmethod(slow))
+    threads = [threading.Thread(target=host.kb_index, args=("sample", version)) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert len(builds) == 1

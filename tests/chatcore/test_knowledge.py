@@ -97,7 +97,8 @@ def test_chunks_are_whole_sentences_within_a_section_with_a_title() -> None:
     chunks = chunk_document("manual", "manual.md", text)
     assert len(chunks) >= 3 and [c.id for c in chunks] == [f"manual#{i}" for i in range(len(chunks))]
     *update, widget = chunks
-    assert all(c.title == "설명서 - 갱신" and c.body.replace(sentence, "").strip() == "" for c in update)
+    assert all(c.heading == "설명서 - 갱신" and c.body.replace(sentence, "").strip() == "" for c in update)
+    assert [c.title for c in update] == [f"설명서 - 갱신 ({i}/{len(update)})" for i in range(1, len(update) + 1)]
     assert all(len(c.body) <= CHUNK_MAX for c in update)
     assert widget.title == "설명서 - 위젯" and widget.body == "위젯은 홈 화면에서 추가합니다." and widget.source == "manual.md"
 
@@ -376,3 +377,69 @@ def test_an_index_refuses_entries_and_vectors_that_do_not_match(index) -> None:
     with pytest.raises(ValueError, match="do not match"):
         KnowledgeIndex(index.version, index.settings, index.faq, index.chunks, index.faq_vectors[:1],
                        index.chunk_vectors, EMB.model_id, EMB.prompt)
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+def test_compact_markdown_keeps_every_section_and_text_before_a_heading() -> None:
+    text = "# 안내\n머리말입니다.\n## 환불\n7일 이내 환불됩니다.\n## 배송\n배송은 3일 걸립니다."
+    chunks = chunk_document("d", "안내.md", text)
+    assert [(c.title, c.body) for c in chunks] == [("안내", "머리말입니다."), ("안내 - 환불", "7일 이내 환불됩니다."),
+                                                   ("안내 - 배송", "배송은 3일 걸립니다.")]
+
+
+def test_every_suggestion_button_brings_back_the_entry_it_offered() -> None:
+    long_section = " ".join(f"환불 규정 {i}번 문장은 길이를 채우려고 쓴 꽤 긴 문장입니다." for i in range(40))
+    doc = {"documents": [{"id": "a", "name": "정책", "text": f"# 정책\n\n## 환불\n\n{long_section}"},
+                         {"id": "b", "name": "정책", "text": "# 정책\n\n## 환불\n\n다른 문서의 환불 문장입니다."}],
+           "settings": {"mode": "suggest"}}
+    idx = KnowledgeIndex.build(doc, EMB)
+    assert len(idx.chunks) > 3
+    hits = tuple(__import__("chatcore.knowledge", fromlist=["Hit"]).Hit(c, 0.9, 0.9) for c in idx.chunks)
+    answer = compose(KbResult(hits, hits), idx.settings)
+    assert len({m for _, m in answer.replies}) == len(answer.replies)  # every button sends a different message
+    for (_, message), item in zip(answer.replies, answer.items, strict=True):
+        assert idx.search(message, vec(message), CosineJudge(0.99)).answers[0].entry.id == item
+    for c in idx.chunks:  # every chunk can be reached by its own title
+        assert idx.search(c.title, vec(c.title), CosineJudge(0.99)).answers[0].entry.id == c.id
+
+
+def test_an_exact_title_is_an_explicit_choice_that_beats_a_sure_block(index) -> None:
+    k = Knowledge(index, CosineJudge(0.99), EMB)
+    found, answer = k.consult("이용 안내 - 개인정보", "intent", 0.9, None)
+    assert answer is not None and answer.items == ("policy#0",) and found.exact
+    assert k.consult("구독 환불은 어떻게 하나요", "intent", 0.97, None)[1].items == ("refund",)
+    assert k.consult("구독 환불은 어떻게 하나요", "intent", 1.0, None) == (None, None)  # the bot's own example
+
+
+def test_a_judge_score_that_is_not_a_number_is_an_error(index) -> None:
+    class NaNJudge(CosineJudge):
+        def score(self, query, candidates):
+            return np.full(len(candidates), np.nan)
+
+    with pytest.raises(ValueError, match="finite"):
+        index.search("환불", vec("환불"), NaNJudge())
+
+
+@pytest.mark.parametrize("damage", [b"", b"PK\x03\x04 truncated"])
+def test_a_damaged_vectors_file_reads_as_unreadable(index, tmp_path, damage) -> None:
+    index.save(tmp_path / "kb")
+    (tmp_path / "kb" / "vectors.npz").write_bytes(damage)
+    with pytest.raises(ValueError, match="unreadable"):
+        KnowledgeIndex.load(tmp_path / "kb", index.version, EMB)
+
+
+def test_an_index_made_by_another_chunker_is_stale(index, tmp_path) -> None:
+    index.save(tmp_path / "kb")
+    meta = json.loads((tmp_path / "kb" / "index.json").read_text(encoding="utf-8"))
+    meta["chunker"] = 0
+    (tmp_path / "kb" / "index.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(ValueError, match="chunker"):
+        KnowledgeIndex.load(tmp_path / "kb", index.version, EMB)
+
+
+def test_saving_leaves_no_temporary_files(index, tmp_path) -> None:
+    index.save(tmp_path / "kb")
+    index.save(tmp_path / "kb")  # over an existing index
+    assert sorted(p.name for p in (tmp_path / "kb").iterdir()) == ["index.json", "vectors.npz"]

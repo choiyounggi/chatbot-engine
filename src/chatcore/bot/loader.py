@@ -167,12 +167,15 @@ def load_bot(directory: Path, actions: Iterable[str] | None = None) -> BotDefini
     return bot_from_document(read_document(directory), actions)
 
 
+REPLACEABLE_ACTIONS = frozenset({"knowledge"})  # built-ins a bot's own skill of that name replaces
+
+
 def validate(bot: BotDefinition, actions: Iterable[str] | None = None) -> Report:
     errors: list[str] = []
     warnings: list[str] = []
     known_actions = (set(actions) | set(bot.skills)) if actions is not None else None  # a skill is an action
-    if actions is not None:
-        clash = sorted(set(bot.skills) & set(actions))
+    if actions is not None:  # a skill may take the name of a replaceable built-in (`knowledge`)
+        clash = sorted(set(bot.skills) & (set(actions) - REPLACEABLE_ACTIONS))
         errors += [f"skill {sid!r} has the name of a built-in action; rename it" for sid in clash]
 
     missing = sorted(REQUIRED_RESPONSES - set(bot.responses))

@@ -17,9 +17,11 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
+import uuid
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -43,6 +45,7 @@ COSINE_THRESHOLD = 0.5  # hashing mode only (surface overlap; never used to serv
 MAX_FAQ, MAX_DOCUMENTS, MAX_DOCUMENT_CHARS = 2000, 200, 200_000
 ID = r"^[A-Za-z0-9_-]{1,64}$"
 MAX_PDF_PAGES = 500
+CHUNKER = 2  # stored with an index: a different chunker means the index is stale (built again)
 FloatArray = NDArray[np.float32]
 
 
@@ -157,14 +160,15 @@ def kb_version(document: dict[str, Any]) -> str:
 class Entry:
     id: str  # FAQ id, or "<document id>#<n>"
     kind: str  # "faq" | "doc"
-    title: str  # FAQ question, or "<document name> - <section>"
+    title: str  # unique in an index: what a suggestion button shows and sends back
     body: str  # FAQ answer, or the chunk's sentences
     source: str = ""  # the document's name (chunks)
+    heading: str = ""  # a chunk's "<document title> - <section>" (its title may add " (2/3)"); FAQ: unused
 
     @property
     def judge_text(self) -> str:
-        """What the judge reads (and the measurement ranked by)."""
-        return f"{self.title}\n{self.body}"
+        """What is embedded (chunks) and what the judge reads (as measured: heading + body)."""
+        return f"{self.heading or self.title}\n{self.body}"
 
 
 def sentences(paragraph: str) -> list[str]:
@@ -174,36 +178,47 @@ def sentences(paragraph: str) -> list[str]:
 def chunk_document(doc_id: str, name: str, text: str) -> list[Entry]:
     """Whole sentences packed into CHUNK_MIN..CHUNK_MAX characters within one `##` section; a chunk
     repeats the previous one's last sentence when it is at most OVERLAP_MAX characters. A sentence
-    longer than CHUNK_MAX is its own chunk (never cut). Titles are "<# title or name> - <section>"."""
+    longer than CHUNK_MAX is its own chunk (never cut). Headings are "<# title or name> - <section>";
+    a section in several chunks titles them "<heading> (1/3)", "(2/3)"... so each can be chosen."""
     title = name
     sections: list[tuple[str, list[str]]] = []  # (section, its sentences)
-    for block in re.split(r"\n\s*\n", text):
-        block = block.strip()
-        if not block:
-            continue
-        lines = block.splitlines()
-        for ln in lines:
-            if ln.startswith("# "):
-                title = ln[2:].strip() or name
-            elif ln.startswith("## "):
-                sections.append((ln[3:].strip(), []))
-        body = " ".join(ln.strip() for ln in lines if not ln.startswith("#")).strip()
+
+    def flush(lines: list[str]) -> None:
+        body = " ".join(ln.strip() for ln in lines).strip()
         if body:
             if not sections:
                 sections.append(("", []))
             sections[-1][1].extend(sentences(body))
+        lines.clear()
+
+    for block in re.split(r"\n\s*\n", text):  # paragraphs; headings may also sit inside one
+        pending: list[str] = []
+        for ln in block.strip().splitlines():
+            if ln.startswith("#"):
+                flush(pending)
+                if ln.startswith("# "):
+                    title = ln[2:].strip() or name
+                elif ln.startswith("## "):
+                    sections.append((ln[3:].strip(), []))
+            else:
+                pending.append(ln)
+        flush(pending)
     out: list[Entry] = []
     for section, sents in sections:
         head = f"{title} - {section}" if section else title
+        bodies: list[str] = []
         current: list[str] = []
         for s in sents:
             if current and len(" ".join([*current, s])) > CHUNK_MAX and len(" ".join(current)) >= CHUNK_MIN // 2:
-                out.append(Entry(f"{doc_id}#{len(out)}", "doc", head, " ".join(current), name))
+                bodies.append(" ".join(current))
                 last = current[-1]
                 current = [last] if len(last) <= OVERLAP_MAX and len(last) + len(s) < CHUNK_MAX else []
             current.append(s)
         if current:
-            out.append(Entry(f"{doc_id}#{len(out)}", "doc", head, " ".join(current), name))
+            bodies.append(" ".join(current))
+        for i, body in enumerate(bodies, 1):
+            shown = head if len(bodies) == 1 else f"{head} ({i}/{len(bodies)})"
+            out.append(Entry(f"{doc_id}#{len(out)}", "doc", shown, body, name, head))
     return out
 
 
@@ -211,6 +226,11 @@ def entries(kb: KnowledgeBase) -> tuple[list[Entry], list[Entry]]:
     """(FAQ entries, document chunks)."""
     faq = [Entry(f.id, "faq", " ".join(f.question.split()), f.answer.strip()) for f in kb.faq]
     chunks = [c for d in kb.documents for c in chunk_document(d.id, d.name, d.text)]
+    seen: dict[str, int] = {}
+    for e in [*faq, *chunks]:
+        seen[bare(e.title)] = seen.get(bare(e.title), 0) + 1
+    # two documents with the same name and section: tell their chunks apart by document id
+    chunks = [replace(c, title=f"{c.title} · {c.id.split('#')[0]}") if seen[bare(c.title)] > 1 else c for c in chunks]
     return faq, chunks
 
 
@@ -325,12 +345,22 @@ class KnowledgeIndex:
     # ------------------------------------------------------------ files
 
     def save(self, directory: Path) -> None:
+        """Each file is written beside its final name and then renamed over it, so a reader never sees
+        half a file (a crash leaves the old file or the new one)."""
         directory.mkdir(parents=True, exist_ok=True)
-        np.savez(directory / "vectors.npz", faq=self.faq_vectors, chunks=self.chunk_vectors)
-        meta = {"version": self.version, "model_id": self.model_id, "prompt": self.prompt,
+        meta = {"version": self.version, "model_id": self.model_id, "prompt": self.prompt, "chunker": CHUNKER,
                 "settings": self.settings.model_dump(), "faq": [asdict(e) for e in self.faq],
                 "chunks": [asdict(e) for e in self.chunks]}
-        (directory / "index.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        vectors = io.BytesIO()
+        np.savez(vectors, faq=self.faq_vectors, chunks=self.chunk_vectors)
+        for name, data in (("vectors.npz", vectors.getvalue()),
+                           ("index.json", json.dumps(meta, ensure_ascii=False).encode("utf-8"))):
+            tmp = directory / f".{name}.{uuid.uuid4().hex}.tmp"
+            try:
+                tmp.write_bytes(data)
+                os.replace(tmp, directory / name)
+            finally:
+                tmp.unlink(missing_ok=True)
 
     @classmethod
     def load(cls, directory: Path, version: str, embedder: Embedder) -> KnowledgeIndex:
@@ -345,8 +375,10 @@ class KnowledgeIndex:
             settings = KbSettings.model_validate(meta["settings"])
         except FileNotFoundError:
             raise
-        except (OSError, ValueError, KeyError, TypeError, ValidationError) as exc:
+        except Exception as exc:  # damaged files (a truncated zip, bad JSON ...): build it again
             raise ValueError(f"unreadable knowledge-base index in {directory}: {exc}") from exc
+        if meta.get("chunker") != CHUNKER:
+            raise ValueError(f"the index in {directory} was made by another chunker")
         if meta.get("version") != version:
             raise ValueError(f"the index in {directory} is for {meta.get('version')}, not {version}")
         if meta.get("model_id") != embedder.model_id or meta.get("prompt") != embedder.prompt:
@@ -363,12 +395,19 @@ class KnowledgeIndex:
         i = int(np.argmax(cos))
         return self.faq[i], float(cos[i])
 
+    def exact(self, text: str) -> KbResult | None:
+        """The entry whose title is this sentence (what a suggestion button sends), if any."""
+        entry = self._titles.get(bare(text))
+        if entry is None:
+            return None
+        hit = Hit(entry, 1.0, 1.0)  # finite: results go into the JSON event log
+        return KbResult((hit,), (hit,), exact=True)
+
     def search(self, text: str, vector: FloatArray, judge: Judge) -> KbResult:
         """`vector`: the sentence encoded as the NLU encodes it (normalized, with its prompt)."""
-        exact = self._titles.get(bare(text))
+        exact = self.exact(text)
         if exact is not None:
-            hit = Hit(exact, 1.0, 1.0)  # finite: results go into the JSON event log
-            return KbResult((hit,), (hit,), exact=True)
+            return exact
         candidates: list[Candidate] = []
         for pool, vectors in ((self.faq, self.faq_vectors), (self.chunks, self.chunk_vectors)):
             if pool:
@@ -380,6 +419,8 @@ class KnowledgeIndex:
         scores = np.asarray(judge.score(normalize(text), candidates), dtype=np.float64)
         if len(scores) != len(candidates):
             raise ValueError(f"the judge returned {len(scores)} scores for {len(candidates)} candidates")
+        if not np.isfinite(scores).all():  # they go into the JSON event log
+            raise ValueError("the judge returned scores that are not finite numbers")
         order = np.argsort(-scores, kind="stable")
         hits = tuple(Hit(candidates[int(i)].entry, candidates[int(i)].cosine, float(scores[int(i)])) for i in order)
         return KbResult(tuple(h for h in hits if h.score >= judge.threshold), hits)
@@ -439,11 +480,16 @@ class Knowledge:
     def consult(self, text: str, rule: str, similarity: float,
                 vector: FloatArray | None) -> tuple[KbResult | None, KbAnswer | None]:
         """Where the knowledge base sits among the dialogue rules (docs/engine-core-plan.md "빌더 단계 E-D"):
-        a sure block ("intent") gives way only to an FAQ entry whose question is OVERRIDE_MARGIN closer
-        than the block's nearest example (checked by cosine before the judge runs, so block turns stay
-        fast); "clarify" and "fallback" give way to any answer. (search result or None, answer or None)."""
+        an entry's exact title is an explicit choice (a suggestion button) and is answered, except over the
+        bot's own example; a sure block ("intent") gives way only to an FAQ entry whose question is
+        OVERRIDE_MARGIN closer than the block's nearest example (checked by cosine before the judge runs,
+        so block turns stay fast); "clarify" and "fallback" give way to any answer.
+        (search result or None, answer or None)."""
         if self.index.empty or rule not in ("intent", "clarify", "fallback"):
             return None, None
+        exact = self.index.exact(text)  # a chosen suggestion: answer it, unless it is the bot's own example
+        if exact is not None and not (rule == "intent" and similarity >= 1.0):
+            return exact, compose(exact, self.index.settings)
         if rule == "intent":
             if similarity + OVERRIDE_MARGIN > 1.0:  # an exact example: nothing can be closer
                 return None, None

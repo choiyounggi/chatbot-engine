@@ -113,7 +113,8 @@ class TurnOut(BaseModel):
 class DeployIn(BaseModel):
     version: str = Field(pattern=r"^[0-9a-f]{12}$")
     note: str = Field("", max_length=100)  # what changed, shown in the deploy history
-    knowledge_version: str | None = Field(None, pattern=r"^[0-9a-f]{12}$")  # None: no knowledge base
+    # omitted: keep the knowledge base that is live now; null: none
+    knowledge_version: str | None = Field(None, pattern=r"^[0-9a-f]{12}$")
 
 
 class ParseOut(BaseModel):
@@ -964,6 +965,8 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
             index = host.kb_index(bot, version)
         except VersionNotFound as exc:
             raise HTTPException(404, f"unknown knowledge-base version: {version}") from exc
+        except KnowledgeError as exc:  # stored, but cannot be indexed here
+            raise unusable_kb(exc) from exc
         return {"bot": bot, "version": version, "entries": [asdict(e) for e in [*index.faq, *index.chunks]]}
 
     @app.post("/v1/builder/bots/{bot}/knowledge/search", dependencies=deps, response_model=KbSearchOut)
@@ -976,6 +979,8 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
             raise HTTPException(409, "build the knowledge base first") from exc
         except VersionNotFound as exc:
             raise HTTPException(404, f"unknown knowledge-base version: {body.version}") from exc
+        except KnowledgeError as exc:
+            raise unusable_kb(exc) from exc
         passed = {h.entry.id for h in result.answers}
         return {"bot": bot, "version": version, "judge": host.judge.name, "threshold": host.judge.threshold,
                 "exact": result.exact,
@@ -988,9 +993,13 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
     @app.post("/v1/builder/bots/{bot}/deploy", dependencies=deps, response_model=LiveOut)
     def deploy(body: DeployIn, bot: str = BOT_ID) -> Any:
         known(bot)
+        knowledge = body.knowledge_version
+        if "knowledge_version" not in body.model_fields_set:  # a client that knows nothing of knowledge bases
+            live = host.live(bot)
+            knowledge = live[1] if live is not None else None
         with deploy_errors(body.version):
-            host.deploy(bot, body.version, body.note.strip(), body.knowledge_version)
-        return {"bot": bot, "live": body.version, "knowledge_version": body.knowledge_version}
+            host.deploy(bot, body.version, body.note.strip(), knowledge)
+        return {"bot": bot, "live": body.version, "knowledge_version": knowledge}
 
     @app.post("/v1/builder/bots/{bot}/rollback", dependencies=deps, response_model=LiveOut)
     def rollback(bot: str = BOT_ID) -> Any:
@@ -1006,14 +1015,18 @@ def deploy_errors(what: str) -> Iterator[None]:
         yield
     except NoEarlierDeployment as exc:
         raise HTTPException(409, "there is no earlier deployment to go back to") from exc
-    except VersionNotFound as exc:
-        raise HTTPException(404, f"unknown version: {what}") from exc
+    except VersionNotFound as exc:  # the bot version or the knowledge-base version ("bot@version")
+        raise HTTPException(404, f"unknown version: {exc}") from exc
     except NotTrained as exc:
         raise HTTPException(409, f"{what} has no trained model; train it first") from exc
     except BotError as exc:  # stored, but no longer valid here (e.g. an action was removed)
         raise HTTPException(409, {"detail": f"{what} cannot run here", "errors": exc.problems}) from exc
     except KnowledgeError as exc:  # a stored knowledge base that cannot be indexed here
-        raise HTTPException(409, {"detail": "the knowledge base cannot be used here", "errors": exc.problems}) from exc
+        raise unusable_kb(exc) from exc
+
+
+def unusable_kb(exc: KnowledgeError) -> HTTPException:
+    return HTTPException(409, {"detail": "the knowledge base cannot be used here", "errors": exc.problems})
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts a server

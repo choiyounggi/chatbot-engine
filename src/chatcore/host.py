@@ -32,7 +32,7 @@ from chatcore.bot.repository import BotRepository, Deployment, KbVersionInfo, Re
 from chatcore.bot.schema import BotDefinition
 from chatcore.dialogue.events import SessionStarted
 from chatcore.dialogue.turn import TurnProcessor
-from chatcore.dialogue.values import ActionRegistry
+from chatcore.dialogue.values import ActionFn, ActionRegistry
 from chatcore.knowledge import (
     CosineJudge,
     Judge,
@@ -175,6 +175,7 @@ class BotHost:
         self._loaded: dict[str, OrderedDict[Key, BotRuntime]] = {}  # bot -> (version, kb) -> runtime (LRU)
         self._live: dict[str, Key] = {}
         self._indexes: OrderedDict[tuple[str, str], KnowledgeIndex] = OrderedDict()  # (bot, kb version), LRU
+        self._index_locks: dict[tuple[str, str], threading.Lock] = {}  # one load or rebuild per version at a time
         self._lock = threading.RLock()  # guards _loaded/_live; held only briefly
         self._deploying = threading.RLock()  # one deploy/rollback at a time, so memory matches the repository
 
@@ -217,18 +218,25 @@ class BotHost:
             if not history:
                 continue
             live = history[0]
+            kb = live.kb_version
+            if kb is not None:
+                try:
+                    self.kb_index(bot_id, kb)
+                except Exception:  # the bot itself still answers; its blocks do not depend on the knowledge base
+                    log.exception("could not load knowledge base %s@%s; serving the bot without it", bot_id, kb)
+                    kb = None
             try:
                 try:
-                    runtime = self._build(bot_id, live.version, live.kb_version)
+                    runtime = self._build(bot_id, live.version, kb)
                 except NotTrained:
                     log.warning("%s@%s has no model files; training it again", bot_id, live.version)
                     bot = bot_from_document(self.repository.get_version(bot_id, live.version), self.actions.names())
                     train(bot, CachedEmbedder(self.embedder), self.artifacts)  # it cleared the bar when stored
-                    runtime = self._build(bot_id, live.version, live.kb_version)
+                    runtime = self._build(bot_id, live.version, kb)
             except Exception:
                 log.exception("could not load %s@%s; the bot is not served", bot_id, live.version)
                 continue
-            self._activate(bot_id, (live.version, live.kb_version), runtime)
+            self._activate(bot_id, (live.version, kb), runtime)
 
     # ------------------------------------------------------------ builder
 
@@ -360,6 +368,13 @@ class BotHost:
             if index is not None:
                 self._indexes.move_to_end((bot_id, version))
                 return index
+            loading = self._index_locks.setdefault((bot_id, version), threading.Lock())
+        with loading:
+            with self._lock:  # another caller may have loaded it while we waited
+                index = self._indexes.get((bot_id, version))
+            return index if index is not None else self._load_index(bot_id, version)
+
+    def _load_index(self, bot_id: str, version: str) -> KnowledgeIndex:
         directory = self.artifacts / bot_id / KB_DIR / version
         try:
             index = KnowledgeIndex.load(directory, version, self.embedder)
@@ -510,9 +525,12 @@ class BotHost:
         if not bot.skills and knowledge is None:
             return self.actions
         client = self.skill_client(bot)
-        return self.actions.extended({sid: (client.action(sid, skill), skill.timeout_ms / 1000 + 0.5)
-                                      for sid, skill in bot.skills.items()},
-                                     replace={"knowledge": knowledge.action()} if knowledge is not None else None)
+        skills = {sid: (client.action(sid, skill), skill.timeout_ms / 1000 + 0.5) for sid, skill in bot.skills.items()}
+        builtin = self.actions.names()
+        replace: dict[str, tuple[ActionFn, float | None]] = {sid: fn for sid, fn in skills.items() if sid in builtin}
+        if knowledge is not None and "knowledge" not in replace:  # the bot's own skill of that name wins
+            replace["knowledge"] = (knowledge.action(), None)
+        return self.actions.extended({sid: fn for sid, fn in skills.items() if sid not in builtin}, replace)
 
     def test_skill(self, bot_id: str, skill_id: str, params: dict[str, str], utterance: str = "") -> SkillOutcome:
         """Run a skill of the current draft once (its test_url when it has one). NoDraft; BotError when

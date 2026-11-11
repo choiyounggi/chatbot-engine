@@ -138,7 +138,10 @@ class MicroBatcher:
                     fut.set_exception(exc)
                 continue
             for (_, fut), row in zip(live, out, strict=True):
-                fut.set_result(row)
+                if isinstance(row, BaseException):  # that item's own failure (run_items)
+                    fut.set_exception(row)
+                else:
+                    fut.set_result(row)
 
 
 class Passage(str):
@@ -157,25 +160,36 @@ class Pair(str):
 
 
 def run_items(inner: Embedder, cross_encoder: CrossEncoderJudge | None, items: list[str]) -> list[Any]:
-    """One worker-thread call: sentences -> vectors, Passage -> passage vectors, Pair -> [score]."""
+    """One worker-thread call: sentences -> vectors, Passage -> passage vectors, Pair -> [score].
+    A model failure becomes the result of its own group's items only (an exception object), so one
+    user's failed knowledge-base judging never fails another user's sentence in the same batch."""
     out: list[Any] = [None] * len(items)
     groups: dict[type, list[int]] = {str: [], Passage: [], Pair: []}
     for i, item in enumerate(items):
         groups[type(item) if type(item) in groups else str].append(i)
-    if groups[str]:
-        for i, row in zip(groups[str], inner.encode([items[i] for i in groups[str]]), strict=True):
-            out[i] = row
-    if groups[Passage]:
-        rows = encode_passages(inner, [str(items[i]) for i in groups[Passage]])
-        for i, row in zip(groups[Passage], rows, strict=True):
-            out[i] = row
-    if groups[Pair]:
+
+    def rows(kind: type) -> Sequence[Any]:
+        texts = [items[i] for i in groups[kind]]
+        if kind is str:
+            return list(inner.encode(texts))
+        if kind is Passage:
+            return list(encode_passages(inner, [str(t) for t in texts]))
         if cross_encoder is None:
             raise RuntimeError("no cross-encoder on this worker")
-        pairs = [items[i] for i in groups[Pair]]
-        scores = cross_encoder.score_pairs([(p.query, str(p)) for p in pairs if isinstance(p, Pair)])
-        for i, score in zip(groups[Pair], scores, strict=True):
-            out[i] = np.array([score], dtype=np.float64)
+        scores = cross_encoder.score_pairs([(p.query, str(p)) for p in texts if isinstance(p, Pair)])
+        return [np.array([score], dtype=np.float64) for score in scores]
+
+    for kind, indices in groups.items():
+        if not indices:
+            continue
+        try:
+            results = rows(kind)
+            if len(results) != len(indices):
+                raise RuntimeError(f"{len(results)} results for {len(indices)} items")
+        except Exception as exc:
+            results = [exc] * len(indices)
+        for i, result in zip(indices, results, strict=True):
+            out[i] = result
     return out
 
 
