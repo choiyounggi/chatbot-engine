@@ -60,10 +60,28 @@ class SentenceEmbedder:  # pragma: no cover - needs the real model; exercised by
                                           model_kwargs={"dtype": torch.float16 if mps else torch.float32})
 
     def encode(self, texts: Sequence[str]) -> FloatArray:
+        return self._encode([self.config.prompt + t for t in texts])
+
+    def encode_passages(self, texts: Sequence[str]) -> FloatArray:
+        """Documents to search (knowledge base): no prompt, as the model card says for passages."""
+        return self._encode(list(texts))
+
+    def _encode(self, texts: list[str]) -> FloatArray:
         if not texts:
             return np.zeros((0, 0), dtype=np.float32)
-        vecs = self._model.encode([self.config.prompt + t for t in texts], normalize_embeddings=True, batch_size=64)
+        vecs = self._model.encode(texts, normalize_embeddings=True, batch_size=64)
         return np.asarray(vecs, dtype=np.float32)
+
+
+def encode_passages(embedder: Embedder, texts: Sequence[str]) -> FloatArray:
+    """Passage vectors (no prompt; knowledge-base documents). An embedder without `encode_passages`
+    can only do this when its own prompt is empty."""
+    fn = getattr(embedder, "encode_passages", None)
+    if callable(fn):
+        return np.asarray(fn(texts), dtype=np.float32)
+    if embedder.prompt:
+        raise TypeError(f"{type(embedder).__name__} cannot encode passages without its prompt")
+    return embedder.encode(texts)
 
 
 class CachedEmbedder:
@@ -82,6 +100,9 @@ class CachedEmbedder:
         if not texts:
             return np.zeros((0, 0), dtype=np.float32)
         return np.vstack([self._cache[t] for t in texts])
+
+    def encode_passages(self, texts: Sequence[str]) -> FloatArray:
+        return encode_passages(self.inner, texts)  # not cached: an index is built once per version
 
 
 # ---------------------------------------------------------------- classifier
@@ -147,6 +168,7 @@ class NluResult:
     similarity: float  # max cosine to an in-scope training example (1.0 for exact matches)
     entities: tuple[EntityMatch, ...]
     matched_by: str  # "exact" | "keyword" | "classifier"
+    vector: FloatArray | None = field(default=None, compare=False, repr=False)  # the sentence (classifier only)
 
     @property
     def top(self) -> IntentScore:
@@ -235,10 +257,11 @@ class NluModel:
             keyword = self._keyword.get(key) if key else None
             if keyword is not None:
                 return NluResult(text, (IntentScore(keyword, 1.0),), 1.0, entities, "keyword")
-        probs, sims = self.classifier.predict(self.embedder.encode([normalize(text)]))  # as in training
+        vectors = self.embedder.encode([normalize(text)])  # as in training
+        probs, sims = self.classifier.predict(vectors)
         order = np.argsort(-probs[0])
         intents = tuple(IntentScore(self.classifier.classes[i], float(probs[0, i])) for i in order)
-        return NluResult(text, intents, float(sims[0]), entities, "classifier")
+        return NluResult(text, intents, float(sims[0]), entities, "classifier", vectors[0])
 
     @staticmethod
     def thresholds(meta: dict[str, Any], bot: BotDefinition) -> Thresholds:

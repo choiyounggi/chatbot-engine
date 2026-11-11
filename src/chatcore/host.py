@@ -5,7 +5,8 @@ versions from a BotRepository and lets a builder train, deploy and roll back
 without restarting (docs/engine-core-plan.md §3.1, Phase 6):
 
 - a session stays on the version it started with while that version is
-  loaded (the deployed one plus the `keep` most recently used others);
+  loaded (the deployed one plus the `keep` most recently used others); a
+  version is a pair (bot version, knowledge-base version or none);
 - when its version has been dropped, the deployed version takes over and the
   turn processor restarts the conversation if its scenarios no longer fit.
 """
@@ -27,12 +28,24 @@ from typing import Any, Protocol
 from chatcore.actions.builtin import builtin_registry
 from chatcore.bot.changes import summarize
 from chatcore.bot.loader import BotError, bot_from_document, parse_document, read_document, validate
-from chatcore.bot.repository import BotRepository, RevisionConflict, VersionInfo
+from chatcore.bot.repository import BotRepository, Deployment, KbVersionInfo, RevisionConflict, VersionInfo
 from chatcore.bot.schema import BotDefinition
 from chatcore.dialogue.events import SessionStarted
 from chatcore.dialogue.turn import TurnProcessor
-from chatcore.dialogue.values import ActionRegistry
-from chatcore.nlu.entities import EntityExtractor, bare
+from chatcore.dialogue.values import ActionFn, ActionRegistry
+from chatcore.knowledge import (
+    CosineJudge,
+    Judge,
+    KbAnswer,
+    KbResult,
+    Knowledge,
+    KnowledgeError,
+    KnowledgeIndex,
+    compose,
+    kb_version,
+    parse_kb,
+)
+from chatcore.nlu.entities import EntityExtractor, bare, normalize
 from chatcore.nlu.interpreter import NluInterpreter
 from chatcore.nlu.model import CachedEmbedder, Embedder, ModelMismatch, NluModel
 from chatcore.nlu.train import ConfusablePair, Report, confusable_intents, fit_only, train
@@ -73,6 +86,9 @@ class StaticHost:
 
 log = logging.getLogger(__name__)
 TEST_DIR = "_test"  # artifacts/_test/<bot>/<version>: builder test builds (not a valid bot id)
+KB_DIR = "kb"  # artifacts/<bot>/kb/<knowledge-base version>: its index (bot versions are 12 hex characters)
+Key = tuple[str, str | None]  # (bot version, knowledge-base version)
+KB_CACHE = 16  # knowledge-base indexes kept for lookups
 
 
 class NoDraft(Exception):
@@ -81,6 +97,17 @@ class NoDraft(Exception):
 
 class NoEarlierDeployment(Exception):
     """Rollback asked for, but the bot has never been deployed with a different version."""
+
+
+class NoKnowledgeBase(Exception):
+    """The bot has no knowledge-base draft (to build) or no built version (to search)."""
+
+
+@dataclass(frozen=True)
+class KbDraftCheck:
+    version: str | None  # None when the document is not a valid knowledge base
+    errors: list[str]
+    revision: int
 
 
 def unique_sentences(texts: list[str]) -> list[tuple[str, str]]:
@@ -129,10 +156,12 @@ class BotHost:
     def __init__(self, repository: BotRepository, store: TrackerStore, embedder: Embedder, artifacts: Path,
                  actions: Callable[[], ActionRegistry] = builtin_registry, keep: int = 2, min_f1: float = 0.90,
                  bulk_embedder: Embedder | None = None, test_keep: int = 2, test_ttl: float = 1800.0,
-                 skill_allow_private: bool = False, skill_transport: Transport = post_json) -> None:
+                 skill_allow_private: bool = False, skill_transport: Transport = post_json,
+                 judge: Judge | None = None) -> None:
         """bulk_embedder: the same model for training (e.g. BatchedEmbedder.bulk(), so chat goes first).
         test_keep / test_ttl: builder test builds kept loaded, and for how long after their last use.
-        skill_allow_private: let HTTP skills call internal addresses (development and tests only)."""
+        skill_allow_private: let HTTP skills call internal addresses (development and tests only).
+        judge: decides whether a knowledge-base candidate answers (default: cosine, for hashing mode)."""
         if keep < 1 or test_keep < 1 or test_ttl <= 0:
             raise ValueError("keep and test_keep must be >= 1 and test_ttl > 0")
         self.repository, self.store, self.embedder, self.artifacts = repository, store, embedder, artifacts
@@ -142,8 +171,11 @@ class BotHost:
         self._tests: OrderedDict[tuple[str, str], tuple[BotRuntime, Path, float]] = OrderedDict()
         self.actions, self.keep, self.min_f1 = actions(), keep, min_f1
         self.skill_allow_private, self.skill_transport = skill_allow_private, skill_transport
-        self._loaded: dict[str, OrderedDict[str, BotRuntime]] = {}  # bot -> version -> runtime (LRU)
-        self._live: dict[str, str] = {}
+        self.judge: Judge = judge or CosineJudge()
+        self._loaded: dict[str, OrderedDict[Key, BotRuntime]] = {}  # bot -> (version, kb) -> runtime (LRU)
+        self._live: dict[str, Key] = {}
+        self._indexes: OrderedDict[tuple[str, str], KnowledgeIndex] = OrderedDict()  # (bot, kb version), LRU
+        self._index_locks: dict[tuple[str, str], threading.Lock] = {}  # one load or rebuild per version at a time
         self._lock = threading.RLock()  # guards _loaded/_live; held only briefly
         self._deploying = threading.RLock()  # one deploy/rollback at a time, so memory matches the repository
 
@@ -151,16 +183,21 @@ class BotHost:
 
     def bots(self) -> dict[str, str]:
         with self._lock:
-            return dict(self._live)
+            return {bot: key[0] for bot, key in self._live.items()}
+
+    def live(self, bot_id: str) -> Key | None:
+        """(bot version, knowledge-base version) that new sessions get."""
+        with self._lock:
+            return self._live.get(bot_id)
 
     def runtime(self, bot_id: str) -> BotRuntime | None:
         with self._lock:
-            version = self._live.get(bot_id)
-            return self._loaded[bot_id][version] if version else None
+            key = self._live.get(bot_id)
+            return self._loaded[bot_id][key] if key else None
 
     def runtime_for_session(self, bot_id: str, session_key: str) -> BotRuntime | None:
-        pinned = next((e.bot_version for e in reversed(self.store.events(session_key))
-                       if isinstance(e, SessionStarted)), None)
+        started = next((e for e in reversed(self.store.events(session_key)) if isinstance(e, SessionStarted)), None)
+        pinned: Key | None = (started.bot_version, started.kb_version) if started is not None else None
         with self._lock:
             loaded = self._loaded.get(bot_id)
             if loaded is None or bot_id not in self._live:
@@ -177,21 +214,29 @@ class BotHost:
         Test builds of an earlier run are gone with its memory, so their files are removed."""
         shutil.rmtree(self.artifacts / TEST_DIR, ignore_errors=True)
         for bot_id in self.repository.bots():
-            history = self.repository.deployments(bot_id)
+            history = self.repository.history(bot_id)
             if not history:
                 continue
+            live = history[0]
+            kb = live.kb_version
+            if kb is not None:
+                try:
+                    self.kb_index(bot_id, kb)
+                except Exception:  # the bot itself still answers; its blocks do not depend on the knowledge base
+                    log.exception("could not load knowledge base %s@%s; serving the bot without it", bot_id, kb)
+                    kb = None
             try:
                 try:
-                    runtime = self._build(bot_id, history[0])
+                    runtime = self._build(bot_id, live.version, kb)
                 except NotTrained:
-                    log.warning("%s@%s has no model files; training it again", bot_id, history[0])
-                    bot = bot_from_document(self.repository.get_version(bot_id, history[0]), self.actions.names())
+                    log.warning("%s@%s has no model files; training it again", bot_id, live.version)
+                    bot = bot_from_document(self.repository.get_version(bot_id, live.version), self.actions.names())
                     train(bot, CachedEmbedder(self.embedder), self.artifacts)  # it cleared the bar when stored
-                    runtime = self._build(bot_id, history[0])
+                    runtime = self._build(bot_id, live.version, kb)
             except Exception:
-                log.exception("could not load %s@%s; the bot is not served", bot_id, history[0])
+                log.exception("could not load %s@%s; the bot is not served", bot_id, live.version)
                 continue
-            self._activate(bot_id, history[0], runtime)
+            self._activate(bot_id, (live.version, kb), runtime)
 
     # ------------------------------------------------------------ builder
 
@@ -269,38 +314,118 @@ class BotHost:
     def confusable_of(self, bot: BotDefinition) -> list[ConfusablePair]:
         return confusable_intents(bot, self.bulk)
 
-    def deploy(self, bot_id: str, version: str, note: str = "") -> None:
+    def deploy(self, bot_id: str, version: str, note: str = "", kb_version: str | None = None) -> None:
         """Build the runtime first (NotTrained / VersionNotFound / BotError leave everything as
-        it was), record the deployment, then switch new sessions to it."""
+        it was), record the deployment, then switch new sessions to it. kb_version: the
+        knowledge base to answer from (None: none)."""
         with self._deploying:
-            runtime = self._build(bot_id, version)
-            self.repository.deploy(bot_id, version, note)
-            self._activate(bot_id, version, runtime)
+            runtime = self._build(bot_id, version, kb_version)
+            self.repository.deploy(bot_id, version, note, kb_version)
+            self._activate(bot_id, (version, kb_version), runtime)
 
-    def rollback(self, bot_id: str) -> str:
-        """Re-deploy the version that was live before the current one."""
+    def rollback(self, bot_id: str) -> Deployment:
+        """Re-deploy the pair (bot version, knowledge-base version) that was live before the current one."""
         with self._deploying:
-            history = self.repository.deployments(bot_id)
-            previous = next((v for v in history[1:] if v != history[0]), None)
+            history = self.repository.history(bot_id)
+            current = (history[0].version, history[0].kb_version) if history else None
+            previous = next((d for d in history[1:] if (d.version, d.kb_version) != current), None)
             if previous is None:
                 raise NoEarlierDeployment(bot_id)
-            self.deploy(bot_id, previous, "rollback")
+            self.deploy(bot_id, previous.version, "rollback", previous.kb_version)
             return previous
+
+    # ------------------------------------------------------------ knowledge base
+
+    def save_kb_draft(self, bot_id: str, document: dict[str, Any],
+                      expected_revision: int | None = None) -> KbDraftCheck:
+        """Save even an invalid knowledge base (work in progress) and report its problems."""
+        try:
+            parse_kb(document)
+            version: str | None = kb_version(document)
+            errors: list[str] = []
+        except KnowledgeError as exc:
+            version, errors = None, exc.problems
+        revision = self.repository.save_kb_draft(bot_id, document, expected_revision)
+        return KbDraftCheck(version, errors, revision)
+
+    def build_kb(self, bot_id: str) -> KbVersionInfo:
+        """Index the knowledge-base draft and store it as a version. NoKnowledgeBase without a draft;
+        KnowledgeError when the draft is invalid."""
+        draft = self.repository.kb_draft(bot_id)
+        if draft is None:
+            raise NoKnowledgeBase(bot_id)
+        index = KnowledgeIndex.build(draft.document, self.bulk)
+        index.save(self.artifacts / bot_id / KB_DIR / index.version)
+        with self._lock:
+            self._remember_index(bot_id, index)
+        return self.repository.add_kb_version(bot_id, index.version, draft.document, len(index.faq), len(index.chunks))
+
+    def kb_index(self, bot_id: str, version: str) -> KnowledgeIndex:
+        """A stored knowledge-base version's index: from memory, its files, or built again from the stored
+        document when the files are missing or stale (a new machine). VersionNotFound when unknown."""
+        with self._lock:
+            index = self._indexes.get((bot_id, version))
+            if index is not None:
+                self._indexes.move_to_end((bot_id, version))
+                return index
+            loading = self._index_locks.setdefault((bot_id, version), threading.Lock())
+        with loading:
+            with self._lock:  # another caller may have loaded it while we waited
+                index = self._indexes.get((bot_id, version))
+            return index if index is not None else self._load_index(bot_id, version)
+
+    def _load_index(self, bot_id: str, version: str) -> KnowledgeIndex:
+        directory = self.artifacts / bot_id / KB_DIR / version
+        try:
+            index = KnowledgeIndex.load(directory, version, self.embedder)
+        except (FileNotFoundError, ValueError) as exc:
+            document = self.repository.get_kb_version(bot_id, version)
+            log.warning("knowledge base %s@%s: %s; indexing it again", bot_id, version, exc)
+            index = KnowledgeIndex.build(document, self.bulk)
+            if index.version != version:  # the stored document must hash to its version
+                raise KnowledgeError([f"stored knowledge base {version} hashes to {index.version}"]) from exc
+            index.save(directory)
+        with self._lock:
+            self._remember_index(bot_id, index)
+        return index
+
+    def search_kb(self, bot_id: str, query: str, version: str | None = None) -> tuple[str, KbResult, KbAnswer | None]:
+        """Search a built version (default: the newest) as a conversation would: (version, result, answer).
+        NoKnowledgeBase when nothing is built; VersionNotFound for an unknown version."""
+        if version is None:
+            versions = self.repository.kb_versions(bot_id)
+            if not versions:
+                raise NoKnowledgeBase(bot_id)
+            version = versions[0].version
+        index = self.kb_index(bot_id, version)
+        text = " ".join(query.split())
+        result = index.search(text, self.embedder.encode([normalize(text)])[0], self.judge)
+        return version, result, compose(result, index.settings)
+
+    def _remember_index(self, bot_id: str, index: KnowledgeIndex) -> None:
+        """Lock held. A lookup cache (runtimes hold their own index): the KB_CACHE most recently used."""
+        self._indexes[(bot_id, index.version)] = index
+        self._indexes.move_to_end((bot_id, index.version))
+        while len(self._indexes) > KB_CACHE:
+            self._indexes.popitem(last=False)
 
     # ------------------------------------------------------------ test builds
 
     def build_test(self, bot_id: str) -> str:
-        """Fit the current draft without evaluation (one example per intent is enough), load it
-        into the test cache and return its build id (the draft's version). BotError for an
-        invalid draft, TrainingError when it cannot be fitted."""
+        """Fit the current draft without evaluation (one example per intent is enough), with the
+        knowledge-base draft when there is one, load it into the test cache and return its build id
+        (the draft's version). BotError for an invalid draft, KnowledgeError for an invalid
+        knowledge base, TrainingError when it cannot be fitted."""
         document = self.repository.get_draft(bot_id)
         if document is None:
             raise NoDraft(bot_id)
         bot = bot_from_document(document, self.actions.names())
+        kb_draft = self.repository.kb_draft(bot_id)
+        kb = KnowledgeIndex.build(kb_draft.document, self.bulk) if kb_draft is not None else None  # KnowledgeError
         root = self.artifacts / TEST_DIR / uuid.uuid4().hex  # its own directory: nothing else deletes it
         try:
             fit_only(bot, CachedEmbedder(self.bulk), root)
-            runtime = self._load(bot, root)
+            runtime = self._load(bot, root, kb)
         except BaseException:
             shutil.rmtree(root, ignore_errors=True)
             raise
@@ -346,14 +471,14 @@ class BotHost:
 
     # ------------------------------------------------------------ internals
 
-    def _activate(self, bot_id: str, version: str, runtime: BotRuntime) -> None:
+    def _activate(self, bot_id: str, key: Key, runtime: BotRuntime) -> None:
         with self._lock:
             loaded = self._loaded.setdefault(bot_id, OrderedDict())
-            loaded.setdefault(version, runtime)  # sessions pinned to an already loaded copy keep it
-            loaded.move_to_end(version)
-            self._live[bot_id] = version
+            loaded.setdefault(key, runtime)  # sessions pinned to an already loaded copy keep it
+            loaded.move_to_end(key)
+            self._live[bot_id] = key
             while len(loaded) > self.keep + 1:  # the live version plus `keep` others
-                oldest = next(v for v in loaded if v != version)
+                oldest = next(k for k in loaded if k != key)
                 del loaded[oldest]
 
     def _trained_draft(self, bot_id: str) -> str:
@@ -369,10 +494,11 @@ class BotHost:
             return self.train_draft(bot_id)[0].version
         return self.repository.add_version(bot_id, bot.version, document, meta.get("macro_f1")).version
 
-    def _build(self, bot_id: str, version: str) -> BotRuntime:
-        return self._load(bot_from_document(self.repository.get_version(bot_id, version), self.actions.names()))
+    def _build(self, bot_id: str, version: str, kb: str | None = None) -> BotRuntime:
+        bot = bot_from_document(self.repository.get_version(bot_id, version), self.actions.names())
+        return self._load(bot, None, self.kb_index(bot_id, kb) if kb is not None else None)
 
-    def _load(self, bot: BotDefinition, root: Path | None = None) -> BotRuntime:
+    def _load(self, bot: BotDefinition, root: Path | None = None, kb: KnowledgeIndex | None = None) -> BotRuntime:
         try:
             model = NluModel.load(bot, (root or self.artifacts) / bot.id / bot.version, self.embedder,
                                   EntityExtractor(bot))
@@ -381,8 +507,10 @@ class BotHost:
         # model.bot carries the thresholds meta.json was trained with (NluModel.load, docs/
         # engine-core-plan.md "빌더 단계 E-B4"), not necessarily the document's own numbers.
         served = model.bot
-        return BotRuntime(served, TurnProcessor(served, self.store, NluInterpreter(model.parse),
-                                                self.actions_for(served)), model)
+        knowledge = Knowledge(kb, self.judge, self.embedder) if kb is not None and not kb.empty else None
+        processor = TurnProcessor(served, self.store, NluInterpreter(model.parse, knowledge),
+                                  self.actions_for(served, knowledge), kb_version=kb.version if kb else None)
+        return BotRuntime(served, processor, model)
 
     # ------------------------------------------------------------ HTTP skills
 
@@ -391,13 +519,18 @@ class BotHost:
                            lambda error: self.repository.add_skill_error(bot.id, error_dict(error)),
                            self.skill_allow_private, self.skill_transport)
 
-    def actions_for(self, bot: BotDefinition) -> ActionRegistry:
-        """The built-in actions plus the bot's HTTP skills (each with its own timeout)."""
-        if not bot.skills:
+    def actions_for(self, bot: BotDefinition, knowledge: Knowledge | None = None) -> ActionRegistry:
+        """The built-in actions plus the bot's HTTP skills (each with its own timeout); `knowledge`
+        searches the bot's knowledge base when it has one."""
+        if not bot.skills and knowledge is None:
             return self.actions
         client = self.skill_client(bot)
-        return self.actions.extended({sid: (client.action(sid, skill), skill.timeout_ms / 1000 + 0.5)
-                                      for sid, skill in bot.skills.items()})
+        skills = {sid: (client.action(sid, skill), skill.timeout_ms / 1000 + 0.5) for sid, skill in bot.skills.items()}
+        builtin = self.actions.names()
+        replace: dict[str, tuple[ActionFn, float | None]] = {sid: fn for sid, fn in skills.items() if sid in builtin}
+        if knowledge is not None and "knowledge" not in replace:  # the bot's own skill of that name wins
+            replace["knowledge"] = (knowledge.action(), None)
+        return self.actions.extended({sid: fn for sid, fn in skills.items() if sid not in builtin}, replace)
 
     def test_skill(self, bot_id: str, skill_id: str, params: dict[str, str], utterance: str = "") -> SkillOutcome:
         """Run a skill of the current draft once (its test_url when it has one). NoDraft; BotError when

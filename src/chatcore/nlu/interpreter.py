@@ -21,12 +21,14 @@ a location slot unless a location is actually wanted.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from typing import Any
 
 from chatcore.bot.schema import BotDefinition, Scenario
 from chatcore.dialogue.commands import (
+    AnswerKnowledge,
     CancelScenario,
     Clarify,
     Command,
@@ -40,9 +42,11 @@ from chatcore.dialogue.commands import (
 )
 from chatcore.dialogue.state import DialogueState
 from chatcore.dialogue.turn import Interpretation
+from chatcore.knowledge import Knowledge
 from chatcore.nlu.entities import EntityMatch, bare, normalize, pick
 from chatcore.nlu.model import OOS, NluResult
 
+log = logging.getLogger(__name__)
 TEXT = "sys.text"  # never extracted: it is the whole answer to a pending question
 # System entities every bot has always seen; the newer ones count only for bots whose slots use them,
 # so an old bot decides exactly as before ("주말은 어때?" must not become an entity-only follow-up).
@@ -79,14 +83,28 @@ def entity_only(text: str, entities: tuple[EntityMatch, ...]) -> list[EntityMatc
 
 
 class NluInterpreter:
-    def __init__(self, parse: Callable[[str], NluResult]) -> None:
-        """`parse` is NluModel.parse (or a stand-in in tests)."""
+    def __init__(self, parse: Callable[[str], NluResult], knowledge: Knowledge | None = None) -> None:
+        """`parse` is NluModel.parse (or a stand-in in tests); `knowledge`: the bot's knowledge base."""
         self.parse = parse
+        self.knowledge = knowledge
 
     def interpret(self, text: str, state: DialogueState, bot: BotDefinition) -> Interpretation:
         result = self.parse(text)
         rule, commands = self._decide(text, result, state, bot)
         info: dict[str, Any] = {"rule": rule, "text": text, **result.to_log()}
+        waiting = state.top is not None and state.top.awaiting is not None  # a pending question: ask again
+        if self.knowledge is not None and not waiting:
+            try:
+                found, answer = self.knowledge.consult(text, rule, result.similarity, result.vector)
+            except Exception as exc:  # the knowledge base must not break a turn the rules already decided
+                log.exception("knowledge-base search failed")
+                info["knowledge"] = {"error": type(exc).__name__}
+            else:
+                if found is not None:
+                    info["knowledge"] = found.to_log()
+                if answer is not None:
+                    info["rule_before"], info["rule"] = rule, "knowledge"
+                    commands = [AnswerKnowledge(answer.text, answer.replies, answer.items)]
         return Interpretation(commands, info)
 
     # ------------------------------------------------------------------

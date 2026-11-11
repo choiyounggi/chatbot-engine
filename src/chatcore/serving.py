@@ -1,7 +1,8 @@
 """Serving helpers: one worker thread for the embedding model, with batching.
 
 PyTorch MPS can crash when two threads run tensor ops at once
-(pytorch/pytorch#197805), so every model call goes through one worker thread.
+(pytorch/pytorch#197805), so every model call goes through one worker thread —
+the knowledge base's cross-encoder too (typed items: Passage, Pair).
 Requests waiting while the model runs are batched into its next call
 (max_wait_ms=0: no artificial wait; measured in docs/benchmarks/concurrency.md).
 """
@@ -14,11 +15,13 @@ import time
 from collections import deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
-from chatcore.nlu.model import Embedder
+from chatcore.knowledge import Candidate, CrossEncoderJudge, Judge
+from chatcore.nlu.model import Embedder, encode_passages
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +38,7 @@ class MicroBatcher:
     training still finishes under a steady stream of chat (strict priority would
     starve it). Lanes are never mixed in one call."""
 
-    def __init__(self, fn: Callable[[list[str]], NDArray[np.float32]], max_batch: int = 16,
+    def __init__(self, fn: Callable[[list[str]], Sequence[Any]], max_batch: int = 16,
                  max_wait_ms: float = 2.0, keepalive_ms: float | None = None,
                  keepalive_text: str = "keepalive", bulk_batch: int = 4) -> None:
         """keepalive_ms: when idle that long, call fn([keepalive_text]) on the worker thread
@@ -127,7 +130,7 @@ class MicroBatcher:
                 continue
             self.calls += 1
             try:
-                out = np.asarray(self.fn([t for t, _ in live]))
+                out = self.fn([t for t, _ in live])  # one result per item (rows may differ in shape)
                 if len(out) != len(live):
                     raise RuntimeError(f"fn returned {len(out)} rows for {len(live)} texts")
             except Exception as exc:  # deliver the failure to every waiting caller
@@ -135,26 +138,90 @@ class MicroBatcher:
                     fut.set_exception(exc)
                 continue
             for (_, fut), row in zip(live, out, strict=True):
-                fut.set_result(row)
+                if isinstance(row, BaseException):  # that item's own failure (run_items)
+                    fut.set_exception(row)
+                else:
+                    fut.set_result(row)
+
+
+class Passage(str):
+    """A text to encode as a passage (no prompt)."""
+
+
+class Pair(str):
+    """A (query, text) pair for the cross-encoder; the string is the text."""
+
+    query: str
+
+    def __new__(cls, query: str, text: str) -> Pair:
+        pair = super().__new__(cls, text)
+        pair.query = query
+        return pair
+
+
+def run_items(inner: Embedder, cross_encoder: CrossEncoderJudge | None, items: list[str]) -> list[Any]:
+    """One worker-thread call: sentences -> vectors, Passage -> passage vectors, Pair -> [score].
+    A model failure becomes the result of its own group's items only (an exception object), so one
+    user's failed knowledge-base judging never fails another user's sentence in the same batch."""
+    out: list[Any] = [None] * len(items)
+    groups: dict[type, list[int]] = {str: [], Passage: [], Pair: []}
+    for i, item in enumerate(items):
+        groups[type(item) if type(item) in groups else str].append(i)
+
+    def rows(kind: type) -> Sequence[Any]:
+        texts = [items[i] for i in groups[kind]]
+        if kind is str:
+            return list(inner.encode(texts))
+        if kind is Passage:
+            return list(encode_passages(inner, [str(t) for t in texts]))
+        if cross_encoder is None:
+            raise RuntimeError("no cross-encoder on this worker")
+        scores = cross_encoder.score_pairs([(p.query, str(p)) for p in texts if isinstance(p, Pair)])
+        return [np.array([score], dtype=np.float64) for score in scores]
+
+    for kind, indices in groups.items():
+        if not indices:
+            continue
+        try:
+            results = rows(kind)
+            if len(results) != len(indices):
+                raise RuntimeError(f"{len(results)} results for {len(indices)} items")
+        except Exception as exc:
+            results = [exc] * len(indices)
+        for i, result in zip(indices, results, strict=True):
+            out[i] = result
+    return out
 
 
 class BatchedEmbedder:
-    """An Embedder whose `encode` runs on a MicroBatcher's single worker thread."""
+    """An Embedder whose `encode` runs on a MicroBatcher's single worker thread (and the knowledge
+    base's cross-encoder, when given, on the same thread)."""
 
     def __init__(self, inner: Embedder, max_batch: int = 16, max_wait_ms: float = 0.0,
-                 keepalive_ms: float | None = None, bulk_batch: int = 4) -> None:
+                 keepalive_ms: float | None = None, bulk_batch: int = 4,
+                 cross_encoder: CrossEncoderJudge | None = None) -> None:
         # bulk_batch 4: chat p95 46 ms while training under 4 nonstop sessions; 8 gave 55-58 ms
         # (docs/benchmarks/train_latency.md)
         self.model_id = inner.model_id
         self.prompt = inner.prompt
-        self._batcher = MicroBatcher(lambda texts: inner.encode(texts), max_batch=max_batch,
+        self.cross_encoder = cross_encoder
+        self._batcher = MicroBatcher(lambda items: run_items(inner, cross_encoder, items), max_batch=max_batch,
                                      max_wait_ms=max_wait_ms, keepalive_ms=keepalive_ms, keepalive_text="안녕하세요",
                                      bulk_batch=bulk_batch)
 
     def encode(self, texts: Sequence[str]) -> NDArray[np.float32]:
         if not texts:
             return np.zeros((0, 0), dtype=np.float32)
-        return self._batcher(list(texts))
+        return self._batcher([str(t) for t in texts])
+
+    def encode_passages(self, texts: Sequence[str]) -> NDArray[np.float32]:
+        if not texts:
+            return np.zeros((0, 0), dtype=np.float32)
+        return self._batcher([Passage(t) for t in texts])
+
+    def judge(self) -> Judge | None:
+        """The cross-encoder judge running on this worker thread, or None without one."""
+        return _BatchedJudge(self, self.cross_encoder.threshold) if self.cross_encoder is not None else None
 
     def bulk(self) -> Embedder:
         """The same model in the low-priority lane: for training, so chat stays fast meanwhile."""
@@ -171,4 +238,22 @@ class _BulkLane:
     def encode(self, texts: Sequence[str]) -> NDArray[np.float32]:
         if not texts:
             return np.zeros((0, 0), dtype=np.float32)
-        return self._owner._batcher(list(texts), bulk=True)
+        return self._owner._batcher([str(t) for t in texts], bulk=True)
+
+    def encode_passages(self, texts: Sequence[str]) -> NDArray[np.float32]:
+        if not texts:
+            return np.zeros((0, 0), dtype=np.float32)
+        return self._owner._batcher([Passage(t) for t in texts], bulk=True)
+
+
+class _BatchedJudge:
+    name = CrossEncoderJudge.name
+
+    def __init__(self, owner: BatchedEmbedder, threshold: float) -> None:
+        self._owner, self.threshold = owner, threshold
+
+    def score(self, query: str, candidates: Sequence[Candidate]) -> NDArray[np.float64]:
+        if not candidates:
+            return np.zeros(0)
+        return np.asarray(self._owner._batcher([Pair(query, c.entry.judge_text) for c in candidates]),
+                          dtype=np.float64).ravel()

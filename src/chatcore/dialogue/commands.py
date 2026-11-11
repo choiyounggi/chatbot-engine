@@ -60,7 +60,17 @@ class Fallback:
     pass
 
 
-Command = StartScenario | SetSlot | CancelScenario | Restart | Escape | Clarify | RerunScenario | Fallback
+@dataclass(frozen=True)
+class AnswerKnowledge:
+    """Answer from the knowledge base (or, 답안 추천형, offer its best entries as buttons)."""
+
+    text: str
+    replies: tuple[tuple[str, str], ...] = ()  # (button label, the message it sends)
+    items: tuple[str, ...] = ()  # knowledge-base entry ids, for logs
+
+
+Command = (StartScenario | SetSlot | CancelScenario | Restart | Escape | Clarify | RerunScenario | Fallback
+           | AnswerKnowledge)
 
 
 class CommandFormatError(ValueError):
@@ -85,6 +95,8 @@ def to_dict(cmd: Command) -> dict[str, Any]:
             return {"rerun": scenario, "slot": slot, "value": value}
         case Fallback():
             return {"fallback": True}
+        case AnswerKnowledge(text, replies, items):
+            return {"knowledge": {"text": text, "replies": [list(r) for r in replies], "items": list(items)}}
 
 
 def _value(v: Any, where: str) -> SlotValue:
@@ -118,6 +130,17 @@ def from_dict(d: Mapping[str, Any]) -> Command:
         if not isinstance(intents, list) or len(intents) < 2:
             raise CommandFormatError(f"clarify needs a list of at least two intents: {d!r}")
         return Clarify(tuple(str(i) for i in intents))
+    if "knowledge" in d:
+        k = d["knowledge"]
+        replies = k.get("replies", []) if isinstance(k, Mapping) else None
+        if (not isinstance(k, Mapping) or not isinstance(k.get("text"), str) or not k["text"]
+                or not isinstance(replies, list)
+                or not all(isinstance(r, list) and len(r) == 2 and all(isinstance(x, str) and x for x in r)
+                           for r in replies)
+                or not isinstance(k.get("items", []), list)):
+            raise CommandFormatError(f"knowledge needs text, replies as [label, message] pairs and items: {d!r}")
+        return AnswerKnowledge(k["text"], tuple((r[0], r[1]) for r in replies),
+                               tuple(str(i) for i in k.get("items", [])))
     for key, cls in (("cancel", CancelScenario), ("restart", Restart), ("escape", Escape), ("fallback", Fallback)):
         if key in d:
             return cls()

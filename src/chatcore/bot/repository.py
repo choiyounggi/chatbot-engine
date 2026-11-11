@@ -42,6 +42,16 @@ class Deployment:
     number: int
     note: str
     deployed_at: str  # ISO 8601, UTC
+    kb_version: str | None = None  # None: no knowledge base for this deployment
+
+
+@dataclass(frozen=True)
+class KbVersionInfo:
+    version: str  # content hash, computed by the caller
+    number: int  # 1, 2, 3... per bot, in the order versions were added
+    created_at: str  # ISO 8601, UTC
+    faq: int  # number of FAQ entries
+    chunks: int  # number of document chunks
 
 
 @dataclass(frozen=True)
@@ -109,7 +119,24 @@ class BotRepository(Protocol):
     ) -> VersionInfo: ...
     def get_version(self, bot_id: str, version: str) -> dict[str, Any]: ...
     def versions(self, bot_id: str) -> list[VersionInfo]: ...  # newest first
-    def deploy(self, bot_id: str, version: str, note: str = "") -> None: ...
+    def kb_draft(self, bot_id: str) -> Draft | None: ...
+    def save_kb_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None) -> int:
+        """Same revision rules as save_draft: returns the new revision (1 on first save, +1 each
+        save); with expected_revision, raise RevisionConflict unless the stored KB draft is at that
+        revision (0 means: must not exist yet). No edit history for KB drafts."""
+        ...
+    def add_kb_version(
+        self, bot_id: str, version: str, document: dict[str, Any], faq: int, chunks: int
+    ) -> KbVersionInfo:
+        """Store a built knowledge-base version. Adding a version that already exists returns the
+        existing info unchanged (idempotent: same number, same created_at)."""
+        ...
+    def get_kb_version(self, bot_id: str, version: str) -> dict[str, Any]: ...  # raises VersionNotFound
+    def kb_versions(self, bot_id: str) -> list[KbVersionInfo]: ...  # newest first; [] for none
+    def deploy(self, bot_id: str, version: str, note: str = "", kb_version: str | None = None) -> None:
+        """As today, plus kb_version: None = no knowledge base; an unknown kb_version raises
+        VersionNotFound and records nothing."""
+        ...
     def deployments(self, bot_id: str) -> list[str]: ...  # newest first; [0] is live
     def history(self, bot_id: str) -> list[Deployment]: ...  # newest first
 
@@ -133,6 +160,8 @@ class InMemoryRepository:
     def __init__(self) -> None:
         self._drafts: dict[str, Draft] = {}
         self._versions: dict[str, dict[str, tuple[VersionInfo, dict[str, Any]]]] = {}
+        self._kb_drafts: dict[str, Draft] = {}
+        self._kb_versions: dict[str, dict[str, tuple[KbVersionInfo, dict[str, Any]]]] = {}
         self._deployments: dict[str, list[Deployment]] = {}
         self._edits: dict[str, list[Edit]] = {}  # newest first
         self._marks: dict[str, list[Mark]] = {}  # newest first
@@ -235,12 +264,51 @@ class InMemoryRepository:
             infos = [info for info, _ in self._versions.get(bot_id, {}).values()]
         return list(reversed(infos))  # insertion order = creation order
 
-    def deploy(self, bot_id: str, version: str, note: str = "") -> None:
+    def kb_draft(self, bot_id: str) -> Draft | None:
+        with self._lock:
+            draft = self._kb_drafts.get(bot_id)
+            return Draft(dict(draft.document), draft.revision) if draft is not None else None
+
+    def save_kb_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None) -> int:
+        with self._lock:
+            current = self._kb_drafts.get(bot_id)
+            at = current.revision if current is not None else 0
+            if expected_revision is not None and expected_revision != at:
+                raise RevisionConflict(at or None)
+            self._kb_drafts[bot_id] = Draft(dict(document), at + 1)
+            return at + 1
+
+    def add_kb_version(
+        self, bot_id: str, version: str, document: dict[str, Any], faq: int, chunks: int
+    ) -> KbVersionInfo:
+        with self._lock:
+            versions = self._kb_versions.setdefault(bot_id, {})
+            if version not in versions:
+                versions[version] = (KbVersionInfo(version, len(versions) + 1, _now(), faq, chunks), dict(document))
+            return versions[version][0]
+
+    def get_kb_version(self, bot_id: str, version: str) -> dict[str, Any]:
+        with self._lock:
+            try:
+                return dict(self._kb_versions[bot_id][version][1])
+            except KeyError as exc:
+                raise VersionNotFound(f"{bot_id}@{version}") from exc
+
+    def kb_versions(self, bot_id: str) -> list[KbVersionInfo]:
+        with self._lock:
+            infos = [info for info, _ in self._kb_versions.get(bot_id, {}).values()]
+        return list(reversed(infos))  # insertion order = creation order
+
+    def deploy(self, bot_id: str, version: str, note: str = "", kb_version: str | None = None) -> None:
         with self._lock:
             entry = self._versions.get(bot_id, {}).get(version)
             if entry is None:
                 raise VersionNotFound(f"{bot_id}@{version}")
-            self._deployments.setdefault(bot_id, []).insert(0, Deployment(version, entry[0].number, note, _now()))
+            if kb_version is not None and kb_version not in self._kb_versions.get(bot_id, {}):
+                raise VersionNotFound(f"{bot_id}@{kb_version}")
+            self._deployments.setdefault(bot_id, []).insert(
+                0, Deployment(version, entry[0].number, note, _now(), kb_version)
+            )
 
     def deployments(self, bot_id: str) -> list[str]:
         return [d.version for d in self.history(bot_id)]
@@ -316,6 +384,26 @@ CREATE TABLE IF NOT EXISTS bot_skill_errors (
     error   jsonb NOT NULL
 );
 CREATE INDEX IF NOT EXISTS bot_skill_errors_bot ON bot_skill_errors (bot_id, id DESC);
+CREATE TABLE IF NOT EXISTS bot_kb_drafts (
+    bot_id     text PRIMARY KEY,
+    document   jsonb NOT NULL,
+    revision   integer NOT NULL DEFAULT 1,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS bot_kb_versions (
+    bot_id     text NOT NULL,
+    version    text NOT NULL,
+    document   jsonb NOT NULL,
+    faq        integer NOT NULL,
+    chunks     integer NOT NULL,
+    number     integer,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    seq        bigserial,
+    PRIMARY KEY (bot_id, version)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS bot_kb_versions_number ON bot_kb_versions (bot_id, number);
+-- a deployment pairs a bot version with a knowledge-base version (or none)
+ALTER TABLE bot_deployments ADD COLUMN IF NOT EXISTS kb_version text;
 """
 
 
@@ -440,11 +528,81 @@ class PostgresRepository:
             ).fetchall()
         return [VersionInfo(str(v), int(n), _iso(c), f) for v, n, c, f in rows]
 
-    def deploy(self, bot_id: str, version: str, note: str = "") -> None:
+    def kb_draft(self, bot_id: str) -> Draft | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT document, revision FROM bot_kb_drafts WHERE bot_id = %s", (bot_id,)).fetchone()
+        return Draft(dict(row[0]), int(row[1])) if row else None
+
+    def save_kb_draft(self, bot_id: str, document: dict[str, Any], expected_revision: int | None = None) -> int:
+        with self._connect() as conn:
+            if expected_revision is None:
+                row = conn.execute(
+                    "INSERT INTO bot_kb_drafts (bot_id, document) VALUES (%s, %s) ON CONFLICT (bot_id) DO UPDATE "
+                    "SET document = EXCLUDED.document, revision = bot_kb_drafts.revision + 1, updated_at = now() "
+                    "RETURNING revision", (bot_id, Jsonb(document))).fetchone()
+            elif expected_revision == 0:
+                row = conn.execute(
+                    "INSERT INTO bot_kb_drafts (bot_id, document) VALUES (%s, %s) ON CONFLICT (bot_id) DO NOTHING "
+                    "RETURNING revision", (bot_id, Jsonb(document))).fetchone()
+            else:
+                row = conn.execute(
+                    "UPDATE bot_kb_drafts SET document = %s, revision = revision + 1, updated_at = now() "
+                    "WHERE bot_id = %s AND revision = %s RETURNING revision",
+                    (Jsonb(document), bot_id, expected_revision)).fetchone()
+            if row is None:
+                current = conn.execute("SELECT revision FROM bot_kb_drafts WHERE bot_id = %s", (bot_id,)).fetchone()
+                raise RevisionConflict(int(current[0]) if current else None)
+        return int(row[0])
+
+    def add_kb_version(
+        self, bot_id: str, version: str, document: dict[str, Any], faq: int, chunks: int
+    ) -> KbVersionInfo:
+        for attempt in range(3):  # two new versions of one bot at once can pick the same number
+            try:
+                with self._connect() as conn:
+                    conn.execute(
+                        "INSERT INTO bot_kb_versions (bot_id, version, document, faq, chunks, number) "
+                        "SELECT %s, %s, %s, %s, %s, COALESCE(MAX(number), 0) + 1 FROM bot_kb_versions "
+                        "WHERE bot_id = %s ON CONFLICT (bot_id, version) DO NOTHING",
+                        (bot_id, version, Jsonb(document), faq, chunks, bot_id),
+                    )
+                    row = conn.execute(
+                        "SELECT version, COALESCE(number, 0), created_at, faq, chunks FROM bot_kb_versions "
+                        "WHERE bot_id = %s AND version = %s", (bot_id, version)).fetchone()
+                break
+            except psycopg.errors.UniqueViolation:
+                if attempt == 2:
+                    raise
+        assert row is not None
+        return KbVersionInfo(str(row[0]), int(row[1]), _iso(row[2]), int(row[3]), int(row[4]))
+
+    def get_kb_version(self, bot_id: str, version: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT document FROM bot_kb_versions WHERE bot_id = %s AND version = %s",
+                               (bot_id, version)).fetchone()
+        if row is None:
+            raise VersionNotFound(f"{bot_id}@{version}")
+        return dict(row[0])
+
+    def kb_versions(self, bot_id: str) -> list[KbVersionInfo]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT version, COALESCE(number, 0), created_at, faq, chunks FROM bot_kb_versions "
+                "WHERE bot_id = %s ORDER BY seq DESC",
+                (bot_id,),
+            ).fetchall()
+        return [KbVersionInfo(str(v), int(n), _iso(c), int(f), int(ch)) for v, n, c, f, ch in rows]
+
+    def deploy(self, bot_id: str, version: str, note: str = "", kb_version: str | None = None) -> None:
         try:
-            with self._connect() as conn:
-                conn.execute("INSERT INTO bot_deployments (bot_id, version, note) VALUES (%s, %s, %s)",
-                             (bot_id, version, note))
+            with self._connect() as conn:  # one transaction: validate the KB version, then record together
+                if kb_version is not None:
+                    found = conn.execute("SELECT 1 FROM bot_kb_versions WHERE bot_id = %s AND version = %s",
+                                         (bot_id, kb_version)).fetchone()
+                    if found is None:
+                        raise VersionNotFound(f"{bot_id}@{kb_version}")
+                conn.execute("INSERT INTO bot_deployments (bot_id, version, note, kb_version) VALUES (%s, %s, %s, %s)",
+                             (bot_id, version, note, kb_version))
         except psycopg.errors.ForeignKeyViolation as exc:
             raise VersionNotFound(f"{bot_id}@{version}") from exc
 
@@ -457,10 +615,11 @@ class PostgresRepository:
     def history(self, bot_id: str) -> list[Deployment]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT d.version, COALESCE(v.number, 0), d.note, d.deployed_at FROM bot_deployments d "
+                "SELECT d.version, COALESCE(v.number, 0), d.note, d.deployed_at, d.kb_version FROM bot_deployments d "
                 "JOIN bot_versions v ON v.bot_id = d.bot_id AND v.version = d.version "
                 "WHERE d.bot_id = %s ORDER BY d.id DESC", (bot_id,)).fetchall()
-        return [Deployment(str(v), int(n), str(note), _iso(at)) for v, n, note, at in rows]
+        return [Deployment(str(v), int(n), str(note), _iso(at), str(kb) if kb is not None else None)
+                for v, n, note, at, kb in rows]
 
     def set_secret(self, bot_id: str, name: str, value: str) -> None:
         with self._connect() as conn:

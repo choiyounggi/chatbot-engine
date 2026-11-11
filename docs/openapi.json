@@ -561,6 +561,18 @@
       },
       "DeployIn": {
         "properties": {
+          "knowledge_version": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge Version"
+          },
           "note": {
             "default": "",
             "maxLength": 100,
@@ -584,6 +596,17 @@
           "deployed_at": {
             "title": "Deployed At",
             "type": "string"
+          },
+          "knowledge_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge Version"
           },
           "note": {
             "title": "Note",
@@ -767,6 +790,48 @@
         "title": "Escape",
         "type": "object"
       },
+      "ExtractOut": {
+        "properties": {
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "ExtractOut",
+        "type": "object"
+      },
+      "FaqEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "answer": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Answer",
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "question": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "question",
+          "answer"
+        ],
+        "title": "FaqEntry",
+        "type": "object"
+      },
       "FrameOut": {
         "properties": {
           "awaiting": {
@@ -921,6 +986,429 @@
         "title": "JobOut",
         "type": "object"
       },
+      "KbAnswerOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "replies": {
+            "items": {
+              "$ref": "#/components/schemas/KbReplyOut"
+            },
+            "title": "Replies",
+            "type": "array"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "replies",
+          "items"
+        ],
+        "title": "KbAnswerOut",
+        "type": "object"
+      },
+      "KbDocument": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 200000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "text"
+        ],
+        "title": "KbDocument",
+        "type": "object"
+      },
+      "KbEntriesOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/KbEntryOut"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bot",
+          "version",
+          "entries"
+        ],
+        "title": "KbEntriesOut",
+        "type": "object"
+      },
+      "KbEntryOut": {
+        "properties": {
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "faq",
+              "doc"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "body",
+          "source"
+        ],
+        "title": "KbEntryOut",
+        "type": "object"
+      },
+      "KbHitOut": {
+        "properties": {
+          "cosine": {
+            "title": "Cosine",
+            "type": "number"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "faq",
+              "doc"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "cosine",
+          "score",
+          "passed"
+        ],
+        "title": "KbHitOut",
+        "type": "object"
+      },
+      "KbReplyOut": {
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "message"
+        ],
+        "title": "KbReplyOut",
+        "type": "object"
+      },
+      "KbSavedOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "bot",
+          "version",
+          "revision",
+          "valid",
+          "errors"
+        ],
+        "title": "KbSavedOut",
+        "type": "object"
+      },
+      "KbSearchIn": {
+        "properties": {
+          "query": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "KbSearchIn",
+        "type": "object"
+      },
+      "KbSearchOut": {
+        "properties": {
+          "answer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/KbAnswerOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/KbHitOut"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "exact": {
+            "title": "Exact",
+            "type": "boolean"
+          },
+          "judge": {
+            "title": "Judge",
+            "type": "string"
+          },
+          "threshold": {
+            "title": "Threshold",
+            "type": "number"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bot",
+          "version",
+          "judge",
+          "threshold",
+          "exact",
+          "answer",
+          "candidates"
+        ],
+        "title": "KbSearchOut",
+        "type": "object"
+      },
+      "KbSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "default": "instant",
+            "enum": [
+              "instant",
+              "suggest"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "suggest_text": {
+            "default": "이런 답을 찾았어요. 골라 주세요.",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Suggest Text",
+            "type": "string"
+          }
+        },
+        "title": "KbSettings",
+        "type": "object"
+      },
+      "KbVersionOut": {
+        "properties": {
+          "chunks": {
+            "title": "Chunks",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "faq": {
+            "title": "Faq",
+            "type": "integer"
+          },
+          "live": {
+            "title": "Live",
+            "type": "boolean"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "number",
+          "created_at",
+          "faq",
+          "chunks",
+          "live"
+        ],
+        "title": "KbVersionOut",
+        "type": "object"
+      },
+      "KbVersionsOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "live": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Live"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/KbVersionOut"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bot",
+          "live",
+          "versions"
+        ],
+        "title": "KbVersionsOut",
+        "type": "object"
+      },
+      "KnowledgeBase": {
+        "additionalProperties": false,
+        "properties": {
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/KbDocument"
+            },
+            "maxItems": 200,
+            "title": "Documents",
+            "type": "array"
+          },
+          "faq": {
+            "items": {
+              "$ref": "#/components/schemas/FaqEntry"
+            },
+            "maxItems": 2000,
+            "title": "Faq",
+            "type": "array"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/KbSettings"
+          }
+        },
+        "title": "KnowledgeBase",
+        "type": "object"
+      },
       "Link": {
         "additionalProperties": false,
         "properties": {
@@ -1031,6 +1519,17 @@
           "bot": {
             "title": "Bot",
             "type": "string"
+          },
+          "knowledge_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge Version"
           },
           "live": {
             "title": "Live",
@@ -3106,6 +3605,473 @@
           }
         },
         "summary": "Edits"
+      }
+    },
+    "/v1/builder/bots/{bot}/knowledge/draft": {
+      "get": {
+        "operationId": "get_kb_draft_v1_builder_bots__bot__knowledge_draft_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeBase",
+                  "title": "Response Get Kb Draft V1 Builder Bots  Bot  Knowledge Draft Get"
+                }
+              }
+            },
+            "description": "the knowledge-base draft as stored (may be invalid); ETag header"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Kb Draft"
+      },
+      "put": {
+        "description": "Like the bot draft: saved even when invalid; If-Match needed over an existing one (428/412).",
+        "operationId": "put_kb_draft_v1_builder_bots__bot__knowledge_draft_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "if-match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KnowledgeBase",
+                "additionalProperties": true,
+                "title": "Document",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbSavedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Kb Draft"
+      }
+    },
+    "/v1/builder/bots/{bot}/knowledge/extract": {
+      "post": {
+        "description": "The text of an uploaded file (PDF, plain text or Markdown), to put in the draft as a document.",
+        "operationId": "extract_v1_builder_bots__bot__knowledge_extract_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/pdf": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "text/markdown": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "text/plain": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "description": "the file itself (at most 10 MB)",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtractOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Extract"
+      }
+    },
+    "/v1/builder/bots/{bot}/knowledge/search": {
+      "post": {
+        "description": "Search a built version as a conversation would (검색 테스트): candidates, scores, the answer.",
+        "operationId": "kb_search_v1_builder_bots__bot__knowledge_search_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KbSearchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbSearchOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Kb Search"
+      }
+    },
+    "/v1/builder/bots/{bot}/knowledge/versions": {
+      "get": {
+        "operationId": "kb_versions_v1_builder_bots__bot__knowledge_versions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbVersionsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Kb Versions"
+      },
+      "post": {
+        "description": "Index the knowledge-base draft as a version; follow it at /v1/builder/jobs/{id}.",
+        "operationId": "build_kb_v1_builder_bots__bot__knowledge_versions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Build Kb"
+      }
+    },
+    "/v1/builder/bots/{bot}/knowledge/versions/{version}/entries": {
+      "get": {
+        "description": "The FAQ entries and document chunks of a built version, as searched (조각 미리보기).",
+        "operationId": "kb_entries_v1_builder_bots__bot__knowledge_versions__version__entries_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{12}$",
+              "title": "Version",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbEntriesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Kb Entries"
       }
     },
     "/v1/builder/bots/{bot}/misunderstood": {

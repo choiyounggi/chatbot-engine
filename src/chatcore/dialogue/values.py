@@ -243,12 +243,21 @@ class ActionRegistry:
             raise ValueError("timeout must be positive")
         self._actions[name] = _Registered(fn, args_model, timeout)
 
-    def extended(self, extra: dict[str, tuple[ActionFn, float]]) -> ActionRegistry:
+    def extended(self, extra: dict[str, tuple[ActionFn, float]],
+                 replace: dict[str, tuple[ActionFn, float | None]] | None = None) -> ActionRegistry:
         """A registry with these actions (fn, timeout seconds) added to this one's, sharing its thread pool
-        (a bot's HTTP skills on top of the built-in actions)."""
+        (a bot's HTTP skills on top of the built-in actions). `replace`: built-in actions this bot runs
+        differently (fn, timeout or None to keep the built-in's; e.g. `knowledge` with the bot's knowledge
+        base, or the bot's own skill of that name — then no argument model applies)."""
         child = ActionRegistry(self.timeout)
         child._actions = dict(self._actions)
         child._pool_owner = self
+        for name, (fn, timeout) in (replace or {}).items():
+            if name not in child._actions:
+                raise ValueError(f"cannot replace unknown action {name!r}")
+            old = child._actions[name]
+            child._actions[name] = (_Registered(fn, old.args_model, old.timeout) if timeout is None
+                                    else _Registered(fn, None, timeout))
         for name, (fn, timeout) in extra.items():
             child.register(name, fn, timeout=timeout)
         return child

@@ -45,10 +45,12 @@ from chatcore.host import (
     Host,
     NoDraft,
     NoEarlierDeployment,
+    NoKnowledgeBase,
     NotTrained,
     unique_sentences,
 )
 from chatcore.jobs import JobFailed, JobRunner
+from chatcore.knowledge import KnowledgeBase, KnowledgeError, extract_text
 from chatcore.nlu.train import TrainingError
 from chatcore.runtime import BotRuntime
 from chatcore.store.base import SessionBusy
@@ -111,6 +113,8 @@ class TurnOut(BaseModel):
 class DeployIn(BaseModel):
     version: str = Field(pattern=r"^[0-9a-f]{12}$")
     note: str = Field("", max_length=100)  # what changed, shown in the deploy history
+    # omitted: keep the knowledge base that is live now; null: none
+    knowledge_version: str | None = Field(None, pattern=r"^[0-9a-f]{12}$")
 
 
 class ParseOut(BaseModel):
@@ -159,7 +163,7 @@ class DraftSavedOut(BaseModel):
 
 class JobOut(BaseModel):
     id: str
-    kind: str  # "version" | "test_build"
+    kind: str  # "version" | "test_build" | "knowledge"
     bot: str
     status: Literal["queued", "running", "done", "failed"]
     result: dict[str, Any] | None  # version: {version, number, macro_f1, ...}; test_build: {build}
@@ -204,6 +208,7 @@ class DeploymentOut(BaseModel):
     number: int
     note: str
     deployed_at: str
+    knowledge_version: str | None = None
 
 
 class VersionsOut(BaseModel):
@@ -213,9 +218,86 @@ class VersionsOut(BaseModel):
     history: list[DeploymentOut]
 
 
+class KbSavedOut(BaseModel):
+    bot: str
+    version: str | None  # None when the knowledge base is invalid
+    revision: int
+    valid: bool
+    errors: list[str]
+
+
+class KbVersionOut(BaseModel):
+    version: str
+    number: int
+    created_at: str
+    faq: int
+    chunks: int
+    live: bool
+
+
+class KbVersionsOut(BaseModel):
+    bot: str
+    live: str | None  # the knowledge-base version deployed now
+    versions: list[KbVersionOut]
+
+
+class KbEntryOut(BaseModel):
+    id: str
+    kind: Literal["faq", "doc"]
+    title: str  # FAQ question, or "document - section"
+    body: str
+    source: str  # the document's name (chunks)
+
+
+class KbEntriesOut(BaseModel):
+    bot: str
+    version: str
+    entries: list[KbEntryOut]
+
+
+class KbSearchIn(BaseModel):
+    query: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
+    version: str | None = Field(None, pattern=r"^[0-9a-f]{12}$")  # default: the newest built version
+
+
+class KbHitOut(BaseModel):
+    id: str
+    kind: Literal["faq", "doc"]
+    title: str
+    cosine: float
+    score: float  # the judge's
+    passed: bool
+
+
+class KbReplyOut(BaseModel):
+    label: str
+    message: str
+
+
+class KbAnswerOut(BaseModel):
+    text: str
+    replies: list[KbReplyOut]
+    items: list[str]
+
+
+class KbSearchOut(BaseModel):
+    bot: str
+    version: str
+    judge: str
+    threshold: float
+    exact: bool  # the query was an entry's title
+    answer: KbAnswerOut | None  # what a conversation would say (None: nothing passed)
+    candidates: list[KbHitOut]  # best first
+
+
+class ExtractOut(BaseModel):
+    text: str
+
+
 class LiveOut(BaseModel):
     bot: str
     live: str
+    knowledge_version: str | None = None  # the knowledge base deployed with it (None: none)
 
 
 class ChangeOut(BaseModel):
@@ -341,6 +423,17 @@ DRAFT_RESPONSE: dict[int | str, dict[str, Any]] = {
     200: {"model": BotDocument, "description": "the draft as stored (may be invalid); ETag header"}}
 DRAFT_BODY: dict[str, Any] = {
     "requestBody": {"required": True, "content": {"application/json": {"schema": DOCUMENT_SCHEMA}}}}
+
+KB_RESPONSE: dict[int | str, dict[str, Any]] = {
+    200: {"model": KnowledgeBase, "description": "the knowledge-base draft as stored (may be invalid); ETag header"}}
+KB_BODY: dict[str, Any] = {
+    "requestBody": {"required": True,
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/KnowledgeBase"}}}}}
+EXTRACT_BODY: dict[str, Any] = {
+    "requestBody": {"required": True, "description": "the file itself (at most 10 MB)",
+                    "content": {t: {"schema": {"type": "string", "format": "binary"}}
+                                for t in ("application/pdf", "text/plain", "text/markdown")}}}
+MAX_UPLOAD = 10 * 1024 * 1024
 
 MISUNDERSTOOD_RULES = ("fallback", "clarify")
 
@@ -702,6 +795,9 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
                 raise JobFailed("training", {"detail": str(exc)}) from exc
             except NoDraft as exc:
                 raise JobFailed("no_draft", {"detail": f"{bot!r} has no draft"}) from exc
+            except KnowledgeError as exc:  # the knowledge-base draft goes into the test build too
+                raise JobFailed("invalid_knowledge", {"detail": "the knowledge base is invalid",
+                                                      "errors": exc.problems}) from exc
 
         return jobs.submit("test_build", bot, run, urgent=True).to_dict()  # someone waits at the test chat
 
@@ -782,22 +878,135 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
                 "versions": [{"version": v.version, "number": v.number, "created_at": v.created_at,
                               "macro_f1": v.macro_f1, "live": v.version == live}
                              for v in host.repository.versions(bot)],
-                "history": [{"version": d.version, "number": d.number, "note": d.note, "deployed_at": d.deployed_at}
-                            for d in history]}
+                "history": [{"version": d.version, "number": d.number, "note": d.note, "deployed_at": d.deployed_at,
+                             "knowledge_version": d.kb_version} for d in history]}
+
+    # ------------------------------------------------------------ knowledge base (지식베이스)
+
+    @app.get("/v1/builder/bots/{bot}/knowledge/draft", dependencies=deps, responses=KB_RESPONSE)
+    def get_kb_draft(response: Response, bot: str = BOT_ID) -> Any:
+        known(bot)
+        draft = host.repository.kb_draft(bot)
+        if draft is None:
+            raise HTTPException(404, f"{bot!r} has no knowledge base")
+        response.headers["ETag"] = etag(draft.revision)
+        return draft.document
+
+    @app.put("/v1/builder/bots/{bot}/knowledge/draft", dependencies=deps, response_model=KbSavedOut,
+             openapi_extra=KB_BODY)
+    def put_kb_draft(document: dict[str, Any], response: Response, bot: str = BOT_ID,
+                     if_match: str | None = Header(default=None)) -> Any:
+        """Like the bot draft: saved even when invalid; If-Match needed over an existing one (428/412)."""
+        known(bot)
+        expected = parse_if_match(if_match)
+        if expected is None:
+            if host.repository.kb_draft(bot) is not None:
+                raise HTTPException(428, "send the knowledge base's ETag in If-Match")
+            expected = 0
+        try:
+            check = host.save_kb_draft(bot, document, expected)
+        except RevisionConflict as exc:
+            return JSONResponse({"detail": "the knowledge base was changed elsewhere; reload it",
+                                 "revision": exc.current}, status_code=412)
+        response.headers["ETag"] = etag(check.revision)
+        return {"bot": bot, "version": check.version, "revision": check.revision, "valid": not check.errors,
+                "errors": check.errors}
+
+    @app.post("/v1/builder/bots/{bot}/knowledge/extract", dependencies=deps, response_model=ExtractOut,
+              openapi_extra=EXTRACT_BODY)
+    async def extract(request: Request, bot: str = BOT_ID) -> Any:
+        """The text of an uploaded file (PDF, plain text or Markdown), to put in the draft as a document."""
+        known(bot)
+        kind = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        body = bytearray()
+        async for part in request.stream():
+            body += part
+            if len(body) > MAX_UPLOAD:
+                raise HTTPException(413, f"the file is over {MAX_UPLOAD // (1024 * 1024)} MB")
+        if not body:
+            raise HTTPException(422, "the file is empty")
+        try:
+            text = await asyncio.to_thread(extract_text, bytes(body), kind)
+        except KnowledgeError as exc:
+            raise HTTPException(422, exc.problems) from exc
+        return {"text": text}
+
+    @app.post("/v1/builder/bots/{bot}/knowledge/versions", dependencies=deps, status_code=202, response_model=JobOut)
+    def build_kb(bot: str = BOT_ID) -> Any:
+        """Index the knowledge-base draft as a version; follow it at /v1/builder/jobs/{id}."""
+        known(bot)
+
+        def run() -> dict[str, Any]:
+            try:
+                info = host.build_kb(bot)
+            except KnowledgeError as exc:
+                raise JobFailed("invalid_draft", {"detail": "the knowledge base is invalid",
+                                                  "errors": exc.problems}) from exc
+            except NoKnowledgeBase as exc:
+                raise JobFailed("no_draft", {"detail": f"{bot!r} has no knowledge base"}) from exc
+            return {"version": info.version, "number": info.number, "faq": info.faq, "chunks": info.chunks}
+
+        return jobs.submit("knowledge", bot, run).to_dict()
+
+    @app.get("/v1/builder/bots/{bot}/knowledge/versions", dependencies=deps, response_model=KbVersionsOut)
+    def kb_versions(bot: str = BOT_ID) -> Any:
+        known(bot)
+        history = host.repository.history(bot)
+        live = history[0].kb_version if history else None
+        return {"bot": bot, "live": live,
+                "versions": [{**asdict(v), "live": v.version == live} for v in host.repository.kb_versions(bot)]}
+
+    @app.get("/v1/builder/bots/{bot}/knowledge/versions/{version}/entries", dependencies=deps,
+             response_model=KbEntriesOut)
+    def kb_entries(bot: str = BOT_ID, version: str = PathParam(pattern=r"^[0-9a-f]{12}$")) -> Any:
+        """The FAQ entries and document chunks of a built version, as searched (조각 미리보기)."""
+        known(bot)
+        try:
+            index = host.kb_index(bot, version)
+        except VersionNotFound as exc:
+            raise HTTPException(404, f"unknown knowledge-base version: {version}") from exc
+        except KnowledgeError as exc:  # stored, but cannot be indexed here
+            raise unusable_kb(exc) from exc
+        return {"bot": bot, "version": version, "entries": [asdict(e) for e in [*index.faq, *index.chunks]]}
+
+    @app.post("/v1/builder/bots/{bot}/knowledge/search", dependencies=deps, response_model=KbSearchOut)
+    def kb_search(body: KbSearchIn, bot: str = BOT_ID) -> Any:
+        """Search a built version as a conversation would (검색 테스트): candidates, scores, the answer."""
+        known(bot)
+        try:
+            version, result, answer = host.search_kb(bot, body.query, body.version)
+        except NoKnowledgeBase as exc:
+            raise HTTPException(409, "build the knowledge base first") from exc
+        except VersionNotFound as exc:
+            raise HTTPException(404, f"unknown knowledge-base version: {body.version}") from exc
+        except KnowledgeError as exc:
+            raise unusable_kb(exc) from exc
+        passed = {h.entry.id for h in result.answers}
+        return {"bot": bot, "version": version, "judge": host.judge.name, "threshold": host.judge.threshold,
+                "exact": result.exact,
+                "answer": None if answer is None else {
+                    "text": answer.text, "items": list(answer.items),
+                    "replies": [{"label": label, "message": message} for label, message in answer.replies]},
+                "candidates": [{"id": h.entry.id, "kind": h.entry.kind, "title": h.entry.title, "cosine": h.cosine,
+                                "score": h.score, "passed": h.entry.id in passed} for h in result.candidates]}
 
     @app.post("/v1/builder/bots/{bot}/deploy", dependencies=deps, response_model=LiveOut)
     def deploy(body: DeployIn, bot: str = BOT_ID) -> Any:
         known(bot)
+        knowledge = body.knowledge_version
+        if "knowledge_version" not in body.model_fields_set:  # a client that knows nothing of knowledge bases
+            live = host.live(bot)
+            knowledge = live[1] if live is not None else None
         with deploy_errors(body.version):
-            host.deploy(bot, body.version, body.note.strip())
-        return {"bot": bot, "live": body.version}
+            host.deploy(bot, body.version, body.note.strip(), knowledge)
+        return {"bot": bot, "live": body.version, "knowledge_version": knowledge}
 
     @app.post("/v1/builder/bots/{bot}/rollback", dependencies=deps, response_model=LiveOut)
     def rollback(bot: str = BOT_ID) -> Any:
         known(bot)
         with deploy_errors("the previous version"):
-            version = host.rollback(bot)
-        return {"bot": bot, "live": version}
+            previous = host.rollback(bot)
+        return {"bot": bot, "live": previous.version, "knowledge_version": previous.kb_version}
 
 
 @contextmanager
@@ -806,12 +1015,18 @@ def deploy_errors(what: str) -> Iterator[None]:
         yield
     except NoEarlierDeployment as exc:
         raise HTTPException(409, "there is no earlier deployment to go back to") from exc
-    except VersionNotFound as exc:
-        raise HTTPException(404, f"unknown version: {what}") from exc
+    except VersionNotFound as exc:  # the bot version or the knowledge-base version ("bot@version")
+        raise HTTPException(404, f"unknown version: {exc}") from exc
     except NotTrained as exc:
         raise HTTPException(409, f"{what} has no trained model; train it first") from exc
     except BotError as exc:  # stored, but no longer valid here (e.g. an action was removed)
         raise HTTPException(409, {"detail": f"{what} cannot run here", "errors": exc.problems}) from exc
+    except KnowledgeError as exc:  # a stored knowledge base that cannot be indexed here
+        raise unusable_kb(exc) from exc
+
+
+def unusable_kb(exc: KnowledgeError) -> HTTPException:
+    return HTTPException(409, {"detail": "the knowledge base cannot be used here", "errors": exc.problems})
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts a server
@@ -838,6 +1053,11 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
     parser.add_argument("--skill-allow-private", action="store_true",
                         help="let HTTP skills call internal addresses (127.0.0.1, 10.x, 169.254.x ...): development "
                              "and tests only — on a server this lets anyone with the admin token reach its network")
+    parser.add_argument("--kb-judge", choices=("cross-encoder", "cosine"), default=None,
+                        help="what decides whether a knowledge-base entry answers: the cross-encoder (default; "
+                             "downloads it once) or the cosine (default with --embedder hashing)")
+    parser.add_argument("--kb-threshold", type=float, default=None,
+                        help="the judge's bar (default: 0.11 cross-encoder, 0.5 cosine; docs/benchmarks/kb.md)")
     parser.add_argument("--keep-warm-ms", type=float, default=None,
                         help="when idle, run the model this often so the first request after a pause stays fast "
                              "(keeps the GPU busy; see docs/benchmarks/api_latency.md)")
@@ -850,9 +1070,19 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
         inner: Embedder = HashingEmbedder()
     else:
         inner = SentenceEmbedder()
-    embedder = BatchedEmbedder(inner, keepalive_ms=args.keep_warm_ms)
+    judge_kind = args.kb_judge or ("cosine" if args.embedder == "hashing" else "cross-encoder")
+    cross_encoder = None
+    if judge_kind == "cross-encoder":
+        from chatcore.knowledge import CROSS_ENCODER_THRESHOLD, CrossEncoderJudge
+
+        cross_encoder = CrossEncoderJudge(args.kb_threshold if args.kb_threshold is not None
+                                          else CROSS_ENCODER_THRESHOLD)
+    embedder = BatchedEmbedder(inner, keepalive_ms=args.keep_warm_ms, cross_encoder=cross_encoder)
+    from chatcore.knowledge import COSINE_THRESHOLD, CosineJudge
+
+    judge = embedder.judge() or CosineJudge(args.kb_threshold if args.kb_threshold is not None else COSINE_THRESHOLD)
     host = BotHost(default_repository(), default_store(), embedder, args.artifacts, bulk_embedder=embedder.bulk(),
-                   min_f1=args.min_f1, skill_allow_private=args.skill_allow_private)
+                   min_f1=args.min_f1, skill_allow_private=args.skill_allow_private, judge=judge)
     if args.skill_allow_private:
         log.warning("--skill-allow-private: HTTP skills may call internal addresses; never use this on a shared server")
     host.start()
