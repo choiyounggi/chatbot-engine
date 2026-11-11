@@ -72,6 +72,244 @@
         "title": "AddExamplesIn",
         "type": "object"
       },
+      "AnalyticsBlockOut": {
+        "properties": {
+          "block": {
+            "title": "Block",
+            "type": "string"
+          },
+          "calls": {
+            "title": "Calls",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "block",
+          "label",
+          "calls"
+        ],
+        "title": "AnalyticsBlockOut",
+        "type": "object"
+      },
+      "AnalyticsDayOut": {
+        "properties": {
+          "block_calls": {
+            "title": "Block Calls",
+            "type": "integer"
+          },
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "fallbacks": {
+            "title": "Fallbacks",
+            "type": "integer"
+          },
+          "knowledge_answers": {
+            "title": "Knowledge Answers",
+            "type": "integer"
+          },
+          "messages": {
+            "title": "Messages",
+            "type": "integer"
+          },
+          "new_users": {
+            "title": "New Users",
+            "type": "integer"
+          },
+          "returning_users": {
+            "title": "Returning Users",
+            "type": "integer"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "users": {
+            "title": "Users",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "date",
+          "users",
+          "new_users",
+          "returning_users",
+          "sessions",
+          "messages",
+          "block_calls",
+          "fallbacks",
+          "knowledge_answers"
+        ],
+        "title": "AnalyticsDayOut",
+        "type": "object"
+      },
+      "AnalyticsOut": {
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsBlockOut"
+            },
+            "title": "Blocks",
+            "type": "array"
+          },
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "days": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsDayOut"
+            },
+            "title": "Days",
+            "type": "array"
+          },
+          "from": {
+            "format": "date",
+            "title": "From",
+            "type": "string"
+          },
+          "retention": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsRetentionOut"
+            },
+            "title": "Retention",
+            "type": "array"
+          },
+          "timezone": {
+            "default": "Asia/Seoul",
+            "title": "Timezone",
+            "type": "string"
+          },
+          "to": {
+            "format": "date",
+            "title": "To",
+            "type": "string"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/AnalyticsTotalsOut"
+          }
+        },
+        "required": [
+          "bot",
+          "from",
+          "to",
+          "totals",
+          "days",
+          "blocks",
+          "retention"
+        ],
+        "title": "AnalyticsOut",
+        "type": "object"
+      },
+      "AnalyticsRetentionOut": {
+        "properties": {
+          "d1": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "D1"
+          },
+          "d7": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "D7"
+          },
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "new_users": {
+            "title": "New Users",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "date",
+          "new_users",
+          "d1",
+          "d7"
+        ],
+        "title": "AnalyticsRetentionOut",
+        "type": "object"
+      },
+      "AnalyticsTotalsOut": {
+        "properties": {
+          "block_calls": {
+            "title": "Block Calls",
+            "type": "integer"
+          },
+          "fallbacks": {
+            "title": "Fallbacks",
+            "type": "integer"
+          },
+          "knowledge_answers": {
+            "title": "Knowledge Answers",
+            "type": "integer"
+          },
+          "knowledge_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge Rate"
+          },
+          "messages": {
+            "title": "Messages",
+            "type": "integer"
+          },
+          "new_users": {
+            "title": "New Users",
+            "type": "integer"
+          },
+          "returning_users": {
+            "title": "Returning Users",
+            "type": "integer"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "users": {
+            "title": "Users",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "users",
+          "new_users",
+          "returning_users",
+          "sessions",
+          "messages",
+          "block_calls",
+          "fallbacks",
+          "knowledge_answers",
+          "knowledge_rate"
+        ],
+        "title": "AnalyticsTotalsOut",
+        "type": "object"
+      },
       "BasicCard": {
         "additionalProperties": false,
         "properties": {
@@ -116,6 +354,88 @@
           }
         },
         "title": "BasicCard",
+        "type": "object"
+      },
+      "BotCreateIn": {
+        "properties": {
+          "copy_from": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copy From"
+          },
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label"
+        ],
+        "title": "BotCreateIn",
+        "type": "object"
+      },
+      "BotCreatedOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bot",
+          "revision"
+        ],
+        "title": "BotCreatedOut",
+        "type": "object"
+      },
+      "BotDeletedOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "purge_after": {
+            "title": "Purge After",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bot",
+          "purge_after"
+        ],
+        "title": "BotDeletedOut",
+        "type": "object"
+      },
+      "BotDeletionOut": {
+        "properties": {
+          "purge_after": {
+            "title": "Purge After",
+            "type": "string"
+          }
+        },
+        "required": [
+          "purge_after"
+        ],
+        "title": "BotDeletionOut",
         "type": "object"
       },
       "BotDocument": {
@@ -252,8 +572,43 @@
         "title": "BotListOut",
         "type": "object"
       },
+      "BotRestoredOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "live": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Live"
+          }
+        },
+        "required": [
+          "bot",
+          "live"
+        ],
+        "title": "BotRestoredOut",
+        "type": "object"
+      },
       "BotSummaryOut": {
         "properties": {
+          "deletion": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BotDeletionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "draft_revision": {
             "anyOf": [
               {
@@ -3329,6 +3684,207 @@
           }
         },
         "summary": "List Bots"
+      },
+      "post": {
+        "description": "A new draft (not deployed): empty, or (with copy_from) a copy of another bot's draft.",
+        "operationId": "create_bot_v1_builder_bots_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BotCreateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BotCreatedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Bot"
+      }
+    },
+    "/v1/builder/bots/{bot}": {
+      "delete": {
+        "description": "Request bot's deletion: out of service now (chat 404s), purged after 7 days unless restored.",
+        "operationId": "delete_bot_v1_builder_bots__bot__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BotDeletedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Bot"
+      }
+    },
+    "/v1/builder/bots/{bot}/analytics": {
+      "get": {
+        "description": "Period totals, a daily table, block-call ranking and new-user retention (분석, E12).\nDefault period: the 7 days ending today (KST). Only `{bot}:` sessions count.",
+        "operationId": "analytics_report_v1_builder_bots__bot__analytics_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Analytics Report"
       }
     },
     "/v1/builder/bots/{bot}/deploy": {
@@ -4139,6 +4695,63 @@
           }
         },
         "summary": "Misunderstood"
+      }
+    },
+    "/v1/builder/bots/{bot}/restore": {
+      "post": {
+        "description": "Cancel a pending deletion and serve the bot's deployed pair again.",
+        "operationId": "restore_bot_v1_builder_bots__bot__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BotRestoredOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Bot"
       }
     },
     "/v1/builder/bots/{bot}/rollback": {

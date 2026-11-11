@@ -140,6 +140,16 @@ class PostgresStore:
             out[str(sid)] = at.astimezone(dt.UTC)
         return out
 
+    def delete_sessions(self, prefix: str) -> int:
+        pattern = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._connect() as conn:  # one transaction: count, then delete the same rows
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT session_id) FROM chat_events WHERE session_id LIKE %s", (pattern,)
+            ).fetchone()
+            conn.execute("DELETE FROM chat_events WHERE session_id LIKE %s", (pattern,))
+        count: Any = row[0] if row is not None else 0
+        return int(count)
+
     @staticmethod
     def _load(conn: psycopg.Connection[tuple[object, ...]], session_id: str) -> list[Event]:
         rows = conn.execute(
