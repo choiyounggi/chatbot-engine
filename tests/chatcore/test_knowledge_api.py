@@ -429,9 +429,10 @@ def test_concurrent_cold_loads_of_one_index_build_it_once(host, client, monkeypa
         return real(document, embedder)
 
     monkeypatch.setattr(KnowledgeIndex, "build", staticmethod(slow))
-    threads = [threading.Thread(target=host.kb_index, args=("sample", version)) for _ in range(4)]
+    got = []
+    threads = [threading.Thread(target=lambda: got.append(host.kb_index("sample", version))) for _ in range(4)]
     for t in threads:
         t.start()
     for t in threads:
         t.join(5)
-    assert len(builds) == 1
+    assert len(builds) == 1 and len(got) == 4 and all(g is got[0] for g in got)  # one index, shared

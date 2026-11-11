@@ -443,3 +443,13 @@ def test_saving_leaves_no_temporary_files(index, tmp_path) -> None:
     index.save(tmp_path / "kb")
     index.save(tmp_path / "kb")  # over an existing index
     assert sorted(p.name for p in (tmp_path / "kb").iterdir()) == ["index.json", "vectors.npz"]
+
+
+def test_two_documents_with_the_same_name_and_section_get_different_titles() -> None:
+    doc = {"documents": [{"id": "a", "name": "정책", "text": "# 정책\n\n## 환불\n\n첫 문서의 환불 문장입니다."},
+                         {"id": "b", "name": "정책", "text": "# 정책\n\n## 환불\n\n둘째 문서의 환불 문장입니다."}]}
+    idx = KnowledgeIndex.build(doc, EMB)
+    assert [c.title for c in idx.chunks] == ["정책 - 환불 · a", "정책 - 환불 · b"]
+    assert [c.heading for c in idx.chunks] == ["정책 - 환불", "정책 - 환불"]  # what is embedded stays as measured
+    for c in idx.chunks:
+        assert idx.search(c.title, vec(c.title), CosineJudge(0.99)).answers[0].entry.id == c.id
