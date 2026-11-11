@@ -17,8 +17,10 @@ import hashlib
 import http.client
 import ipaddress
 import json
+import logging
 import socket
 import ssl
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable, Mapping
@@ -28,6 +30,7 @@ from typing import Any
 from chatcore.bot.schema import SECRET_REF, Skill
 from chatcore.dialogue.values import CURRENT_TURN, ActionError, ActionFn
 
+log = logging.getLogger(__name__)
 MAX_RESPONSE = 64 * 1024  # bytes of a skill's answer
 ERROR_LOG_SIZE = 100  # per bot, like Kakao's 오류 내역
 FAILURE_KINDS = ("blocked", "network", "timeout", "http_status", "invalid_response", "too_large", "secret_missing")
@@ -72,8 +75,8 @@ def _public(address: str) -> bool:
                 or ip.is_unspecified or not ip.is_global)
 
 
-def resolve(host: str, port: int, allow_private: bool) -> str:
-    """The address to connect to: every address the host resolves to must be public (unless allowed)."""
+def resolve(host: str, port: int, allow_private: bool) -> list[str]:
+    """The addresses to connect to, in order: every address the host resolves to must be public (unless allowed)."""
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except (OSError, UnicodeError) as exc:
@@ -81,29 +84,47 @@ def resolve(host: str, port: int, allow_private: bool) -> str:
     addresses = [str(info[4][0]) for info in infos]
     if not addresses:
         raise SkillFailure("network", f"cannot resolve {host}")
-    if not allow_private and not all(_public(a) for a in addresses):
+    try:
+        internal = [a for a in addresses if not _public(a.split("%")[0])]
+    except ValueError as exc:  # not an IP address at all
+        raise SkillFailure("network", f"cannot resolve {host}") from exc
+    if internal and not allow_private:
         raise SkillFailure("blocked", f"{host} is an internal address")
-    return addresses[0]
+    return list(dict.fromkeys(addresses))
+
+
+def _connect(addresses: list[str], port: int, timeout: float | None) -> socket.socket:
+    """A connection to the first checked address that answers (no new DNS lookup)."""
+    last: OSError | None = None
+    for address in addresses:
+        try:
+            return socket.create_connection((address, port), timeout)
+        except OSError as exc:
+            last = exc
+    assert last is not None
+    raise last
 
 
 class _PinnedHTTP(http.client.HTTPConnection):
-    def __init__(self, host: str, port: int, address: str, timeout: float) -> None:
+    def __init__(self, host: str, port: int, addresses: list[str], timeout: float) -> None:
         super().__init__(host, port, timeout=timeout)
-        self._address = address
+        self._addresses = addresses
+        self.raw: socket.socket | None = None  # kept after http.client lets go of self.sock (deadline shutdown)
 
     def connect(self) -> None:
-        self.sock = socket.create_connection((self._address, self.port), self.timeout)
+        self.sock = self.raw = _connect(self._addresses, self.port, self.timeout)
 
 
 class _PinnedHTTPS(http.client.HTTPSConnection):
-    def __init__(self, host: str, port: int, address: str, timeout: float) -> None:
+    def __init__(self, host: str, port: int, addresses: list[str], timeout: float) -> None:
         self._tls = ssl.create_default_context()
         super().__init__(host, port, timeout=timeout, context=self._tls)
-        self._address = address
+        self._addresses = addresses
+        self.raw: socket.socket | None = None
 
     def connect(self) -> None:
-        sock = socket.create_connection((self._address, self.port), self.timeout)
-        self.sock = self._tls.wrap_socket(sock, server_hostname=self.host)  # verifies the real host name
+        self.raw = _connect(self._addresses, self.port, self.timeout)
+        self.sock = self._tls.wrap_socket(self.raw, server_hostname=self.host)  # verifies the real host name
 
 
 Transport = Callable[[str, dict[str, str], bytes, float, bool], tuple[int, bytes]]
@@ -114,24 +135,47 @@ def post_json(url: str, headers: dict[str, str], body: bytes, timeout: float, al
     parts = urllib.parse.urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise SkillFailure("invalid_response", "the skill URL must be http or https with a host")
-    port = parts.port or (443 if parts.scheme == "https" else 80)
-    address = resolve(parts.hostname, port, allow_private)
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError as exc:
+        raise SkillFailure("network", "the skill URL has a bad port") from exc
+    addresses = resolve(parts.hostname, port, allow_private)
     conn_type = _PinnedHTTPS if parts.scheme == "https" else _PinnedHTTP
-    conn = conn_type(parts.hostname, port, address, timeout)
+    conn = conn_type(parts.hostname, port, addresses, timeout)
     path = parts.path or "/"
     if parts.query:
         path += "?" + parts.query
+    # one deadline for the whole call: socket timeouts alone apply per read, and a server sending a
+    # byte at a time would never trip them
+    expired = threading.Event()
+
+    def stop() -> None:
+        expired.set()
+        sock = conn.raw  # conn.sock may already be gone (an HTTP/1.0 answer) while the body is still read
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    deadline = threading.Timer(timeout, stop)
+    deadline.daemon = True
+    deadline.start()
     try:
         conn.request("POST", path, body=body, headers={"Content-Type": "application/json; charset=utf-8",
                                                        "Accept": "application/json", "User-Agent": "chatcore-skill/1",
                                                        **headers})
         response = conn.getresponse()
-        return response.status, response.read(MAX_RESPONSE + 1)
-    except TimeoutError as exc:
-        raise SkillFailure("timeout", f"no answer within {timeout:g}s") from exc
-    except (OSError, http.client.HTTPException) as exc:
+        raw = response.read(MAX_RESPONSE + 1)
+        if expired.is_set():
+            raise TimeoutError
+        return response.status, raw
+    except (TimeoutError, OSError, http.client.HTTPException, ValueError) as exc:
+        if expired.is_set() or isinstance(exc, TimeoutError):
+            raise SkillFailure("timeout", f"no full answer within {timeout:g}s") from exc
         raise SkillFailure("network", type(exc).__name__) from exc
     finally:
+        deadline.cancel()
         conn.close()
 
 
@@ -167,11 +211,15 @@ class SkillClient:
             }, ensure_ascii=False).encode("utf-8")
             status, raw = self.transport(url, headers, body, skill.timeout_ms / 1000, self.allow_private)
             result = self._result(status, raw)
-        except SkillFailure as exc:
-            error = SkillError(dt.datetime.now(dt.UTC).isoformat(timespec="seconds"), skill_id, exc.kind,
-                               exc.status if exc.status is not None else status, exc.detail[:200],
+        except Exception as exc:  # never raises: any failure is an outcome and an error-log entry
+            failure = exc if isinstance(exc, SkillFailure) else SkillFailure("network", type(exc).__name__)
+            error = SkillError(dt.datetime.now(dt.UTC).isoformat(timespec="seconds"), skill_id, failure.kind,
+                               failure.status if failure.status is not None else status, failure.detail[:200],
                                self._ms(start), test)
-            self.log(error)
+            try:
+                self.log(error)
+            except Exception:  # the error log is best effort; the call's outcome stands
+                log.warning("could not record a failure of skill %s", skill_id, exc_info=True)
             return SkillOutcome(False, error.status, error.ms, None, error)
         return SkillOutcome(True, status, self._ms(start), result, None)
 
@@ -197,8 +245,8 @@ class SkillClient:
             return value
 
         headers = {name: SECRET_REF.sub(fill, value) for name, value in skill.headers.items()}
-        if any(c in v for v in headers.values() for c in "\r\n\0"):
-            raise SkillFailure("secret_missing", "a secret value has a line break")
+        if any(c in v for v in headers.values() for c in "\r\n\0") or not all(v.isascii() for v in headers.values()):
+            raise SkillFailure("secret_missing", "a secret value cannot be sent in a header (line break or not ASCII)")
         return headers
 
     @staticmethod

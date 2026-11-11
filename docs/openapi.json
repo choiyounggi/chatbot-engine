@@ -499,7 +499,8 @@
               "block",
               "intent",
               "entity",
-              "response"
+              "response",
+              "skill"
             ],
             "title": "Area",
             "type": "string"

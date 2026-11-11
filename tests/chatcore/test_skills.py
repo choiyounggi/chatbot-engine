@@ -48,6 +48,18 @@ class SkillServer:
                 outer.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
                 if self.path == "/slow":
                     time.sleep(1.5)
+                if self.path == "/drip":  # every read is quick, the whole answer is not
+                    self.send_response(200)
+                    self.send_header("Content-Length", "40")
+                    self.end_headers()
+                    try:
+                        for _ in range(40):
+                            self.wfile.write(b" ")
+                            self.wfile.flush()
+                            time.sleep(0.1)
+                    except OSError:
+                        pass
+                    return
                 answers = {
                     "/ok": (200, json.dumps({"order": "A-1", "echo": body["action"]["params"]})),
                     "/slow": (200, "{}"),
@@ -187,7 +199,7 @@ def test_the_connection_goes_to_the_address_that_was_checked(server, monkeypatch
 
     def fake_resolve(host, p, allow_private):
         looked_up.append(host)
-        return "127.0.0.1"
+        return ["127.0.0.1"]
 
     monkeypatch.setattr(skills_module, "resolve", fake_resolve)
     status, raw = post_json(f"http://shop.example.test:{port}/ok", {}, json.dumps(
@@ -395,3 +407,73 @@ def test_the_default_server_blocks_internal_skill_addresses(fake_embedder, tmp_p
     api.put(f"{B}/secrets/SHOP_KEY", json={"value": "k"})
     ran = api.post(f"{B}/skills/get_order/test", json={}).json()
     assert ran["error"]["kind"] == "blocked" and server.requests == []
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+def test_the_timeout_covers_the_whole_call_not_each_read(server):
+    errors = []
+    start = time.monotonic()
+    out = client(errors).call("s", skill(f"{server.url}/drip", timeout_ms=500), {})
+    assert time.monotonic() - start < 1.5  # the drip would take 4 s
+    assert out.error is not None and out.error.kind == "timeout" and errors == [out.error]
+
+
+@pytest.mark.parametrize("fields, message", [
+    ({"url": "https://x.example/주문"}, "ASCII"), ({"url": "https://x.example:99999/a"}, "port"),
+    ({"url": "https://x.example:abc/a"}, "port"), ({"url": "https://[::1/a"}, "host"),
+    ({"url": "https://x.example/a", "headers": {"X-Name": "주문"}}, "ASCII"),
+])
+def test_urls_and_headers_http_cannot_send_are_refused(fields, message):
+    with pytest.raises(ValidationError, match=message):
+        Skill.model_validate(fields)
+
+
+def test_a_call_never_raises_even_on_unexpected_errors(server):
+    errors = []
+
+    def broken(*args):
+        raise ValueError("odd")
+
+    out = client(errors, transport=broken).call("s", skill(f"{server.url}/ok"), {})
+    assert out.error is not None and out.error.kind == "network" and errors == [out.error]
+    bad_secret = client([], {"K": "한글값"}).call("s", skill(f"{server.url}/ok", headers={"K": "{{ secret.K }}"}), {})
+    assert bad_secret.error is not None and bad_secret.error.kind == "secret_missing" and server.requests == []
+
+
+def test_a_failing_error_log_does_not_break_the_call(server):
+    def log(error):
+        raise OSError("database down")
+
+    out = SkillClient("shop", "v1", {}.get, log, allow_private=True).call("s", skill(f"{server.url}/fail"), {})
+    assert out.error is not None and out.error.kind == "http_status"
+
+
+@pytest.mark.parametrize("address", ["64:ff9b::a9fe:a9fe", "64:ff9b::a00:1", "64:ff9b::7f00:1"])
+def test_nat64_addresses_are_not_public(address):
+    assert _public(address) is False  # 169.254.169.254, 10.0.0.1, 127.0.0.1 behind a NAT64 gateway
+
+
+def test_every_checked_address_is_tried_in_turn(server, monkeypatch):
+    port = server.server.server_address[1]
+    real = socket.getaddrinfo
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, *a, **k: [
+        (socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("::1", port, 0, 0)),  # nothing listens there
+        (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port))] if host == "dual.example.test" else real(host, *a, **k))
+    out = client([]).call("s", skill(f"http://dual.example.test:{port}/ok"), {})
+    assert out.ok, out.error
+
+
+def test_secret_values_http_cannot_send_are_refused(api):
+    assert api.put(f"{B}/secrets/KEY", json={"value": "한글"}).status_code == 422
+
+
+def test_skill_changes_are_in_the_edit_history(api, server):
+    doc = with_order_skill(draft(api), f"{server.url}/ok")
+    save(api, doc)
+    doc["skills"]["get_order"]["url"] = f"{server.url}/kakao"
+    save(api, doc)
+    latest = api.get(f"{B}/edits").json()["items"][0]["changes"]
+    assert {"area": "skill", "id": "get_order", "label": "주문 조회", "action": "changed",
+            "examples_added": None, "examples_removed": None} in latest

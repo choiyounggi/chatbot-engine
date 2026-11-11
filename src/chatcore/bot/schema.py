@@ -8,6 +8,7 @@ only, so renaming a label never breaks a running conversation.
 from __future__ import annotations
 
 import re
+import urllib.parse
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -454,8 +455,19 @@ class Skill(Model):
     @field_validator("url", "test_url")
     @classmethod
     def _http_url(cls, v: str | None) -> str | None:
-        if v is not None and not SKILL_URL.match(v):
+        if v is None:
+            return v
+        if not SKILL_URL.match(v):
             raise ValueError("a skill URL must start with http:// or https:// and have a host")
+        if not v.isascii():
+            raise ValueError("a skill URL must be ASCII (percent-encode other characters)")
+        try:
+            parts = urllib.parse.urlsplit(v)
+            parts.port  # noqa: B018 - raises for a bad port
+        except ValueError as exc:
+            raise ValueError(f"a skill URL needs a valid host and port: {exc}") from exc
+        if not parts.hostname:
+            raise ValueError("a skill URL needs a host")
         return v
 
     @field_validator("headers")
@@ -468,6 +480,8 @@ class Skill(Model):
                 raise ValueError(f"header {name!r} has a line break")
             if "{{" in SECRET_REF.sub("", value):
                 raise ValueError(f"header {name!r}: only {{{{ secret.NAME }}}} may be used in headers")
+            if not value.isascii():
+                raise ValueError(f"header {name!r}: header values must be ASCII")
         return v
 
 

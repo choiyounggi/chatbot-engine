@@ -219,7 +219,7 @@ class LiveOut(BaseModel):
 
 
 class ChangeOut(BaseModel):
-    area: Literal["bot", "settings", "system", "block", "intent", "entity", "response"]
+    area: Literal["bot", "settings", "system", "block", "intent", "entity", "response", "skill"]
     id: str
     label: str
     action: Literal["added", "removed", "changed"]
@@ -651,8 +651,8 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
     @app.put("/v1/builder/bots/{bot}/secrets/{name}", dependencies=deps, status_code=204)
     def set_secret(body: SecretIn, bot: str = BOT_ID, name: str = SECRET) -> Response:
         known(bot)
-        if any(c in body.value for c in "\r\n\0"):
-            raise HTTPException(422, "a secret value cannot have line breaks (it is sent in a header)")
+        if any(c in body.value for c in "\r\n\0") or not body.value.isascii():
+            raise HTTPException(422, "a secret value must be ASCII without line breaks (it is sent in a header)")
         host.repository.set_secret(bot, name, body.value)
         return Response(status_code=204)
 
