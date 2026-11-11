@@ -99,8 +99,9 @@ EMPTY_BOT_RESPONSES = {
     "cancelled": "하던 작업을 멈췄어요.",
     "restarted": "처음부터 다시 시작할게요.",
     "error": "문제가 생겨서 답하지 못했어요.",
-    "clarify": "다시 한번 말씀해 주시겠어요?",
-    "input_invalid": "너무 긴 문장이라 이해하지 못했어요.",
+    "clarify": "혹시 이 중에 원하시는 게 있나요?",
+    "input_invalid": "메시지가 비어 있거나 너무 길어요. 1,000자 이내로 다시 입력해 주세요.",
+    "welcome": "안녕하세요! 무엇을 도와드릴까요?",
 }
 
 
@@ -109,7 +110,9 @@ def _empty_document(bot_id: str, label: str) -> dict[str, Any]:
         "id": bot_id,
         "label": label,
         "responses": {rid: {"text": text} for rid, text in EMPTY_BOT_RESPONSES.items()},
-        "scenarios": {"start": {"steps": [{"respond": "fallback"}]}},
+        # a bot needs at least one block: the welcome block (shown when a user opens the chat), as Kakao starts
+        "scenarios": {"welcome": {"label": "웰컴", "steps": [{"respond": "welcome"}]}},
+        "system": {"welcome": "welcome"},
     }
 
 

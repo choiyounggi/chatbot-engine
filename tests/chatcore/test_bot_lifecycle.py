@@ -177,8 +177,12 @@ def test_create_empty_bot_is_valid_and_not_served(client, host):
     bot = new_id()
     resp = client.post("/v1/builder/bots", json={"id": bot, "label": "새 봇"})
     assert resp.status_code == 201 and resp.json() == {"bot": bot, "revision": 1}
-    check = host.check_draft(host.repository.get_draft(bot))
+    doc = host.repository.get_draft(bot)
+    check = host.check_draft(doc)
     assert check.errors == [] and check.warnings == []
+    # its one block is a welcome block, shown when a user opens the chat (no unreachable placeholder)
+    assert doc["scenarios"] == {"welcome": {"label": "웰컴", "steps": [{"respond": "welcome"}]}}
+    assert doc["system"] == {"welcome": "welcome"} and doc["responses"]["welcome"] == {"text": "안녕하세요! 무엇을 도와드릴까요?"}
     assert host.runtime(bot) is None  # saved as a draft, never deployed
     bots = {b["id"]: b for b in client.get("/v1/builder/bots").json()["bots"]}
     assert bots[bot]["live"] is None and bots[bot]["draft_revision"] == 1 and bots[bot]["deletion"] is None
