@@ -564,6 +564,14 @@ Makefile      setup / check / test / bench / db-up (Phase 3 이후 train / chat 
   - **배포 = (봇 버전, 지식베이스 버전) 한 쌍.** 배포 기록에 지식베이스 버전을 남기고, 되돌리기는 쌍 단위. `SessionStarted`에 지식베이스 버전을 넣어 세션은 시작할 때의 쌍에 고정된다(예전 기록은 없음 = 지식베이스 없음).
   - **기록:** 턴 기록(`CommandsReceived.nlu`)에 지식베이스 결과(답한 항목·점수·상위 후보). 지식베이스가 답하면 규칙 이름이 `knowledge`라 학습대기의 "못 알아들은 말"에서 빠지고, 답하지 못한 폴백은 그대로 남는다("지식베이스에도 없음").
   - **API(빌더, 관리자 토큰):** 지식베이스 초안 읽기·저장(ETag), 파일에서 글 꺼내기(텍스트·마크다운·PDF → 글; PDF는 `pypdf`), 색인 만들기(작업) → 버전, 버전 목록, 조각 미리보기, 검색 테스트(후보·점수·판단), 배포에 지식베이스 버전 지정. 테스트 빌드는 초안 지식베이스도 함께 색인한다.
+- **결과 (2026-11-11):**
+  - **완료 조건 통과:** `docs/benchmarks/kb.md`에서 임베딩 + 재순위 판단이 모든 기준 통과(확인용 절반, 구간 포함: Recall@3 0.977 [0.943–1.000], 폴백 0.935 [0.839–1.000], 블록이 가져감 0.034, 지식베이스가 블록 질문을 가져감 0.000, p95 181ms ≤ 200ms). 샘플 봇 골든 대화 49턴이 main(`ceafb4a`)·이 브랜치·**이 브랜치 + 측정용 지식베이스(실제 재순위 모델)**에서 모두 같음, `make eval` 31/32(원래 있던 "음 글쎄").
+  - 엔진 테스트 966개(Postgres 포함, 커버리지 96%, `knowledge.py` 100%).
+  - **API:** `GET/PUT …/knowledge/draft`, `POST …/knowledge/extract`(본문 그대로, 10MB), `POST …/knowledge/versions`(작업 kind `knowledge` → `{version, number, faq, chunks}`), `GET …/knowledge/versions`, `GET …/knowledge/versions/{v}/entries`, `POST …/knowledge/search {query, version?}` → `{answer, candidates[{id, kind, title, cosine, score, passed}], judge, threshold, exact}`. `POST …/deploy {version, note, knowledge_version?}` — **빼면 지금 라이브 지식베이스를 유지, `null`이면 없앰**(지식베이스를 모르는 빌더가 배포해도 사라지지 않게). 되돌리기와 배포 히스토리에 `knowledge_version`. 서버 옵션 `--kb-judge cross-encoder|cosine`(해싱 모드 기본은 cosine), `--kb-threshold`.
+  - **시나리오 안에서:** 내장 액션 `knowledge`(지식베이스가 없으면 `found: "no"`). 봇이 같은 이름의 스킬을 가지면 그 스킬이 대신한다.
+  - **적대적 리뷰 후 고친 것**(되돌리면 테스트가 실패하는 것 20곳 확인): 빈 줄 없이 쓴 마크다운에서 앞 절이 사라지던 것, 여러 조각으로 나뉜 절의 추천 버튼이 다른 조각을 돌려주던 것(조각마다 "(2/3)" 제목, 같은 이름 문서는 "· 문서id"), 버튼 문구가 확실한 블록에 지던 것, 판단기의 NaN 점수가 대화 기록(Postgres jsonb)을 깨뜨리던 것, 망가진 색인 파일·다른 조각 방식의 색인을 다시 만들지 않던 것, 같은 버전을 동시에 여러 번 다시 만들던 것, 재순위 모델 실패가 같은 묶음의 다른 사용자 문장까지 실패시키던 것, `knowledge`라는 스킬을 가진 봇이 깨지던 것, 서버 시작 때 지식베이스 하나가 봇 전체를 멈추던 것(이제 지식베이스 없이 서비스하고 기록), 저장된 지식베이스를 못 쓸 때 500이던 것, 배포 시 지식베이스를 빼면 라이브 것이 사라지던 것. 색인 파일은 임시 이름에 쓴 뒤 바꿔 넣는다(테스트로는 확인하지 못함).
+  - **보안 리뷰(`/security-review`):** 높음·중간 0건(새 API 모두 관리자 토큰, 경로는 검증된 봇 id·버전만, `np.load`는 pickle 끔, 지식베이스 글은 템플릿을 거치지 않아 `{{ secret.* }}`가 새지 않음, PDF는 글자 추출만).
+  - **알려진 한계:** 값을 기다리는 중에는 지식베이스를 보지 않는다. 재순위 모델은 Linux CPU에서 더 느리다(측정은 이 맥북 GPU). 새 `SessionStarted`에는 `"kb_version": null`이 들어가 이전 코드로 되돌리면 그 기록을 읽지 못한다. 답 있는 질문의 약 40%는 폴백으로 간다(판단을 보수적으로 둔 결과).
 
 ### 이번 범위에서 뺀 것
 빌더 UI, LLM·RAG, 임베딩 모델 미세조정(SetFit 등), 메신저 연동(카카오 등), 다국어, 사용자 인증·멀티테넌시, 리치 카드형 응답. v1이 돈 뒤에 다시 판단한다.
