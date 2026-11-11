@@ -53,13 +53,18 @@ CHUNK_MIN, CHUNK_MAX = 300, 500  # characters (plan §3.1)
 OVERLAP_MAX = 150  # the previous chunk's last sentence is repeated when it is at most this long
 RRF_K = 60
 RERANK_DEPTH = 20  # per pool
+JUDGE_DEPTH = 3  # per pool: the cross-encoder judges the top 3 FAQ + top 3 chunks by embedding
+JUDGE_GRID = np.round(np.arange(0.01, 1.0, 0.01), 2)
 OVERRIDE_MARGIN = 0.05  # plan §3.1: FAQ beats a sure block only by this much over its nearest example
 GRID = np.round(np.arange(0.30, 0.96, 0.01), 2)
 CRITERIA = {"recall3": 0.90, "fallback": 0.90, "kb_takes_block": 0.05, "block_takes_kb": 0.05, "p95_ms": 100.0}
 BOOTSTRAP = 2000
 SEED = 7
 LATENCY_CHUNKS = 10_000
-VARIANTS = ("embedding", "bm25", "hybrid", "hybrid+rerank")
+VARIANTS = ("embedding", "bm25", "hybrid", "hybrid+rerank", "embedding+judge")
+# "embedding+judge": ranked by embedding; the answer decision is the cross-encoder's score of the
+# top JUDGE_DEPTH per pool instead of the cosine (added after the first run: cosine separated
+# answerable from unanswerable questions poorly, docs/benchmarks/kb.md)
 
 
 class BenchError(RuntimeError):
@@ -275,9 +280,17 @@ def kb_answer(faq: PoolResult, doc: PoolResult, t_faq: float, t_doc: float) -> t
     return None
 
 
-def final(nlu: Nlu, faq: PoolResult, doc: PoolResult, t_faq: float, t_doc: float) -> tuple[str, tuple[str, int] | None]:
-    """What the bot does: ("kb", answer) | ("block", None) | ("clarify", None) | ("fallback", None)."""
-    answer = kb_answer(faq, doc, t_faq, t_doc)
+def judged_answer(candidates: Sequence[tuple[str, int]], scores: np.ndarray, t: float) -> tuple[str, int] | None:
+    """The candidate the cross-encoder scores highest, if that score is at least `t`."""
+    if len(candidates) == 0:
+        return None
+    best = int(np.argmax(scores))
+    return candidates[best] if scores[best] >= t else None
+
+
+def final(nlu: Nlu, answer: tuple[str, int] | None, faq: PoolResult) -> tuple[str, tuple[str, int] | None]:
+    """What the bot does with the knowledge base's `answer`:
+    ("kb", answer) | ("block", None) | ("clarify", None) | ("fallback", None)."""
     if nlu.rule == "intent":
         if answer is not None and answer[0] == "faq" and faq.cosines[answer[1]] >= nlu.similarity + OVERRIDE_MARGIN:
             return "kb", answer
@@ -298,12 +311,13 @@ class Outcome:
     kb_takes_block: np.ndarray  # block question: the knowledge base answered
 
 
-def outcomes(questions: Sequence[Question], nlu: Sequence[Nlu], faq: Sequence[PoolResult], doc: Sequence[PoolResult],
-             pools: Mapping[str, Sequence[Item]], t_faq: float, t_doc: float) -> Outcome:
+def outcomes(questions: Sequence[Question], nlu: Sequence[Nlu], faq: Sequence[PoolResult],
+             answers: Sequence[tuple[str, int] | None], pools: Mapping[str, Sequence[Item]]) -> Outcome:
+    """`answers[i]`: what the knowledge base would answer question i with (kb_answer or judged_answer)."""
     n = len(questions)
     o = Outcome(*(np.zeros(n, dtype=bool) for _ in range(5)))
     for i, q in enumerate(questions):
-        what, answer = final(nlu[i], faq[i], doc[i], t_faq, t_doc)
+        what, answer = final(nlu[i], answers[i], faq[i])
         if q.kind == "answerable":
             assert q.gold is not None
             if what == "kb":
@@ -344,21 +358,27 @@ def rates_ci(o: Outcome, questions: Sequence[Question], half: int | None) -> dic
     return out
 
 
-def choose_thresholds(evaluate: Callable[[float, float], dict[str, float]],
-                      grid: Sequence[float] = tuple(GRID)) -> tuple[float, float, dict[str, float]] | None:
-    """On the dev half: among threshold pairs with fallback >= CRITERIA and kb_takes_block <= CRITERIA,
+Thresholds = tuple[float, ...]
+
+
+def choose_thresholds(evaluate: Callable[[Thresholds], dict[str, float]],
+                      candidates: Sequence[Thresholds]) -> tuple[Thresholds, dict[str, float]] | None:
+    """On the dev half: among candidates with fallback >= CRITERIA and kb_takes_block <= CRITERIA,
     the one with the most correct answers, then the fewest wrong ones, then the highest thresholds.
-    None if no pair meets both constraints."""
-    best: tuple[tuple[float, float, float, float], float, float, dict[str, float]] | None = None
-    for t_faq in grid:
-        for t_doc in grid:
-            r = evaluate(float(t_faq), float(t_doc))
-            if r["fallback"] < CRITERIA["fallback"] or r["kb_takes_block"] > CRITERIA["kb_takes_block"]:
-                continue
-            key = (r["correct"], -r["wrong"], float(t_faq), float(t_doc))
-            if best is None or key > best[0]:
-                best = (key, float(t_faq), float(t_doc), r)
-    return None if best is None else (best[1], best[2], best[3])
+    None if no candidate meets both constraints."""
+    best: tuple[tuple[float, ...], Thresholds, dict[str, float]] | None = None
+    for t in candidates:
+        r = evaluate(t)
+        if r["fallback"] < CRITERIA["fallback"] or r["kb_takes_block"] > CRITERIA["kb_takes_block"]:
+            continue
+        key = (r["correct"], -r["wrong"], *t)
+        if best is None or key > best[0]:
+            best = (key, t, r)
+    return None if best is None else (best[1], best[2])
+
+
+def cosine_candidates(grid: Sequence[float] = tuple(GRID)) -> list[Thresholds]:
+    return [(float(a), float(b)) for a in grid for b in grid]
 
 
 def recall_mrr(gold: Gold, faq_items: Sequence[Item], doc_items: Sequence[Item],
@@ -425,7 +445,9 @@ class Reranker:  # pragma: no cover - the real model
         import torch
         from sentence_transformers import CrossEncoder
 
-        self.model = CrossEncoder(RERANK_MODEL, device="mps" if torch.backends.mps.is_available() else "cpu")
+        mps = torch.backends.mps.is_available()
+        self.model = CrossEncoder(RERANK_MODEL, device="mps" if mps else "cpu", max_length=256,
+                                  model_kwargs={"torch_dtype": torch.float16 if mps else torch.float32})
 
     def __call__(self, query: str, texts: Sequence[str]) -> np.ndarray:
         if not texts:
@@ -443,7 +465,7 @@ class Pool:  # pragma: no cover - built from the real models
              reranker: Reranker | None) -> PoolResult:
         cos = self.vectors @ qvec
         emb = order(cos)
-        if variant == "embedding":
+        if variant in ("embedding", "embedding+judge"):
             ranking = emb
         else:
             lex = order(self.bm25.scores(qtokens))
@@ -458,6 +480,14 @@ class Pool:  # pragma: no cover - built from the real models
                     scores = reranker(query, [self.items[i].text for i in head])
                     ranking = [head[i] for i in order(scores)] + ranking[RERANK_DEPTH:]
         return PoolResult(ranking, cos)
+
+
+def judge(query: str, faq_items: Sequence[Item], doc_items: Sequence[Item], faq: PoolResult, doc: PoolResult,
+          reranker: Reranker) -> tuple[list[tuple[str, int]], np.ndarray]:  # pragma: no cover - the real model
+    """The top JUDGE_DEPTH of each pool and their cross-encoder scores."""
+    candidates = [("faq", i) for i in faq.ranking[:JUDGE_DEPTH]] + [("doc", i) for i in doc.ranking[:JUDGE_DEPTH]]
+    texts = [(faq_items if p == "faq" else doc_items)[i].text for p, i in candidates]
+    return candidates, reranker(query, texts)
 
 
 def build_pool(items: list[Item], encoder: Encoder, tokenize: Tokenizer, prefix: str) -> Pool:  # pragma: no cover
@@ -529,17 +559,30 @@ def main() -> int:  # pragma: no cover - runs the real models
         mrr = np.array([m for _, m in rm])
         ans_test = np.array([questions[i].half == 1 for i in ans])
 
-        def at_dev(t_faq: float, t_doc: float, fr: list[PoolResult] = faq_r, dr: list[PoolResult] = doc_r) -> dict[str, float]:
-            return rates(outcomes(questions, nlu, fr, dr, pools, t_faq, t_doc), questions, 0)
+        if variant == "embedding+judge":
+            judged = [judge(q.text, faq_items, doc_items, faq_r[i], doc_r[i], reranker) for i, q in enumerate(questions)]
 
-        chosen = choose_thresholds(at_dev)
+            def answers(t: Thresholds, j: list[tuple[list[tuple[str, int]], np.ndarray]] = judged) -> list[tuple[str, int] | None]:
+                return [judged_answer(c, sc, t[0]) for c, sc in j]
+
+            candidates: list[Thresholds] = [(float(t),) for t in JUDGE_GRID]
+        else:
+            def answers(t: Thresholds, fr: list[PoolResult] = faq_r, dr: list[PoolResult] = doc_r) -> list[tuple[str, int] | None]:
+                return [kb_answer(f, d, t[0], t[1]) for f, d in zip(fr, dr, strict=True)]
+
+            candidates = cosine_candidates()
+
+        def at_dev(t: Thresholds, fr: list[PoolResult] = faq_r, ans_of: Callable[[Thresholds], list[tuple[str, int] | None]] = answers) -> dict[str, float]:
+            return rates(outcomes(questions, nlu, fr, ans_of(t), pools), questions, 0)
+
+        chosen = choose_thresholds(at_dev, candidates)
         entry: dict[str, Any] = {
             "recall3": (float(recall[ans_test].mean()), bootstrap(recall[ans_test])),
             "mrr": (float(mrr[ans_test].mean()), bootstrap(mrr[ans_test])),
             "recall3_all": float(recall.mean()), "mrr_all": float(mrr.mean()), "chosen": chosen,
         }
         if chosen is not None:
-            entry["test"] = rates_ci(outcomes(questions, nlu, faq_r, doc_r, pools, chosen[0], chosen[1]), questions, 1)
+            entry["test"] = rates_ci(outcomes(questions, nlu, faq_r, answers(chosen[0]), pools), questions, 1)
         results[variant] = entry
         print(variant, {k: v for k, v in entry.items() if k in ("recall3", "mrr", "chosen")}, flush=True)
 
@@ -552,9 +595,11 @@ def main() -> int:  # pragma: no cover - runs the real models
         for _ in range(3):
             for i, q in enumerate(questions):
                 start = time.perf_counter()
-                toks = tokenize(q.text)
-                faq_pool.rank(variant, qvecs[i], toks, q.text, reranker)
-                big.rank(variant, qvecs[i], toks, q.text, reranker)
+                toks = tokenize(q.text) if variant in ("bm25", "hybrid", "hybrid+rerank") else []
+                f = faq_pool.rank(variant, qvecs[i], toks, q.text, reranker)
+                d = big.rank(variant, qvecs[i], toks, q.text, reranker)
+                if variant == "embedding+judge":
+                    judge(q.text, faq_items, padded, f, d, reranker)
                 times.append((time.perf_counter() - start) * 1000)
         latency[variant] = times
         print(variant, "p95 ms", round(float(np.percentile(times, 95)), 1), flush=True)
@@ -578,6 +623,9 @@ def report(results: dict[str, dict[str, Any]], latency: dict[str, list[float]], 
     def pct(x: float) -> str:
         return f"{x:.3f}"
 
+    def limits(t: Thresholds) -> str:
+        return f"재순위 ≥ {t[0]:.2f}" if len(t) == 1 else f"FAQ ≥ {t[0]:.2f} · 문서 ≥ {t[1]:.2f}"
+
     def with_ci(v: tuple[float, tuple[float, float]]) -> str:
         return f"{v[0]:.3f} [{v[1][0]:.3f}–{v[1][1]:.3f}]"
 
@@ -595,17 +643,17 @@ def report(results: dict[str, dict[str, Any]], latency: dict[str, list[float]], 
         f"- NLU(샘플 봇, 새 세션) 규칙 분포: {dict(Counter(n.rule for n in nlu))}. NLU 벡터 재사용 확인: "
         f"하네스 인코딩과의 최대 차이 {reuse_gap:.4f}.",
         "",
-        "| 방식 | Recall@3 | MRR | FAQ 기준 | 문서 기준 | 맞게 답함 | 틀리게 답함 | 블록이 가져감 | 답 없음→폴백 | 지식베이스가 블록 질문 가져감 | p95 ms | 통과 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| 방식 | Recall@3 | MRR | 기준(개발용에서 고름) | 맞게 답함 | 틀리게 답함 | 블록이 가져감 | 답 없음→폴백 | 지식베이스가 블록 질문 가져감 | p95 ms | 통과 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for variant, e in results.items():
         p95 = float(np.percentile(latency[variant], 95))
         if e["chosen"] is None:
-            lines.append(f"| {variant} | {with_ci(e['recall3'])} | {with_ci(e['mrr'])} | — | — | 개발용에서 조건을 만족하는 임계값 없음 "
+            lines.append(f"| {variant} | {with_ci(e['recall3'])} | {with_ci(e['mrr'])} | — | 개발용에서 조건을 만족하는 임계값 없음 "
                          f"| | | | | {p95:.1f} | ❌ |")
             continue
         t = e["test"]
-        lines.append(f"| {variant} | {with_ci(e['recall3'])} | {with_ci(e['mrr'])} | {e['chosen'][0]:.2f} | {e['chosen'][1]:.2f} "
+        lines.append(f"| {variant} | {with_ci(e['recall3'])} | {with_ci(e['mrr'])} | {limits(e['chosen'][0])} "
                      f"| {with_ci(t['correct'])} | {with_ci(t['wrong'])} | {with_ci(t['block_takes_kb'])} "
                      f"| {with_ci(t['fallback'])} | {with_ci(t['kb_takes_block'])} | {p95:.1f} | {'✅' if passes(e, p95) else '❌'} |")
     lines += [
@@ -615,7 +663,9 @@ def report(results: dict[str, dict[str, Any]], latency: dict[str, list[float]], 
         "시간에서 뺌). 두 절반 전체의 Recall@3/MRR(참고): "
         + ", ".join(f"{v} {pct(e['recall3_all'])}/{pct(e['mrr_all'])}" for v, e in results.items()) + ".",
         "",
-        "판단 규칙: FAQ 1위가 FAQ 기준 이상이면 그 답, 아니면 문서 1위가 문서 기준 이상이면 그 조각, 아니면 답하지 않음. "
+        "판단 규칙(코사인): FAQ 1위가 FAQ 기준 이상이면 그 답, 아니면 문서 1위가 문서 기준 이상이면 그 조각, 아니면 답하지 않음. "
+        f"판단 규칙(embedding+judge): 임베딩으로 고른 FAQ {JUDGE_DEPTH}개 + 문서 조각 {JUDGE_DEPTH}개를 재순위 모델이 채점해 "
+        "최고점이 기준 이상이면 그 후보로 답한다. "
         f"블록이 확실한 질문은 FAQ 1위가 블록의 가장 가까운 예문 유사도보다 {OVERRIDE_MARGIN} 이상 높을 때만 지식베이스. "
         "답 없는 질문은 폴백이나 되묻기로 끝나면 성공. 값을 기다리는 중의 규칙은 새 세션 측정이라 다루지 않는다.",
     ]

@@ -15,7 +15,9 @@ from bench.kb_eval import (
     bootstrap,
     choose_thresholds,
     chunk_document,
+    cosine_candidates,
     final,
+    judged_answer,
     kb_answer,
     load_kb,
     load_questions,
@@ -32,6 +34,14 @@ FAQ = [Item("faq_001", "faq", "알림이 안 와요\n설정에서 켜세요", "�
 DOC = [Item("refund.md#0", "doc", "환불 - 기간\n결제 후 7일 이내에는 전액 환불합니다.", "", "refund.md"),
        Item("manual.md#0", "doc", "설명서 - 위젯\n위젯은 홈 화면에서 추가합니다.", "", "manual.md")]
 POOLS = {"faq": FAQ, "doc": DOC}
+
+
+def decide(nlu: Nlu, faq: PoolResult, doc: PoolResult, t_faq: float, t_doc: float) -> tuple[str, tuple[str, int] | None]:
+    return final(nlu, kb_answer(faq, doc, t_faq, t_doc), faq)
+
+
+def judge_outcomes(qs, nlu, faq, doc, t_faq, t_doc):  # type: ignore[no-untyped-def]
+    return outcomes(qs, nlu, faq, [kb_answer(f, d, t_faq, t_doc) for f, d in zip(faq, doc, strict=True)], POOLS)
 
 
 def pool(cosines: list[float]) -> PoolResult:
@@ -165,13 +175,13 @@ def test_kb_answer_prefers_a_passing_faq_then_a_passing_chunk() -> None:
 
 def test_final_follows_the_dialogue_rules() -> None:
     sure = Nlu("intent", "check_weather", 0.80)
-    assert final(sure, pool([0.80 + OVERRIDE_MARGIN, 0]), pool([0.9]), 0.7, 0.5) == ("kb", ("faq", 0))
-    assert final(sure, pool([0.84, 0]), pool([0.9]), 0.7, 0.5) == ("block", None)  # a chunk never overrides a block
-    assert final(sure, pool([0.95, 0]), pool([0.9]), 0.96, 0.5) == ("block", None)  # FAQ must pass its own threshold
+    assert decide(sure, pool([0.80 + OVERRIDE_MARGIN, 0]), pool([0.9]), 0.7, 0.5) == ("kb", ("faq", 0))
+    assert decide(sure, pool([0.84, 0]), pool([0.9]), 0.7, 0.5) == ("block", None)  # a chunk never overrides a block
+    assert decide(sure, pool([0.95, 0]), pool([0.9]), 0.96, 0.5) == ("block", None)  # FAQ must pass its own threshold
     for rule in ("clarify", "fallback"):
-        assert final(Nlu(rule, None, 0.3), pool([0.1]), pool([0.6]), 0.7, 0.5) == ("kb", ("doc", 0))
-        assert final(Nlu(rule, None, 0.3), pool([0.1]), pool([0.4]), 0.7, 0.5) == (rule, None)
-    assert final(Nlu("rerun", None, 0.3), pool([0.99]), pool([0.99]), 0.5, 0.5) == ("block", None)
+        assert decide(Nlu(rule, None, 0.3), pool([0.1]), pool([0.6]), 0.7, 0.5) == ("kb", ("doc", 0))
+        assert decide(Nlu(rule, None, 0.3), pool([0.1]), pool([0.4]), 0.7, 0.5) == (rule, None)
+    assert decide(Nlu("rerun", None, 0.3), pool([0.99]), pool([0.99]), 0.5, 0.5) == ("block", None)
 
 
 def test_outcomes_and_rates_per_kind_and_half() -> None:
@@ -183,7 +193,7 @@ def test_outcomes_and_rates_per_kind_and_half() -> None:
     nlu = [fb, fb, fb, fb, Nlu("intent", "check_weather", 0.5), Nlu("intent", "tell_time", 0.9)]
     faq = [pool([0.9, 0.1]), pool([0.9, 0.1]), pool([0.2, 0.1]), pool([0.9, 0.1]), pool([0.9, 0.1]), pool([0.9, 0.1])]
     doc = [pool([0.1, 0.1])] * 6
-    o = outcomes(qs, nlu, faq, doc, POOLS, 0.8, 0.5)
+    o = judge_outcomes(qs, nlu, faq, doc, 0.8, 0.5)
     assert o.correct.tolist() == [True, False, False, False, False, False]
     assert o.wrong.tolist() == [False, True, False, False, False, False]  # "환불" answered with faq_001
     assert o.fallback.tolist() == [False, False, True, False, False, False]
@@ -197,22 +207,25 @@ def test_outcomes_and_rates_per_kind_and_half() -> None:
 
 def test_rates_refuse_a_half_without_questions() -> None:
     qs = [Question("주식", "unanswerable", half=0)]
-    o = outcomes(qs, [Nlu("fallback", None, 0.1)], [pool([0.1])], [pool([0.1])], POOLS, 0.5, 0.5)
+    o = judge_outcomes(qs, [Nlu("fallback", None, 0.1)], [pool([0.1])], [pool([0.1])], 0.5, 0.5)
     with pytest.raises(BenchError, match="no answerable"):
         rates(o, qs, 0)
 
 
 def test_choose_thresholds_meets_the_constraints_then_maximizes_correct_answers() -> None:
-    def evaluate(t_faq: float, t_doc: float) -> dict[str, float]:
+    def evaluate(t: tuple[float, ...]) -> dict[str, float]:
+        t_faq, t_doc = t
         return {"correct": 1 - t_faq / 2 - t_doc / 4, "wrong": 0.0,
                 "fallback": 0.85 if t_faq < 0.6 else 0.95, "kb_takes_block": 0.10 if t_doc < 0.5 else 0.0,
                 "block_takes_kb": 0.0}
 
-    t_faq, t_doc, r = choose_thresholds(evaluate, grid=(0.4, 0.5, 0.6, 0.7))  # type: ignore[misc]
+    chosen = choose_thresholds(evaluate, cosine_candidates((0.4, 0.5, 0.6, 0.7)))
+    assert chosen is not None
+    (t_faq, t_doc), r = chosen
     assert (t_faq, t_doc) == (0.6, 0.5)
     assert r["fallback"] >= CRITERIA["fallback"] and r["kb_takes_block"] <= CRITERIA["kb_takes_block"]
-    assert choose_thresholds(lambda a, b: {"correct": 1.0, "wrong": 0.0, "fallback": 0.0, "kb_takes_block": 1.0},
-                             grid=(0.5,)) is None
+    assert choose_thresholds(lambda t: {"correct": 1.0, "wrong": 0.0, "fallback": 0.0, "kb_takes_block": 1.0},
+                             cosine_candidates((0.5,))) is None
 
 
 def test_recall_mrr_uses_the_best_rank_in_either_pool() -> None:
@@ -237,13 +250,15 @@ def test_a_chunk_exactly_at_the_document_threshold_answers() -> None:
 
 def test_choose_thresholds_breaks_ties_with_the_highest_thresholds() -> None:
     flat = {"correct": 0.5, "wrong": 0.0, "fallback": 1.0, "kb_takes_block": 0.0, "block_takes_kb": 0.0}
-    chosen = choose_thresholds(lambda a, b: flat, grid=(0.5, 0.6, 0.7))
-    assert chosen is not None and chosen[:2] == (0.7, 0.7)
+    chosen = choose_thresholds(lambda t: flat, cosine_candidates((0.5, 0.6, 0.7)))
+    assert chosen is not None and chosen[0] == (0.7, 0.7)
+    single = choose_thresholds(lambda t: flat, [(0.1,), (0.3,), (0.2,)])
+    assert single is not None and single[0] == (0.3,)
 
 
 def test_an_unanswerable_question_that_ends_in_clarify_counts_as_not_answered() -> None:
     qs = [Question("둘 중 뭐지", "unanswerable")]
-    o = outcomes(qs, [Nlu("clarify", None, 0.6)], [pool([0.1])], [pool([0.1])], POOLS, 0.8, 0.5)
+    o = judge_outcomes(qs, [Nlu("clarify", None, 0.6)], [pool([0.1])], [pool([0.1])], 0.8, 0.5)
     assert o.fallback.tolist() == [True]
 
 
@@ -256,3 +271,20 @@ def test_a_short_first_sentence_is_not_left_as_a_tiny_chunk() -> None:
 def test_bm25_weighs_a_term_every_document_has_below_a_rare_one() -> None:
     bm = BM25([["흔함", "드묾"], ["흔함", "다른"], ["흔함", "또"]])
     assert bm.scores(["드묾"])[0] > bm.scores(["흔함"])[0] > 0
+
+
+def test_judged_answer_takes_the_best_scored_candidate_at_or_above_the_threshold() -> None:
+    cands = [("faq", 1), ("faq", 0), ("doc", 0)]
+    assert judged_answer(cands, np.array([0.2, 0.7, 0.4]), 0.5) == ("faq", 0)
+    assert judged_answer(cands, np.array([0.2, 0.5, 0.4]), 0.5) == ("faq", 0)  # exactly at the threshold
+    assert judged_answer(cands, np.array([0.2, 0.49, 0.4]), 0.5) is None
+    assert judged_answer([], np.zeros(0), 0.0) is None
+
+
+def test_a_judged_chunk_never_overrides_a_sure_block_but_a_judged_faq_can() -> None:
+    sure = Nlu("intent", "check_weather", 0.70)
+    faq = pool([0.80, 0.1])
+    assert final(sure, ("doc", 0), faq) == ("block", None)
+    assert final(sure, ("faq", 0), faq) == ("kb", ("faq", 0))  # 0.80 >= 0.70 + margin
+    assert final(sure, ("faq", 1), faq) == ("block", None)  # its own cosine decides the override
+    assert final(Nlu("fallback", None, 0.2), None, faq) == ("fallback", None)
