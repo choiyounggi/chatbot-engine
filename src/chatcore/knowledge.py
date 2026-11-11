@@ -403,7 +403,7 @@ def answer_text(entry: Entry) -> str:
 
 def button_label(title: str) -> str:
     """Kakao shows 14 characters of a button; the button still sends the whole title."""
-    return title if len(title) <= KAKAO_LABEL else title[:KAKAO_LABEL - 1] + "…"
+    return title if len(title) <= KAKAO_LABEL else title[:KAKAO_LABEL - 1].rstrip() + "…"
 
 
 def compose(result: KbResult, settings: KbSettings) -> KbAnswer | None:
