@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import logging
 import re
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -40,6 +42,7 @@ CROSS_ENCODER_THRESHOLD = 0.11  # chosen on the dev half (docs/benchmarks/kb.md)
 COSINE_THRESHOLD = 0.5  # hashing mode only (surface overlap; never used to serve real users)
 MAX_FAQ, MAX_DOCUMENTS, MAX_DOCUMENT_CHARS = 2000, 200, 200_000
 ID = r"^[A-Za-z0-9_-]{1,64}$"
+MAX_PDF_PAGES = 500
 FloatArray = NDArray[np.float32]
 
 
@@ -102,6 +105,43 @@ def parse_kb(document: Any) -> KnowledgeBase:
     except ValidationError as exc:
         raise KnowledgeError([f"{'.'.join(str(p) for p in e['loc']) or '(top)'}: {e['msg']}"
                               for e in exc.errors()]) from exc
+
+
+def extract_text(data: bytes, content_type: str) -> str:
+    """The text of an uploaded file: a PDF (text layer only, no OCR), or UTF-8 plain text / Markdown.
+    KnowledgeError when it cannot be read, has no text, or is too long for one document."""
+    if content_type == "application/pdf" or data.startswith(b"%PDF-"):
+        text = _pdf_text(data)
+    elif content_type in ("text/plain", "text/markdown", "text/x-markdown", ""):
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise KnowledgeError(["the file is not UTF-8 text"]) from exc
+    else:
+        raise KnowledgeError([f"unsupported file type {content_type!r}: use PDF, plain text or Markdown"])
+    text = re.sub(r"\n{3,}", "\n\n", text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")).strip()
+    if not text:
+        raise KnowledgeError(["no text found in the file (a scanned PDF has none)"])
+    if len(text) > MAX_DOCUMENT_CHARS:
+        raise KnowledgeError([f"the text is {len(text)} characters; one document holds at most {MAX_DOCUMENT_CHARS}"])
+    return text
+
+
+def _pdf_text(data: bytes) -> str:
+    from pypdf import PdfReader
+
+    logging.getLogger("pypdf").setLevel(logging.ERROR)  # malformed files warn per object
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted:
+            raise KnowledgeError(["the PDF is encrypted"])
+        if len(reader.pages) > MAX_PDF_PAGES:
+            raise KnowledgeError([f"the PDF has more than {MAX_PDF_PAGES} pages"])
+        return "\n\n".join((page.extract_text() or "").strip() for page in reader.pages)
+    except KnowledgeError:
+        raise
+    except Exception as exc:  # untrusted input: any parser failure means "cannot read it"
+        raise KnowledgeError(["the file is not a readable PDF"]) from exc
 
 
 def kb_version(document: dict[str, Any]) -> str:

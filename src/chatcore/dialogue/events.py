@@ -24,6 +24,7 @@ class SessionStarted(_Event):
     bot_id: str
     bot_version: str
     at: str | None = None  # ISO 8601 time (absent in logs written before session timeouts existed)
+    kb_version: str | None = None  # the knowledge base the session answers from (None: none, or an older log)
 
 
 class UserUttered(_Event):

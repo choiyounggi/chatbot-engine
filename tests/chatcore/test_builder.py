@@ -236,12 +236,12 @@ def test_concurrent_deploys_leave_memory_and_repository_agreeing(client, host, m
     inside, release, calls = threading.Event(), threading.Event(), []
     real = host.repository.deploy
 
-    def slow(bot_id, version, note=""):
+    def slow(bot_id, version, note="", kb_version=None):
         calls.append(version)
         if version == v2:
             inside.set()
             release.wait(5)
-        real(bot_id, version, note)
+        real(bot_id, version, note, kb_version)
 
     monkeypatch.setattr(host.repository, "deploy", slow)
     first = threading.Thread(target=host.deploy, args=("sample", v2))
@@ -364,7 +364,7 @@ def test_seeding_reuses_a_model_that_is_already_trained(host, fake_embedder, tmp
     monkeypatch.setattr(fresh, "train_draft", no_training)
     loads = []
     real_load = fresh._load
-    monkeypatch.setattr(fresh, "_load", lambda bot: loads.append(bot.version) or real_load(bot))
+    monkeypatch.setattr(fresh, "_load", lambda bot, *rest: loads.append(bot.version) or real_load(bot, *rest))
     assert fresh.seed(SAMPLE) == "sample" and fresh.bots() == host.bots()
     assert loads == [host.bots()["sample"]]  # loaded once, by the deploy (a load builds a Kiwi: ~0.3 s)
     (info,) = fresh.repository.versions("sample")

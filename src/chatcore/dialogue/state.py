@@ -51,6 +51,7 @@ class Completed:
 class DialogueState:
     bot_id: str | None = None
     bot_version: str | None = None
+    kb_version: str | None = None  # the knowledge base the session started with
     turns: int = 0  # user turns so far
     last_active: str | None = None  # ISO time of the last user message or session start, when recorded
     stack: list[Frame] = field(default_factory=list)
@@ -82,8 +83,8 @@ def _top(state: DialogueState, event: Event, scenario: str) -> Frame:
 def apply(state: DialogueState, event: Event) -> DialogueState:
     """Apply one event in place and return the state."""
     match event:
-        case SessionStarted(bot_id=bot_id, bot_version=version, at=at):
-            state.bot_id, state.bot_version = bot_id, version
+        case SessionStarted(bot_id=bot_id, bot_version=version, at=at, kb_version=kb):
+            state.bot_id, state.bot_version, state.kb_version = bot_id, version, kb
             state.last_active = at or state.last_active
         case UserUttered(at=at):
             state.turns += 1

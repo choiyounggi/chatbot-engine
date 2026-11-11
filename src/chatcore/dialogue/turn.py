@@ -71,12 +71,15 @@ def utc_now() -> dt.datetime:
 
 class TurnProcessor:
     def __init__(self, bot: BotDefinition, store: TrackerStore, interpreter: Interpreter,
-                 actions: ActionRegistry, rng: random.Random | None = None, clock: Clock = utc_now) -> None:
+                 actions: ActionRegistry, rng: random.Random | None = None, clock: Clock = utc_now,
+                 kb_version: str | None = None) -> None:
+        """kb_version: the knowledge base this runtime answers from (recorded in SessionStarted)."""
         # the registry may already hold this bot's own HTTP skills (BotHost.actions_for): they are not clashes
         report = validate(bot, actions.names() - set(bot.skills))
         if report.errors:
             raise BotError(report.errors)
         self.bot, self.store, self.interpreter, self.clock = bot, store, interpreter, clock
+        self.kb_version = kb_version
         self.engine = ScenarioEngine(bot, actions, rng)
         self.blocks = bot.block_targets()
 
@@ -101,16 +104,17 @@ class TurnProcessor:
 
             notices = self._expire(state, emit)
             if not state.started:
-                emit(SessionStarted(bot_id=self.bot.id, bot_version=self.bot.version, at=now))
-            elif state.bot_version != self.bot.version:
+                emit(self._started(now))
+            elif state.bot_version != self.bot.version or state.kb_version != self.kb_version:
                 # The session's version is no longer served. A scenario in progress may have
                 # changed in any way (steps, slots, order), so start over and say so; an idle
-                # session just continues on this version.
-                if state.stack:
+                # session just continues on this version. A new knowledge base alone changes no
+                # scenario: the session just answers from it from now on.
+                if state.stack and state.bot_version != self.bot.version:
                     log.info("session %s: bot version changed mid-scenario; restarting", session_id)
                     emit(SessionRestarted())
                     notices.append(self._notice("restarted", emit))
-                emit(SessionStarted(bot_id=self.bot.id, bot_version=self.bot.version, at=now))
+                emit(self._started(now))
             emit(UserUttered(text=clean, at=now))
 
             def understand() -> Interpretation:
@@ -135,7 +139,7 @@ class TurnProcessor:
                 new.append(event)
                 apply(state, event)
 
-            emit(SessionStarted(bot_id=self.bot.id, bot_version=self.bot.version, at=self.clock().isoformat()))
+            emit(self._started(self.clock().isoformat()))
             welcome = self.bot.system.welcome
             messages: list[BotMessage] = []
             if welcome is not None:
@@ -143,6 +147,9 @@ class TurnProcessor:
                     [StartScenario(welcome)], {"rule": "welcome"}), new, emit, "")
             tracker.append(new)
         return TurnResult(messages, new)
+
+    def _started(self, at: str) -> SessionStarted:
+        return SessionStarted(bot_id=self.bot.id, bot_version=self.bot.version, at=at, kb_version=self.kb_version)
 
     def _expire(self, state: DialogueState, emit: Callable[[Event], None]) -> list[BotMessage]:
         """Start an idle session over (system.timeout). A dropped conversation is announced;
