@@ -419,3 +419,112 @@ def test_purge_expired_leaves_a_prefix_colliding_bot_untouched(fake_embedder, tm
     assert (tmp_path / b).exists()
     assert store.events(f"{b}:s") != []
     assert host.runtime(b) is not None
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+def test_delete_sessions_escapes_like_wildcards(store):
+    base = new_id()
+    bot, lookalike = f"{base}_x", f"{base}zx"  # "_" must not match "z"
+    for sid in (f"{bot}:a", f"{lookalike}:a"):
+        with store.session(sid) as t:
+            t.append([SessionStarted(bot_id="b", bot_version="v1", kb_version=None)])
+    assert store.delete_sessions(f"{bot}:") == 1
+    assert store.events(f"{lookalike}:a") != []
+
+
+def test_purge_skips_a_bot_restored_or_deleted_again_after_the_list_was_read(host, monkeypatch):
+    host.delete_bot("sample")
+    host.clock.now += dt.timedelta(days=8)
+    real = host.repository.deletions
+    calls: list[int] = []
+
+    def racing() -> dict[str, str]:
+        out = real()
+        if not calls:  # right after purge_expired reads its list: someone restores the bot
+            calls.append(1)
+            host.restore_bot("sample")
+        return out
+
+    monkeypatch.setattr(host.repository, "deletions", racing)
+    assert host.purge_expired() == []
+    assert host.repository.get_draft("sample") is not None and host.runtime("sample") is not None
+
+    monkeypatch.setattr(host.repository, "deletions", real)
+    calls.clear()
+    host.delete_bot("sample")  # pending again with a fresh 7-day date
+    host.clock.now += dt.timedelta(days=8)
+
+    def racing_again() -> dict[str, str]:
+        out = real()
+        if not calls:
+            calls.append(1)
+            host.restore_bot("sample")
+            host.delete_bot("sample")  # deleted again: purge_after is 7 days from now
+        return out
+
+    monkeypatch.setattr(host.repository, "deletions", racing_again)
+    assert host.purge_expired() == []
+    assert host.repository.get_draft("sample") is not None and "sample" in real()
+
+
+def test_a_purge_that_fails_midway_is_retried_and_does_not_stop_the_others(fake_embedder, tmp_path, monkeypatch):
+    repo, store = InMemoryRepository(), InMemoryStore()
+    clock = Clock(dt.datetime(2026, 1, 1, tzinfo=dt.UTC))
+    host = BotHost(repo, store, fake_embedder, tmp_path, actions=synthetic_actions, keep=1, min_f1=0.0, clock=clock)
+    a, b = new_id(), new_id()
+    for bot in (a, b):
+        repo.save_draft(bot, {"id": bot})
+        with store.session(f"{bot}:conv") as t:
+            t.append([SessionStarted(bot_id=bot, bot_version="v1", kb_version=None)])
+        host.delete_bot(bot)
+    clock.now += dt.timedelta(days=8)
+    real = store.delete_sessions
+
+    def flaky(prefix: str) -> int:
+        if prefix == f"{a}:":
+            raise RuntimeError("database went away")
+        return real(prefix)
+
+    monkeypatch.setattr(store, "delete_sessions", flaky)
+    assert host.purge_expired() == [b]  # a failed, b still purged
+    assert a in repo.deletions() and repo.get_draft(a) is not None  # nothing of a removed: retry is possible
+    monkeypatch.setattr(store, "delete_sessions", real)
+    assert host.purge_expired() == [a]
+    assert store.events(f"{a}:conv") == [] and repo.get_draft(a) is None and a not in repo.deletions()
+
+
+def test_nothing_writes_trains_deploys_or_test_chats_a_bot_waiting_for_deletion(client, host):
+    from chatcore.host import BotDeleting
+
+    live = host.bots()["sample"]
+    draft = client.get(f"{B}/draft")
+    host.delete_bot("sample")
+    put = client.put(f"{B}/draft", json=draft.json(), headers={"If-Match": draft.headers["ETag"]})
+    assert put.status_code == 409 and "waiting to be deleted" in put.json()["detail"]
+    for attempt in (lambda: host.deploy("sample", live), lambda: host.train_draft("sample"),
+                    lambda: host.build_test("sample"), lambda: host.build_kb("sample"),
+                    lambda: host.save_kb_draft("sample", {"faq": []})):
+        with pytest.raises(BotDeleting):
+            attempt()
+    assert host.runtime("sample") is None and host.bots() == {}
+    assert client.get(f"{B}/analytics").status_code == 409
+
+
+def test_a_test_build_finished_after_the_bot_was_deleted_is_dropped(host, monkeypatch):
+    from chatcore.host import BotDeleting
+
+    real_load = host._load
+
+    def load_then_delete(*args):  # the bot is deleted while its test build is being fitted
+        runtime = real_load(*args)
+        host.delete_bot("sample")
+        return runtime
+
+    monkeypatch.setattr(host, "_load", load_then_delete)
+    with pytest.raises(BotDeleting):
+        host.build_test("sample")
+    assert not [k for k in host._tests if k[0] == "sample"]
+    host.restore_bot("sample")
+    assert host.test_runtime("sample", "anything") is None

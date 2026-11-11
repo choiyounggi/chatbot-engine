@@ -43,6 +43,7 @@ from chatcore.host import (
     AlreadyDeleting,
     BadExample,
     BelowBar,
+    BotDeleting,
     BotExists,
     BotHost,
     CopySourceNotFound,
@@ -516,12 +517,19 @@ EXTRACT_BODY: dict[str, Any] = {
 MAX_UPLOAD = 10 * 1024 * 1024
 
 MISUNDERSTOOD_RULES = ("fallback", "clarify")
+EARLIEST, LATEST = dt.date(2000, 1, 1), dt.date(2100, 12, 31)  # analytics periods
 
 
 def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | None = None) -> FastAPI:
     """`admin_token`: when set, builder endpoints require `Authorization: Bearer <token>`.
     `jobs`: where builder training runs (a new JobRunner when the host is a BotHost)."""
     app = FastAPI(title="chatcore", version="0.0.1")
+
+    @app.exception_handler(BotDeleting)
+    async def bot_deleting(request: Request, exc: BotDeleting) -> JSONResponse:
+        # any route or job step that reaches a bot waiting to be deleted (BotHost guards writes, training,
+        # deploys and test chats; known() already answers most builder routes the same way)
+        return JSONResponse({"detail": "the bot is waiting to be deleted; restore it first"}, status_code=409)
 
     def runtime(bot: str) -> BotRuntime:
         rt = host.runtime(bot)
@@ -1118,8 +1126,10 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
         try:
             to_d = today if to is None else dt.date.fromisoformat(to)
             from_d = (to_d - dt.timedelta(days=6)) if from_date is None else dt.date.fromisoformat(from_date)
-        except ValueError as exc:
+        except (ValueError, OverflowError) as exc:
             raise HTTPException(422, f"malformed date: {exc}") from exc
+        if not (EARLIEST <= from_d and to_d <= LATEST):  # far dates would overflow the read window
+            raise HTTPException(422, f"dates must be between {EARLIEST} and {LATEST}")
         if from_d > to_d:
             raise HTTPException(422, "'from' must not be after 'to'")
         if (to_d - from_d).days + 1 > MAX_DAYS:
@@ -1247,7 +1257,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
     for directory in args.bot:
         host.seed(directory)
     if not host.bots():
-        parser.error("no deployed bots: pass --bot <directory>")
+        if not host.repository.deletions():
+            parser.error("no deployed bots: pass --bot <directory>")
+        log.warning("every bot is waiting to be deleted; restore one with POST /v1/builder/bots/{bot}/restore")
     for bot_id in host.bots():  # load the model weights before the first user waits for them
         runtime = host.runtime(bot_id)
         assert runtime is not None

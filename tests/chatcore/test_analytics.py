@@ -409,3 +409,28 @@ def test_analytics_requires_the_admin_token(host):
     ok = protected.get(f"{B}/analytics", headers={"Authorization": "Bearer s3cr3t"})
     assert ok.status_code == 200, ok.text
 
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+def test_events_after_to_count_only_toward_retention():
+    sid, d = "sample:u1", dt.date(2026, 11, 1)
+    fallback = CommandsReceived(commands=[{"fallback": True}], nlu={"rule": "fallback"})
+    rows = [(sid, _user_uttered(), kst(2026, 11, 1, 9, 0)), (sid, _scenario_started("greet"), kst(2026, 11, 1, 9, 0)),
+            # the next day, after `to`: a return visit for retention, nothing else
+            (sid, _user_uttered(), kst(2026, 11, 2, 9, 0)), (sid, fallback, kst(2026, 11, 2, 9, 0)),
+            (sid, _scenario_started("greet"), kst(2026, 11, 2, 9, 0)),
+            (sid, _user_uttered(), kst(2026, 11, 8, 9, 0))]  # 7 days later
+    report = compute_report(rows, {sid: kst(2026, 11, 1, 9, 0)}, d, d, {}, today=dt.date(2026, 11, 20))
+    t = report.totals
+    assert (t.users, t.sessions, t.messages, t.block_calls, t.fallbacks) == (1, 1, 1, 1, 0)
+    assert [(b.block, b.calls) for b in report.blocks] == [("greet", 1)]
+    assert report.retention[0].d1 == pytest.approx(1.0) and report.retention[0].d7 == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("params", [{"from": "0001-01-01", "to": "0001-01-05"}, {"to": "9999-12-31"},
+                                    {"to": "0001-01-03"}, {"from": "1999-12-31", "to": "2000-01-02"}])
+def test_analytics_rejects_dates_that_would_overflow(client, params):
+    r = client.get(f"{B}/analytics", params=params)
+    assert r.status_code == 422, r.text

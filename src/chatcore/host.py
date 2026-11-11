@@ -149,6 +149,10 @@ class NoDeletionPending(KeyError):
     """restore_bot: no deletion is pending for this bot."""
 
 
+class BotDeleting(Exception):
+    """The bot is waiting to be deleted: nothing may change it, train it or serve it until restored."""
+
+
 @dataclass(frozen=True)
 class KbDraftCheck:
     version: str | None  # None when the document is not a valid knowledge base
@@ -223,6 +227,7 @@ class BotHost:
         self._loaded: dict[str, OrderedDict[Key, BotRuntime]] = {}  # bot -> (version, kb) -> runtime (LRU)
         self._live: dict[str, Key] = {}
         self._indexes: OrderedDict[tuple[str, str], KnowledgeIndex] = OrderedDict()  # (bot, kb version), LRU
+        self._deleting: set[str] = set()  # bots waiting to be deleted (mirrors repository.deletions(); _lock)
         self._index_locks: dict[tuple[str, str], threading.Lock] = {}  # one load or rebuild per version at a time
         self._lock = threading.RLock()  # guards _loaded/_live; held only briefly
         self._deploying = threading.RLock()  # one deploy/rollback at a time, so memory matches the repository
@@ -265,6 +270,8 @@ class BotHost:
         shutil.rmtree(self.artifacts / TEST_DIR, ignore_errors=True)
         self.purge_expired()
         pending = set(self.repository.deletions())
+        with self._lock:
+            self._deleting = set(pending)
         for bot_id in self.repository.bots():
             if bot_id not in pending:
                 self._start_one(bot_id)
@@ -314,6 +321,7 @@ class BotHost:
         stored draft moved on (then the summary, made against the draft we read, is not stored)."""
         if document.get("id") != bot_id:
             raise BotError([f"the document's id must be {bot_id!r}"])
+        self._refuse_if_deleting(bot_id)
         check = self.check_draft(document)
         before = self.repository.draft(bot_id)
         changes = summarize(before.document if before is not None else None, document)
@@ -356,6 +364,7 @@ class BotHost:
 
     def train_draft(self, bot_id: str) -> tuple[VersionInfo, Report]:
         """Validate and train the draft; store it as a version if it clears min_f1."""
+        self._refuse_if_deleting(bot_id)
         document = self.repository.get_draft(bot_id)
         if document is None:
             raise NoDraft(bot_id)
@@ -363,6 +372,7 @@ class BotHost:
         directory, report = train(bot, CachedEmbedder(self.bulk), self.artifacts, min_f1=self.min_f1)
         if directory is None:
             raise BelowBar(report, self.min_f1)
+        self._refuse_if_deleting(bot_id)  # deleted while it trained: store nothing
         return self.repository.add_version(bot_id, bot.version, document, report.macro_f1), report
 
     def confusable(self, bot_id: str, build: str) -> list[ConfusablePair]:
@@ -378,7 +388,8 @@ class BotHost:
         """Build the runtime first (NotTrained / VersionNotFound / BotError leave everything as
         it was), record the deployment, then switch new sessions to it. kb_version: the
         knowledge base to answer from (None: none)."""
-        with self._deploying:
+        with self._deploying:  # delete_bot takes the same lock: a deploy never brings a deleted bot back
+            self._refuse_if_deleting(bot_id)
             runtime = self._build(bot_id, version, kb_version)
             self.repository.deploy(bot_id, version, note, kb_version)
             self._activate(bot_id, (version, kb_version), runtime)
@@ -432,6 +443,8 @@ class BotHost:
                 raise KeyError(bot_id)
             purge_after = _iso(self.clock() + PURGE_DELAY)
             self.repository.request_deletion(bot_id, purge_after)
+            with self._lock:
+                self._deleting.add(bot_id)
             self._evict(bot_id)
             return purge_after
 
@@ -441,22 +454,39 @@ class BotHost:
         with self._deploying:
             if not self.repository.cancel_deletion(bot_id):
                 raise NoDeletionPending(bot_id)
+            with self._lock:
+                self._deleting.discard(bot_id)
             return self._start_one(bot_id)
 
     def purge_expired(self) -> list[str]:
-        """Permanently delete every bot whose purge_after has passed: every repository row, its
-        conversations and artifacts/<bot>/. Returns the bot ids purged."""
-        now = self.clock()
+        """Permanently delete every bot whose purge_after has passed: its conversations,
+        artifacts/<bot>/ and every repository row — the deletion record last, so a purge that fails
+        midway is retried next time. Each bot is re-checked under the deploy lock (it may have been
+        restored, or deleted again with a new date, since the list was read) and fails on its own.
+        Returns the bot ids purged."""
         due = [bot_id for bot_id, purge_after in self.repository.deletions().items()
-               if dt.datetime.fromisoformat(purge_after) <= now]
+               if dt.datetime.fromisoformat(purge_after) <= self.clock()]
+        purged = []
         for bot_id in due:
-            with self._deploying:
-                self._evict(bot_id)
-                self.repository.purge_bot(bot_id)
-                self.store.delete_sessions(f"{bot_id}:")
-                self.store.delete_sessions(f"{bot_id}~")
-                shutil.rmtree(self.artifacts / bot_id, ignore_errors=True)
-        return due
+            try:
+                with self._deploying:
+                    purge_after = self.repository.deletions().get(bot_id)
+                    if purge_after is None or dt.datetime.fromisoformat(purge_after) > self.clock():
+                        continue
+                    self._evict(bot_id)
+                    self.store.delete_sessions(f"{bot_id}:")
+                    self.store.delete_sessions(f"{bot_id}~")
+                    shutil.rmtree(self.artifacts / bot_id, ignore_errors=True)
+                    with self._lock:
+                        for key in [k for k in self._indexes if k[0] == bot_id]:
+                            del self._indexes[key]
+                    self.repository.purge_bot(bot_id)  # last: it removes the deletion record
+                    with self._lock:
+                        self._deleting.discard(bot_id)
+                    purged.append(bot_id)
+            except Exception:  # one bot's failure must not stop the others (or the server start)
+                log.exception("could not purge %s; trying again later", bot_id)
+        return purged
 
     def start_purge_daemon(self, interval: float = PURGE_INTERVAL) -> Callable[[], None]:
         """Run purge_expired() every `interval` seconds in a daemon thread until the returned
@@ -472,6 +502,12 @@ class BotHost:
 
         threading.Thread(target=loop, daemon=True).start()
         return stop.set
+
+    def _refuse_if_deleting(self, bot_id: str) -> None:
+        """BotDeleting when bot_id is waiting to be deleted (writes, training, deploys, test chats)."""
+        with self._lock:
+            if bot_id in self._deleting:
+                raise BotDeleting(bot_id)
 
     def _evict(self, bot_id: str) -> None:
         """Take bot_id out of service right away: new sessions/chat calls see it as unknown, and
@@ -498,16 +534,19 @@ class BotHost:
             errors: list[str] = []
         except KnowledgeError as exc:
             version, errors = None, exc.problems
+        self._refuse_if_deleting(bot_id)
         revision = self.repository.save_kb_draft(bot_id, document, expected_revision)
         return KbDraftCheck(version, errors, revision)
 
     def build_kb(self, bot_id: str) -> KbVersionInfo:
         """Index the knowledge-base draft and store it as a version. NoKnowledgeBase without a draft;
         KnowledgeError when the draft is invalid."""
+        self._refuse_if_deleting(bot_id)
         draft = self.repository.kb_draft(bot_id)
         if draft is None:
             raise NoKnowledgeBase(bot_id)
         index = KnowledgeIndex.build(draft.document, self.bulk)
+        self._refuse_if_deleting(bot_id)  # deleted while it indexed: write nothing
         index.save(self.artifacts / bot_id / KB_DIR / index.version)
         with self._lock:
             self._remember_index(bot_id, index)
@@ -569,6 +608,7 @@ class BotHost:
         knowledge-base draft when there is one, load it into the test cache and return its build id
         (the draft's version). BotError for an invalid draft, KnowledgeError for an invalid
         knowledge base, TrainingError when it cannot be fitted."""
+        self._refuse_if_deleting(bot_id)
         document = self.repository.get_draft(bot_id)
         if document is None:
             raise NoDraft(bot_id)
@@ -583,6 +623,9 @@ class BotHost:
             shutil.rmtree(root, ignore_errors=True)
             raise
         with self._lock:
+            if bot_id in self._deleting:  # deleted while it was fitted (same lock as delete_bot's eviction)
+                shutil.rmtree(root, ignore_errors=True)
+                raise BotDeleting(bot_id)
             replaced = self._tests.pop((bot_id, bot.version), None)
             self._tests[(bot_id, bot.version)] = (runtime, root, time.monotonic())
             gone = self._drop_tests(lambda used: len(self._tests) > self.test_keep)
@@ -594,7 +637,7 @@ class BotHost:
         with self._lock:
             now = time.monotonic()
             gone = self._drop_tests(lambda used: now - used > self.test_ttl)
-            entry = self._tests.get((bot_id, build))
+            entry = self._tests.get((bot_id, build)) if bot_id not in self._deleting else None
             if entry is not None:
                 self._tests[(bot_id, build)] = (entry[0], entry[1], now)
                 self._tests.move_to_end((bot_id, build))
