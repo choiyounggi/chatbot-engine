@@ -637,7 +637,7 @@ class BotHost:
         with self._lock:
             now = time.monotonic()
             gone = self._drop_tests(lambda used: now - used > self.test_ttl)
-            entry = self._tests.get((bot_id, build)) if bot_id not in self._deleting else None
+            entry = self._tests.get((bot_id, build))
             if entry is not None:
                 self._tests[(bot_id, build)] = (entry[0], entry[1], now)
                 self._tests.move_to_end((bot_id, build))

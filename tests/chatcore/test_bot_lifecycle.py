@@ -528,3 +528,17 @@ def test_a_test_build_finished_after_the_bot_was_deleted_is_dropped(host, monkey
     assert not [k for k in host._tests if k[0] == "sample"]
     host.restore_bot("sample")
     assert host.test_runtime("sample", "anything") is None
+
+
+def test_a_bot_waiting_for_deletion_is_refused_before_any_training_or_fitting_starts(host, monkeypatch):
+    import chatcore.host as host_module
+    from chatcore.host import BotDeleting
+
+    started: list[str] = []
+    monkeypatch.setattr(host_module, "train", lambda *a, **k: started.append("train"))
+    monkeypatch.setattr(host_module, "fit_only", lambda *a, **k: started.append("fit"))
+    host.delete_bot("sample")
+    for attempt in (lambda: host.train_draft("sample"), lambda: host.build_test("sample")):
+        with pytest.raises(BotDeleting):
+            attempt()
+    assert started == []  # no model work wasted on a bot being deleted
