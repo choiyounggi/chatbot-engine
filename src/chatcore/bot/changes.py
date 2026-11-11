@@ -9,11 +9,12 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, TypedDict
 
-Area = Literal["bot", "settings", "system", "block", "intent", "entity", "response"]
+Area = Literal["bot", "settings", "system", "block", "intent", "entity", "response", "skill"]
 Action = Literal["added", "removed", "changed"]
 
 # document section -> area shown to the builder (a scenario is a block there)
-SECTIONS: dict[str, Area] = {"scenarios": "block", "intents": "intent", "entities": "entity", "responses": "response"}
+SECTIONS: dict[str, Area] = {"scenarios": "block", "intents": "intent", "entities": "entity", "responses": "response",
+                             "skills": "skill"}
 
 
 class Change(TypedDict, total=False):

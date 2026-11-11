@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import datetime as dt
 import json
 import math
@@ -205,6 +206,18 @@ ActionFn = Callable[[dict[str, str]], Mapping[str, Any]]
 class _Registered:
     fn: ActionFn
     args_model: type[BaseModel] | None
+    timeout: float | None = None  # overrides the registry's (an HTTP skill brings its own)
+
+
+@dataclass(frozen=True)
+class TurnContext:
+    """What an action may know about the turn running it (HTTP skills send the utterance)."""
+
+    utterance: str
+    session: str
+
+
+CURRENT_TURN: contextvars.ContextVar[TurnContext | None] = contextvars.ContextVar("chatcore_turn", default=None)
 
 
 class ActionRegistry:
@@ -220,11 +233,25 @@ class ActionRegistry:
         self.timeout = timeout
         self._pool: ThreadPoolExecutor | None = None
         self._pool_lock = threading.Lock()
+        self._pool_owner: ActionRegistry = self  # whose thread pool runs the actions (shared by extended())
 
-    def register(self, name: str, fn: ActionFn, args_model: type[BaseModel] | None = None) -> None:
+    def register(self, name: str, fn: ActionFn, args_model: type[BaseModel] | None = None,
+                 timeout: float | None = None) -> None:
         if not name or name in self._actions:
             raise ValueError(f"action name {name!r} is empty or already registered")
-        self._actions[name] = _Registered(fn, args_model)
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be positive")
+        self._actions[name] = _Registered(fn, args_model, timeout)
+
+    def extended(self, extra: dict[str, tuple[ActionFn, float]]) -> ActionRegistry:
+        """A registry with these actions (fn, timeout seconds) added to this one's, sharing its thread pool
+        (a bot's HTTP skills on top of the built-in actions)."""
+        child = ActionRegistry(self.timeout)
+        child._actions = dict(self._actions)
+        child._pool_owner = self
+        for name, (fn, timeout) in extra.items():
+            child.register(name, fn, timeout=timeout)
+        return child
 
     def names(self) -> set[str]:
         return set(self._actions)
@@ -238,24 +265,27 @@ class ActionRegistry:
                 entry.args_model.model_validate(args)
             except ValidationError as exc:
                 raise ActionError(f"bad arguments for {name}: {exc.errors()}") from exc
+        timeout = entry.timeout if entry.timeout is not None else self.timeout
         try:
-            if self.timeout is None:
+            if timeout is None:
                 result = entry.fn(args)
             else:
-                with self._pool_lock:
-                    if self._pool is None:
+                owner = self._pool_owner
+                with owner._pool_lock:
+                    if owner._pool is None:
                         # sized for the API's request threadpool: timed-out calls keep their worker until
                         # their own (network) timeout ends, so a small pool would starve later requests
-                        self._pool = ThreadPoolExecutor(max_workers=32, thread_name_prefix="action")
-                    pool = self._pool
-                future = pool.submit(entry.fn, args)
+                        owner._pool = ThreadPoolExecutor(max_workers=32, thread_name_prefix="action")
+                    pool = owner._pool
+                # the worker thread sees the turn's context (CURRENT_TURN) like a direct call would
+                future = pool.submit(contextvars.copy_context().run, entry.fn, args)
                 try:
-                    result = future.result(timeout=self.timeout)
+                    result = future.result(timeout=timeout)
                 except FutureTimeout as exc:
                     # FutureTimeout is the builtin TimeoutError: it may be the action's own error
                     if future.done():
                         raise
-                    raise ActionError(f"{name} timed out after {self.timeout}s") from exc
+                    raise ActionError(f"{name} timed out after {timeout}s") from exc
         except ActionError:
             raise
         except Exception as exc:

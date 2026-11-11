@@ -170,7 +170,10 @@ def load_bot(directory: Path, actions: Iterable[str] | None = None) -> BotDefini
 def validate(bot: BotDefinition, actions: Iterable[str] | None = None) -> Report:
     errors: list[str] = []
     warnings: list[str] = []
-    known_actions = set(actions) if actions is not None else None
+    known_actions = (set(actions) | set(bot.skills)) if actions is not None else None  # a skill is an action
+    if actions is not None:
+        clash = sorted(set(bot.skills) & set(actions))
+        errors += [f"skill {sid!r} has the name of a built-in action; rename it" for sid in clash]
 
     missing = sorted(REQUIRED_RESPONSES - set(bot.responses))
     if missing:

@@ -211,6 +211,18 @@
               "switch_threshold": 0.8
             }
           },
+          "skills": {
+            "patternProperties": {
+              "^[a-z][a-z0-9_]*$": {
+                "$ref": "#/components/schemas/Skill"
+              }
+            },
+            "propertyNames": {
+              "maxLength": 64
+            },
+            "title": "Skills",
+            "type": "object"
+          },
           "system": {
             "$ref": "#/components/schemas/System",
             "default": {}
@@ -487,7 +499,8 @@
               "block",
               "intent",
               "entity",
-              "response"
+              "response",
+              "skill"
             ],
             "title": "Area",
             "type": "string"
@@ -1654,6 +1667,60 @@
         "title": "Scenario",
         "type": "object"
       },
+      "SecretIn": {
+        "properties": {
+          "value": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "SecretIn",
+        "type": "object"
+      },
+      "SecretOut": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "updated_at"
+        ],
+        "title": "SecretOut",
+        "type": "object"
+      },
+      "SecretsOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SecretOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bot",
+          "items"
+        ],
+        "title": "SecretsOut",
+        "type": "object"
+      },
       "SentencesIn": {
         "properties": {
           "texts": {
@@ -1806,6 +1873,208 @@
           "alt_text"
         ],
         "title": "SimpleImage",
+        "type": "object"
+      },
+      "Skill": {
+        "additionalProperties": false,
+        "description": "An HTTP skill (builder plan E10): an action the bot's scenarios call by its id.",
+        "properties": {
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          },
+          "test_url": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Test Url"
+          },
+          "timeout_ms": {
+            "default": 3000,
+            "maximum": 10000.0,
+            "minimum": 100.0,
+            "title": "Timeout Ms",
+            "type": "integer"
+          },
+          "url": {
+            "maxLength": 2000,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "Skill",
+        "type": "object"
+      },
+      "SkillErrorOut": {
+        "properties": {
+          "at": {
+            "title": "At",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "blocked",
+              "network",
+              "timeout",
+              "http_status",
+              "invalid_response",
+              "too_large",
+              "secret_missing"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "ms": {
+            "title": "Ms",
+            "type": "integer"
+          },
+          "skill": {
+            "title": "Skill",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "test": {
+            "title": "Test",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "at",
+          "skill",
+          "kind",
+          "status",
+          "detail",
+          "ms",
+          "test"
+        ],
+        "title": "SkillErrorOut",
+        "type": "object"
+      },
+      "SkillErrorsOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SkillErrorOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bot",
+          "items"
+        ],
+        "title": "SkillErrorsOut",
+        "type": "object"
+      },
+      "SkillTestIn": {
+        "properties": {
+          "params": {
+            "additionalProperties": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxProperties": 50,
+            "title": "Params",
+            "type": "object"
+          },
+          "utterance": {
+            "default": "",
+            "maxLength": 1000,
+            "title": "Utterance",
+            "type": "string"
+          }
+        },
+        "title": "SkillTestIn",
+        "type": "object"
+      },
+      "SkillTestOut": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SkillErrorOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ms": {
+            "title": "Ms",
+            "type": "integer"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "required": [
+          "ok",
+          "status",
+          "ms",
+          "result",
+          "error"
+        ],
+        "title": "SkillTestOut",
         "type": "object"
       },
       "Slot": {
@@ -2960,6 +3229,335 @@
           }
         },
         "summary": "Rollback"
+      }
+    },
+    "/v1/builder/bots/{bot}/secrets": {
+      "get": {
+        "description": "The bot's secret names (for {{ secret.NAME }} in skill headers). Values are write-only.",
+        "operationId": "secrets_v1_builder_bots__bot__secrets_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Secrets"
+      }
+    },
+    "/v1/builder/bots/{bot}/secrets/{name}": {
+      "delete": {
+        "operationId": "delete_secret_v1_builder_bots__bot__secrets__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$",
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Secret"
+      },
+      "put": {
+        "operationId": "set_secret_v1_builder_bots__bot__secrets__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$",
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Secret"
+      }
+    },
+    "/v1/builder/bots/{bot}/skills/errors": {
+      "get": {
+        "description": "스킬 오류 내역: the newest failed skill calls (test runs included), at most 100.",
+        "operationId": "skill_errors_v1_builder_bots__bot__skills_errors_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillErrorsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Skill Errors"
+      }
+    },
+    "/v1/builder/bots/{bot}/skills/{skill}/test": {
+      "post": {
+        "description": "Call a skill of the saved draft once (its test_url when set) and show what came back.",
+        "operationId": "test_skill_v1_builder_bots__bot__skills__skill__test_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "skill",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Skill",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillTestIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillTestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Test Skill"
       }
     },
     "/v1/builder/bots/{bot}/test-builds": {

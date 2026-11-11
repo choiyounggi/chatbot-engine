@@ -26,7 +26,7 @@ from typing import Any, Protocol
 
 from chatcore.actions.builtin import builtin_registry
 from chatcore.bot.changes import summarize
-from chatcore.bot.loader import BotError, bot_from_document, read_document, validate
+from chatcore.bot.loader import BotError, bot_from_document, parse_document, read_document, validate
 from chatcore.bot.repository import BotRepository, RevisionConflict, VersionInfo
 from chatcore.bot.schema import BotDefinition
 from chatcore.dialogue.events import SessionStarted
@@ -37,6 +37,7 @@ from chatcore.nlu.interpreter import NluInterpreter
 from chatcore.nlu.model import CachedEmbedder, Embedder, ModelMismatch, NluModel
 from chatcore.nlu.train import ConfusablePair, Report, confusable_intents, fit_only, train
 from chatcore.runtime import BotRuntime
+from chatcore.skills import SkillClient, SkillOutcome, Transport, error_dict, post_json, user_key
 from chatcore.store.base import TrackerStore
 
 
@@ -127,9 +128,11 @@ class DraftCheck:
 class BotHost:
     def __init__(self, repository: BotRepository, store: TrackerStore, embedder: Embedder, artifacts: Path,
                  actions: Callable[[], ActionRegistry] = builtin_registry, keep: int = 2, min_f1: float = 0.90,
-                 bulk_embedder: Embedder | None = None, test_keep: int = 2, test_ttl: float = 1800.0) -> None:
+                 bulk_embedder: Embedder | None = None, test_keep: int = 2, test_ttl: float = 1800.0,
+                 skill_allow_private: bool = False, skill_transport: Transport = post_json) -> None:
         """bulk_embedder: the same model for training (e.g. BatchedEmbedder.bulk(), so chat goes first).
-        test_keep / test_ttl: builder test builds kept loaded, and for how long after their last use."""
+        test_keep / test_ttl: builder test builds kept loaded, and for how long after their last use.
+        skill_allow_private: let HTTP skills call internal addresses (development and tests only)."""
         if keep < 1 or test_keep < 1 or test_ttl <= 0:
             raise ValueError("keep and test_keep must be >= 1 and test_ttl > 0")
         self.repository, self.store, self.embedder, self.artifacts = repository, store, embedder, artifacts
@@ -138,6 +141,7 @@ class BotHost:
         # (bot, build) -> (runtime, its own directory, last use); separate from _loaded
         self._tests: OrderedDict[tuple[str, str], tuple[BotRuntime, Path, float]] = OrderedDict()
         self.actions, self.keep, self.min_f1 = actions(), keep, min_f1
+        self.skill_allow_private, self.skill_transport = skill_allow_private, skill_transport
         self._loaded: dict[str, OrderedDict[str, BotRuntime]] = {}  # bot -> version -> runtime (LRU)
         self._live: dict[str, str] = {}
         self._lock = threading.RLock()  # guards _loaded/_live; held only briefly
@@ -192,8 +196,6 @@ class BotHost:
     # ------------------------------------------------------------ builder
 
     def check_draft(self, document: dict[str, Any]) -> DraftCheck:
-        from chatcore.bot.loader import parse_document
-
         try:
             bot = parse_document(document)
         except BotError as exc:
@@ -379,7 +381,36 @@ class BotHost:
         # model.bot carries the thresholds meta.json was trained with (NluModel.load, docs/
         # engine-core-plan.md "빌더 단계 E-B4"), not necessarily the document's own numbers.
         served = model.bot
-        return BotRuntime(served, TurnProcessor(served, self.store, NluInterpreter(model.parse), self.actions), model)
+        return BotRuntime(served, TurnProcessor(served, self.store, NluInterpreter(model.parse),
+                                                self.actions_for(served)), model)
+
+    # ------------------------------------------------------------ HTTP skills
+
+    def skill_client(self, bot: BotDefinition) -> SkillClient:
+        return SkillClient(bot.id, bot.version, lambda name: self.repository.secret(bot.id, name),
+                           lambda error: self.repository.add_skill_error(bot.id, error_dict(error)),
+                           self.skill_allow_private, self.skill_transport)
+
+    def actions_for(self, bot: BotDefinition) -> ActionRegistry:
+        """The built-in actions plus the bot's HTTP skills (each with its own timeout)."""
+        if not bot.skills:
+            return self.actions
+        client = self.skill_client(bot)
+        return self.actions.extended({sid: (client.action(sid, skill), skill.timeout_ms / 1000 + 0.5)
+                                      for sid, skill in bot.skills.items()})
+
+    def test_skill(self, bot_id: str, skill_id: str, params: dict[str, str], utterance: str = "") -> SkillOutcome:
+        """Run a skill of the current draft once (its test_url when it has one). NoDraft; BotError when
+        the draft does not parse; KeyError for an unknown skill."""
+        document = self.repository.get_draft(bot_id)
+        if document is None:
+            raise NoDraft(bot_id)
+        bot = parse_document(document)
+        skill = bot.skills.get(skill_id)
+        if skill is None:
+            raise KeyError(skill_id)
+        return self.skill_client(bot).call(skill_id, skill, params, utterance, user_key(f"{bot_id}~skill-test"),
+                                           test=True)
 
 
 def _remove(directories: list[Path]) -> None:
