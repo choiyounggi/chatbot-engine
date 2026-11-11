@@ -475,3 +475,10 @@ def test_suggestion_labels_differ_and_fit_kakao() -> None:
     labels = [label for label, _ in answer.replies]
     assert labels == ["환불", "환불 (2)", "아주아주아주 긴 절 이름…"] and all(len(x) <= 14 for x in labels)
     assert [m for _, m in answer.replies] == ["정책 - 환불 · a", "정책 - 환불 · b", "약관 - 아주아주아주 긴 절 이름은 잘라서 보여요"]
+
+
+def test_a_long_numbered_label_keeps_its_number_within_kakaos_width() -> None:
+    long = "약관 - 아주아주아주 긴 절 이름은 잘라서 보여요"
+    hits = (hit("a#0", f"{long} · a", "doc", heading=long), hit("b#0", f"{long} · b", "doc", heading=long))
+    (_, first), (second, _) = compose(KbResult(hits, hits), KbSettings(mode="suggest")).replies
+    assert second == "아주아주아주 긴… (2)" and len(second) <= 14
