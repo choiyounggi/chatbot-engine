@@ -47,6 +47,11 @@ class TrackerStore(Protocol):
         """Committed events of a session (read-only, no lock)."""
         ...
 
+    def delete_sessions(self, prefix: str) -> int:
+        """Delete every session whose id starts with `prefix` (a literal prefix, not a pattern).
+        Returns how many sessions were removed."""
+        ...
+
     def recent(self, prefix: str, event_type: str, limit: int) -> list[tuple[str, Event]]:
         """Newest committed events of one type across sessions whose id starts with `prefix`."""
         ...

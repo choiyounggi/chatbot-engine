@@ -38,11 +38,15 @@ from chatcore.bot.schema import BasicCard, BotDocument, Carousel, ListCard, Simp
 from chatcore.dialogue.state import fold
 from chatcore.dialogue.turn import MAX_INPUT_CHARS, TurnResult, UnknownBlock
 from chatcore.host import (
+    AlreadyDeleting,
     BadExample,
     BelowBar,
+    BotExists,
     BotHost,
+    CopySourceNotFound,
     ExampleTaken,
     Host,
+    NoDeletionPending,
     NoDraft,
     NoEarlierDeployment,
     NoKnowledgeBase,
@@ -138,6 +142,10 @@ class MisunderstoodOut(BaseModel):
     items: list[MisunderstoodItem]
 
 
+class BotDeletionOut(BaseModel):
+    purge_after: str  # ISO 8601 UTC: permanently deleted at this time unless restored first
+
+
 class BotSummaryOut(BaseModel):
     id: str
     label: str
@@ -146,10 +154,32 @@ class BotSummaryOut(BaseModel):
     serving: str | None  # version this server answers with (None: not loaded here)
     draft_revision: int | None
     undeployed_changes: bool  # the draft differs from what is live
+    deletion: BotDeletionOut | None = None  # waiting to be deleted (None: not waiting)
 
 
 class BotListOut(BaseModel):
     bots: list[BotSummaryOut]
+
+
+class BotCreateIn(BaseModel):
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    label: str = Field(min_length=1, max_length=100)
+    copy_from: str | None = Field(None, pattern=r"^[a-z][a-z0-9_]{0,63}$")
+
+
+class BotCreatedOut(BaseModel):
+    bot: str
+    revision: int
+
+
+class BotDeletedOut(BaseModel):
+    bot: str
+    purge_after: str  # ISO 8601 UTC
+
+
+class BotRestoredOut(BaseModel):
+    bot: str
+    live: str | None  # the deployed version now serving again (None: the bot was never deployed)
 
 
 class DraftSavedOut(BaseModel):
@@ -519,6 +549,8 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
     @app.get("/v1/builder/bots/{bot}/misunderstood", dependencies=[Depends(admin)], response_model=MisunderstoodOut)
     def misunderstood(bot: str = BOT_ID, limit: int = 50) -> dict[str, Any]:
         """Recent messages the bot could not handle — candidates for new examples."""
+        if isinstance(host, BotHost) and bot in host.repository.deletions():
+            raise HTTPException(409, "the bot is waiting to be deleted; restore it first")
         runtime(bot)
         limit = max(1, min(limit, 500))
         items = []
@@ -586,6 +618,8 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
     deps = [Depends(admin)]
 
     def known(bot: str) -> None:
+        if bot in host.repository.deletions():
+            raise HTTPException(409, "the bot is waiting to be deleted; restore it first")
         if bot not in host.repository.bots():
             raise HTTPException(404, f"unknown bot {bot!r}")
 
@@ -593,6 +627,7 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
     def list_bots() -> Any:
         """Every bot in the repository, with or without a deployment (the builder's bot list)."""
         live = host.bots()
+        deletions = host.repository.deletions()
         items = []
         for bot in host.repository.bots():
             draft = host.repository.draft(bot)
@@ -612,8 +647,41 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
                 "draft_revision": draft.revision if draft is not None else None,
                 # the draft differs from what is live: there is something to deploy
                 "undeployed_changes": draft is not None and draft_version != (current.version if current else None),
+                "deletion": {"purge_after": deletions[bot]} if bot in deletions else None,
             })
         return {"bots": items}
+
+    @app.post("/v1/builder/bots", dependencies=deps, status_code=201, response_model=BotCreatedOut)
+    def create_bot(body: BotCreateIn) -> Any:
+        """A new draft (not deployed): empty, or (with copy_from) a copy of another bot's draft."""
+        try:
+            check = host.create_bot(body.id, body.label, body.copy_from)
+        except BotExists:
+            return JSONResponse({"detail": f"bot {body.id!r} already exists or is waiting to be deleted"},
+                                status_code=409)
+        except CopySourceNotFound as exc:
+            raise HTTPException(404, f"unknown bot {body.copy_from!r}") from exc
+        return {"bot": body.id, "revision": check.revision}
+
+    @app.delete("/v1/builder/bots/{bot}", dependencies=deps, status_code=202, response_model=BotDeletedOut)
+    def delete_bot(bot: str = BOT_ID) -> Any:
+        """Request bot's deletion: out of service now (chat 404s), purged after 7 days unless restored."""
+        try:
+            purge_after = host.delete_bot(bot)
+        except AlreadyDeleting:
+            return JSONResponse({"detail": "the bot is already waiting to be deleted"}, status_code=409)
+        except KeyError as exc:
+            raise HTTPException(404, f"unknown bot {bot!r}") from exc
+        return {"bot": bot, "purge_after": purge_after}
+
+    @app.post("/v1/builder/bots/{bot}/restore", dependencies=deps, response_model=BotRestoredOut)
+    def restore_bot(bot: str = BOT_ID) -> Any:
+        """Cancel a pending deletion and serve the bot's deployed pair again."""
+        try:
+            key = host.restore_bot(bot)
+        except NoDeletionPending as exc:
+            raise HTTPException(404, f"no deletion is pending for {bot!r}") from exc
+        return {"bot": bot, "live": key[0] if key else None}
 
     @app.get("/v1/builder/bots/{bot}/draft", dependencies=deps,
              responses=DRAFT_RESPONSE)
@@ -1086,6 +1154,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
     if args.skill_allow_private:
         log.warning("--skill-allow-private: HTTP skills may call internal addresses; never use this on a shared server")
     host.start()
+    host.start_purge_daemon()  # permanently deletes bots past their 7-day deletion grace period, hourly
     for directory in args.bot:
         host.seed(directory)
     if not host.bots():

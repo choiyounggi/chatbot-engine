@@ -41,6 +41,15 @@ class InMemoryStore:
         with self._guard:
             return list(self._events.get(session_id, []))
 
+    def delete_sessions(self, prefix: str) -> int:
+        with self._guard:
+            removed = [sid for sid in self._events if sid.startswith(prefix)]
+            for sid in removed:
+                del self._events[sid]
+                self._locks.pop(sid, None)
+            self._log = [entry for entry in self._log if not entry[0].startswith(prefix)]
+        return len(removed)
+
     def recent(self, prefix: str, event_type: str, limit: int) -> list[tuple[str, Event]]:
         if limit < 1:
             return []
