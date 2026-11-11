@@ -57,6 +57,16 @@ class TrackerStore(Protocol):
         [since, until) (None: unbounded), newest first, at most `limit`."""
         ...
 
+    def activity(self, prefix: str, types: frozenset[str], since: dt.datetime | None,
+                 until: dt.datetime | None) -> list[tuple[str, Event, dt.datetime]]:
+        """(session id, event, stored at) of committed events of these types whose session id starts with
+        `prefix`, stored in [since, until), oldest first (ties: commit order). `at` is timezone-aware UTC."""
+        ...
+
+    def first_seen(self, prefix: str) -> dict[str, dt.datetime]:
+        """Session id -> when its first user_uttered event was stored (sessions starting with prefix)."""
+        ...
+
 
 def check_session_id(session_id: str) -> str:
     if (not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 128

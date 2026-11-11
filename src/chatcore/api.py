@@ -32,6 +32,8 @@ from fastapi import Path as PathParam
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from chatcore.actions.builtin import KST
+from chatcore.analytics import ACTIVITY_TYPES, MAX_DAYS, SESSION_GAP, compute_report, start_of
 from chatcore.bot.loader import BotError, document_version
 from chatcore.bot.repository import RevisionConflict, VersionNotFound
 from chatcore.bot.schema import BasicCard, BotDocument, Carousel, ListCard, SimpleImage
@@ -292,6 +294,54 @@ class KbSearchOut(BaseModel):
 
 class ExtractOut(BaseModel):
     text: str
+
+
+class AnalyticsTotalsOut(BaseModel):
+    users: int
+    new_users: int
+    returning_users: int
+    sessions: int
+    messages: int
+    block_calls: int
+    fallbacks: int
+    knowledge_answers: int
+    knowledge_rate: float | None
+
+
+class AnalyticsDayOut(BaseModel):
+    date: dt.date
+    users: int
+    new_users: int
+    returning_users: int
+    sessions: int
+    messages: int
+    block_calls: int
+    fallbacks: int
+    knowledge_answers: int
+
+
+class AnalyticsBlockOut(BaseModel):
+    block: str
+    label: str
+    calls: int
+
+
+class AnalyticsRetentionOut(BaseModel):
+    date: dt.date
+    new_users: int
+    d1: float | None
+    d7: float | None
+
+
+class AnalyticsOut(BaseModel):
+    bot: str
+    from_date: dt.date = Field(alias="from")
+    to: dt.date
+    timezone: str = "Asia/Seoul"
+    totals: AnalyticsTotalsOut
+    days: list[AnalyticsDayOut]
+    blocks: list[AnalyticsBlockOut]
+    retention: list[AnalyticsRetentionOut]
 
 
 class LiveOut(BaseModel):
@@ -989,6 +1039,45 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
                     "replies": [{"label": label, "message": message} for label, message in answer.replies]},
                 "candidates": [{"id": h.entry.id, "kind": h.entry.kind, "title": h.entry.title, "cosine": h.cosine,
                                 "score": h.score, "passed": h.entry.id in passed} for h in result.candidates]}
+
+    @app.get("/v1/builder/bots/{bot}/analytics", dependencies=deps, response_model=AnalyticsOut)
+    def analytics_report(bot: str = BOT_ID, from_date: str | None = Query(None, alias="from"),
+                         to: str | None = Query(None)) -> Any:
+        """Period totals, a daily table, block-call ranking and new-user retention (분석, E12).
+        Default period: the 7 days ending today (KST). Only `{bot}:` sessions count."""
+        known(bot)
+        today = dt.datetime.now(KST).date()
+        try:
+            to_d = today if to is None else dt.date.fromisoformat(to)
+            from_d = (to_d - dt.timedelta(days=6)) if from_date is None else dt.date.fromisoformat(from_date)
+        except ValueError as exc:
+            raise HTTPException(422, f"malformed date: {exc}") from exc
+        if from_d > to_d:
+            raise HTTPException(422, "'from' must not be after 'to'")
+        if (to_d - from_d).days + 1 > MAX_DAYS:
+            raise HTTPException(422, f"the period must be at most {MAX_DAYS} days")
+
+        runtime = host.runtime(bot)
+        if runtime is not None:
+            labels = {sid: (s.label or sid) for sid, s in runtime.bot.scenarios.items()}
+        else:
+            document = host.repository.get_draft(bot)
+            scenarios = document.get("scenarios") if isinstance(document, dict) else None
+            labels = ({sid: (s.get("label") or sid) if isinstance(s, dict) else sid
+                      for sid, s in scenarios.items()} if isinstance(scenarios, dict) else {})
+
+        prefix = f"{bot}:"
+        rows = host.store.activity(prefix, ACTIVITY_TYPES, start_of(from_d) - SESSION_GAP,
+                                   start_of(to_d + dt.timedelta(days=8)))
+        first_seen = host.store.first_seen(prefix)
+        report = compute_report(rows, first_seen, from_d, to_d, labels, today)
+        return {
+            "bot": bot, "from": report.from_, "to": report.to, "timezone": "Asia/Seoul",
+            "totals": asdict(report.totals),
+            "days": [asdict(d) for d in report.days],
+            "blocks": [asdict(b) for b in report.blocks],
+            "retention": [asdict(r) for r in report.retention],
+        }
 
     @app.post("/v1/builder/bots/{bot}/deploy", dependencies=deps, response_model=LiveOut)
     def deploy(body: DeployIn, bot: str = BOT_ID) -> Any:

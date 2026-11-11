@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
-from chatcore.dialogue.events import CommandsReceived, Event
+from chatcore.dialogue.events import CommandsReceived, Event, UserUttered
 from chatcore.store.base import SessionBusy, Tracker, Utterance, check_session_id
 
 
@@ -65,4 +65,22 @@ class InMemoryStore:
                     out.append(Utterance(sid, at, dict(e.nlu)))
                     if len(out) >= limit:
                         break
+        return out
+
+    def activity(self, prefix: str, types: frozenset[str], since: dt.datetime | None,
+                 until: dt.datetime | None) -> list[tuple[str, Event, dt.datetime]]:
+        out: list[tuple[str, Event, dt.datetime]] = []
+        with self._guard:
+            for sid, e, at in self._log:  # oldest first already (commit order)
+                if (sid.startswith(prefix) and e.type in types
+                        and (since is None or at >= since) and (until is None or at < until)):
+                    out.append((sid, e, at))
+        return out
+
+    def first_seen(self, prefix: str) -> dict[str, dt.datetime]:
+        out: dict[str, dt.datetime] = {}
+        with self._guard:
+            for sid, e, at in self._log:  # oldest first already (commit order)
+                if sid.startswith(prefix) and isinstance(e, UserUttered) and sid not in out:
+                    out[sid] = at
         return out
