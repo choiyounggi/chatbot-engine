@@ -442,25 +442,41 @@ def answer_text(entry: Entry) -> str:
     return entry.body if entry.kind == "faq" else f"{entry.body}\n\n출처: {entry.source}"
 
 
-def button_label(title: str) -> str:
-    """Kakao shows 14 characters of a button; the button still sends the whole title."""
-    return title if len(title) <= KAKAO_LABEL else title[:KAKAO_LABEL - 1].rstrip() + "…"
+def button_label(text: str, suffix: str = "") -> str:
+    """Kakao shows 14 characters of a button (the button still sends the whole title); `suffix` is kept."""
+    room = KAKAO_LABEL - len(suffix)
+    return (text if len(text) <= room else text[:room - 1].rstrip() + "…") + suffix
+
+
+def _section(entry: Entry) -> str:
+    """What a suggestion button says: an FAQ question, or a chunk's section (its heading without the
+    document title; the "(2/3)" part of a title would not fit in 14 characters)."""
+    if entry.kind == "faq":
+        return entry.title
+    heading = entry.heading or entry.title
+    return heading.split(" - ", 1)[1] if " - " in heading else heading
 
 
 def compose(result: KbResult, settings: KbSettings) -> KbAnswer | None:
-    """The message for a search result; None when nothing passed."""
+    """The message for a search result; None when nothing passed. 답안 추천형 offers one button per FAQ
+    entry or document section (its best chunk), up to SUGGESTIONS, with labels that differ."""
     if not result.answers:
         return None
-    titles = list(dict.fromkeys(h.entry.title for h in result.answers))
-    if settings.mode == "instant" or result.exact or len(titles) == 1:
+    best_of: dict[str, Entry] = {}
+    for h in result.answers:  # best first
+        e = h.entry
+        best_of.setdefault(e.id if e.kind == "faq" else f"{e.id.split('#')[0]}#{e.heading or e.title}", e)
+    if settings.mode == "instant" or result.exact or len(best_of) == 1:
         best = result.answers[0].entry
         return KbAnswer(answer_text(best), (), (best.id,))
-    best_of: dict[str, Entry] = {}
-    for h in result.answers:  # one button per title, best first
-        best_of.setdefault(h.entry.title, h.entry)
     first = list(best_of.values())[:SUGGESTIONS]
-    return KbAnswer(settings.suggest_text, tuple((button_label(e.title), e.title) for e in first),
-                    tuple(e.id for e in first))
+    seen: dict[str, int] = {}
+    replies = []
+    for e in first:
+        name = _section(e)
+        seen[name] = seen.get(name, 0) + 1
+        replies.append((button_label(name, f" ({seen[name]})" if seen[name] > 1 else ""), e.title))
+    return KbAnswer(settings.suggest_text, tuple(replies), tuple(e.id for e in first))
 
 
 # ---------------------------------------------------------------- in a conversation
