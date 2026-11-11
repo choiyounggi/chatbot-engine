@@ -74,7 +74,8 @@ def test_now_uses_korea_time():
 
 def test_builtin_registry_validates_args_and_runs():
     reg = builtin_registry(OpenMeteo(http=fake_http(SYNTHETIC)), clock=lambda: dt.datetime(2030, 1, 1, tzinfo=KST))
-    assert reg.names() == {"get_weather", "get_temperature", "now"}
+    assert reg.names() == {"get_weather", "get_temperature", "now", "knowledge"}
+    assert reg.run("knowledge", {}) == {"found": "no", "answer": "", "source": "", "title": ""}  # no knowledge base
     assert reg.run("get_temperature", {"location": "서울"})["celsius"] == 8
     with pytest.raises(ActionError, match="bad arguments"):
         reg.run("get_weather", {})

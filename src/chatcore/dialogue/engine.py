@@ -12,8 +12,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from chatcore.bot.schema import ActionStep, BotDefinition, BranchStep, CallStep, CollectStep, RespondStep, Slot
+from chatcore.bot.schema import (
+    ActionStep,
+    BotDefinition,
+    BranchStep,
+    CallStep,
+    CollectStep,
+    QuickReply,
+    RespondStep,
+    Slot,
+)
 from chatcore.dialogue.commands import (
+    AnswerKnowledge,
     CancelScenario,
     Clarify,
     Command,
@@ -226,6 +236,13 @@ class _Turn:
                     self.progressed = True
                 case Fallback():
                     fallback = True
+                case AnswerKnowledge(text=text, replies=replies):
+                    replies_out = tuple(QuickReply.model_construct(label=label, action="message", message_text=message,
+                                                                   block_id=None) for label, message in replies)
+                    msg = BotMessage("knowledge", text, replies_out)
+                    self.out.messages.append(msg)
+                    self.emit(BotUttered(response=msg.response, text=msg.text, quick_replies=list(msg.quick_replies)))
+                    self.progressed = True
 
         if (waiting is not None and waiting_slot is not None and not self.progressed
                 and self.state.top is waiting and waiting.awaiting == waiting_slot):

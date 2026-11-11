@@ -27,3 +27,6 @@ class HashingEmbedder:
                     out[r, int(hashlib.md5(text[i:i + n].encode()).hexdigest(), 16) % self.dims] += 1
         norms = np.linalg.norm(out, axis=1, keepdims=True)
         return (out / np.maximum(norms, 1e-9)).astype(np.float32)
+
+    def encode_passages(self, texts: Sequence[str]) -> NDArray[np.float32]:
+        return self.encode(texts)  # no prompt either way

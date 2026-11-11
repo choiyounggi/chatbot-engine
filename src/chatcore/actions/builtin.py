@@ -119,12 +119,17 @@ def now_action(clock: Callable[[], dt.datetime]) -> Callable[[dict[str, str]], d
     return now
 
 
+NOT_FOUND = {"found": "no", "answer": "", "source": "", "title": ""}  # the `knowledge` action's result shape
+
+
 def builtin_registry(weather: OpenMeteo | None = None, clock: Callable[[], dt.datetime] | None = None,
                      timeout: float = 5.0) -> ActionRegistry:
-    """get_weather, get_temperature (args: location) and now."""
+    """get_weather, get_temperature (args: location), now, and knowledge (a bot with a knowledge base
+    gets its own: chatcore.knowledge.knowledge_action; without one nothing is found)."""
     weather = weather or OpenMeteo()
     registry = ActionRegistry(timeout=timeout)
     registry.register("get_weather", weather.weather, LocationArgs)
     registry.register("get_temperature", weather.temperature, LocationArgs)
     registry.register("now", now_action(clock or (lambda: dt.datetime.now(KST))))
+    registry.register("knowledge", lambda args: dict(NOT_FOUND))
     return registry
