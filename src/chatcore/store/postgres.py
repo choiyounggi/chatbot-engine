@@ -106,6 +106,50 @@ class PostgresStore:
         with self._connect() as conn:
             return self._load(conn, session_id)
 
+    def activity(self, prefix: str, types: frozenset[str], since: dt.datetime | None,
+                 until: dt.datetime | None) -> list[tuple[str, Event, dt.datetime]]:
+        if not types:
+            return []
+        pattern = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT session_id, created_at, payload FROM chat_events WHERE session_id LIKE %s "
+                "AND type = ANY(%s) AND (%s::timestamptz IS NULL OR created_at >= %s) "
+                "AND (%s::timestamptz IS NULL OR created_at < %s) ORDER BY created_at, session_id, seq",
+                (pattern, list(types), since, since, until, until),
+            ).fetchall()
+        out: list[tuple[str, Event, dt.datetime]] = []
+        for sid, at, payload in rows:
+            if not isinstance(payload, dict) or not isinstance(at, dt.datetime):
+                raise TypeError("chat_events rows must hold a JSON object and a timestamp")
+            out.append((str(sid), from_json(payload), at.astimezone(dt.UTC)))
+        return out
+
+    def first_seen(self, prefix: str) -> dict[str, dt.datetime]:
+        pattern = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT session_id, MIN(created_at) FROM chat_events WHERE session_id LIKE %s "
+                "AND type = 'user_uttered' GROUP BY session_id",
+                (pattern,),
+            ).fetchall()
+        out: dict[str, dt.datetime] = {}
+        for sid, at in rows:
+            if not isinstance(at, dt.datetime):
+                raise TypeError("chat_events.created_at must be a timestamp")
+            out[str(sid)] = at.astimezone(dt.UTC)
+        return out
+
+    def delete_sessions(self, prefix: str) -> int:
+        pattern = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._connect() as conn:  # one transaction: count, then delete the same rows
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT session_id) FROM chat_events WHERE session_id LIKE %s", (pattern,)
+            ).fetchone()
+            conn.execute("DELETE FROM chat_events WHERE session_id LIKE %s", (pattern,))
+        count: Any = row[0] if row is not None else 0
+        return int(count)
+
     @staticmethod
     def _load(conn: psycopg.Connection[tuple[object, ...]], session_id: str) -> list[Event]:
         rows = conn.execute(

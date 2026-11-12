@@ -32,17 +32,24 @@ from fastapi import Path as PathParam
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from chatcore.actions.builtin import KST
+from chatcore.analytics import ACTIVITY_TYPES, MAX_DAYS, SESSION_GAP, compute_report, start_of
 from chatcore.bot.loader import BotError, document_version
 from chatcore.bot.repository import RevisionConflict, VersionNotFound
 from chatcore.bot.schema import BasicCard, BotDocument, Carousel, ListCard, SimpleImage
 from chatcore.dialogue.state import fold
 from chatcore.dialogue.turn import MAX_INPUT_CHARS, TurnResult, UnknownBlock
 from chatcore.host import (
+    AlreadyDeleting,
     BadExample,
     BelowBar,
+    BotDeleting,
+    BotExists,
     BotHost,
+    CopySourceNotFound,
     ExampleTaken,
     Host,
+    NoDeletionPending,
     NoDraft,
     NoEarlierDeployment,
     NoKnowledgeBase,
@@ -138,6 +145,10 @@ class MisunderstoodOut(BaseModel):
     items: list[MisunderstoodItem]
 
 
+class BotDeletionOut(BaseModel):
+    purge_after: str  # ISO 8601 UTC: permanently deleted at this time unless restored first
+
+
 class BotSummaryOut(BaseModel):
     id: str
     label: str
@@ -146,10 +157,32 @@ class BotSummaryOut(BaseModel):
     serving: str | None  # version this server answers with (None: not loaded here)
     draft_revision: int | None
     undeployed_changes: bool  # the draft differs from what is live
+    deletion: BotDeletionOut | None = None  # waiting to be deleted (None: not waiting)
 
 
 class BotListOut(BaseModel):
     bots: list[BotSummaryOut]
+
+
+class BotCreateIn(BaseModel):
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    label: str = Field(min_length=1, max_length=100)
+    copy_from: str | None = Field(None, pattern=r"^[a-z][a-z0-9_]{0,63}$")
+
+
+class BotCreatedOut(BaseModel):
+    bot: str
+    revision: int
+
+
+class BotDeletedOut(BaseModel):
+    bot: str
+    purge_after: str  # ISO 8601 UTC
+
+
+class BotRestoredOut(BaseModel):
+    bot: str
+    live: str | None  # the deployed version now serving again (None: the bot was never deployed)
 
 
 class DraftSavedOut(BaseModel):
@@ -294,6 +327,54 @@ class ExtractOut(BaseModel):
     text: str
 
 
+class AnalyticsTotalsOut(BaseModel):
+    users: int
+    new_users: int
+    returning_users: int
+    sessions: int
+    messages: int
+    block_calls: int
+    fallbacks: int
+    knowledge_answers: int
+    knowledge_rate: float | None
+
+
+class AnalyticsDayOut(BaseModel):
+    date: dt.date
+    users: int
+    new_users: int
+    returning_users: int
+    sessions: int
+    messages: int
+    block_calls: int
+    fallbacks: int
+    knowledge_answers: int
+
+
+class AnalyticsBlockOut(BaseModel):
+    block: str
+    label: str
+    calls: int
+
+
+class AnalyticsRetentionOut(BaseModel):
+    date: dt.date
+    new_users: int
+    d1: float | None
+    d7: float | None
+
+
+class AnalyticsOut(BaseModel):
+    bot: str
+    from_date: dt.date = Field(alias="from")
+    to: dt.date
+    timezone: str = "Asia/Seoul"
+    totals: AnalyticsTotalsOut
+    days: list[AnalyticsDayOut]
+    blocks: list[AnalyticsBlockOut]
+    retention: list[AnalyticsRetentionOut]
+
+
 class LiveOut(BaseModel):
     bot: str
     live: str
@@ -436,12 +517,19 @@ EXTRACT_BODY: dict[str, Any] = {
 MAX_UPLOAD = 10 * 1024 * 1024
 
 MISUNDERSTOOD_RULES = ("fallback", "clarify")
+EARLIEST, LATEST = dt.date(2000, 1, 1), dt.date(2100, 12, 31)  # analytics periods
 
 
 def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | None = None) -> FastAPI:
     """`admin_token`: when set, builder endpoints require `Authorization: Bearer <token>`.
     `jobs`: where builder training runs (a new JobRunner when the host is a BotHost)."""
     app = FastAPI(title="chatcore", version="0.0.1")
+
+    @app.exception_handler(BotDeleting)
+    async def bot_deleting(request: Request, exc: BotDeleting) -> JSONResponse:
+        # any route or job step that reaches a bot waiting to be deleted (BotHost guards writes, training,
+        # deploys and test chats; known() already answers most builder routes the same way)
+        return JSONResponse({"detail": "the bot is waiting to be deleted; restore it first"}, status_code=409)
 
     def runtime(bot: str) -> BotRuntime:
         rt = host.runtime(bot)
@@ -519,6 +607,8 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
     @app.get("/v1/builder/bots/{bot}/misunderstood", dependencies=[Depends(admin)], response_model=MisunderstoodOut)
     def misunderstood(bot: str = BOT_ID, limit: int = 50) -> dict[str, Any]:
         """Recent messages the bot could not handle — candidates for new examples."""
+        if isinstance(host, BotHost) and bot in host.repository.deletions():
+            raise HTTPException(409, "the bot is waiting to be deleted; restore it first")
         runtime(bot)
         limit = max(1, min(limit, 500))
         items = []
@@ -586,6 +676,8 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
     deps = [Depends(admin)]
 
     def known(bot: str) -> None:
+        if bot in host.repository.deletions():
+            raise HTTPException(409, "the bot is waiting to be deleted; restore it first")
         if bot not in host.repository.bots():
             raise HTTPException(404, f"unknown bot {bot!r}")
 
@@ -593,6 +685,7 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
     def list_bots() -> Any:
         """Every bot in the repository, with or without a deployment (the builder's bot list)."""
         live = host.bots()
+        deletions = host.repository.deletions()
         items = []
         for bot in host.repository.bots():
             draft = host.repository.draft(bot)
@@ -612,8 +705,41 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
                 "draft_revision": draft.revision if draft is not None else None,
                 # the draft differs from what is live: there is something to deploy
                 "undeployed_changes": draft is not None and draft_version != (current.version if current else None),
+                "deletion": {"purge_after": deletions[bot]} if bot in deletions else None,
             })
         return {"bots": items}
+
+    @app.post("/v1/builder/bots", dependencies=deps, status_code=201, response_model=BotCreatedOut)
+    def create_bot(body: BotCreateIn) -> Any:
+        """A new draft (not deployed): empty, or (with copy_from) a copy of another bot's draft."""
+        try:
+            check = host.create_bot(body.id, body.label, body.copy_from)
+        except BotExists:
+            return JSONResponse({"detail": f"bot {body.id!r} already exists or is waiting to be deleted"},
+                                status_code=409)
+        except CopySourceNotFound as exc:
+            raise HTTPException(404, f"unknown bot {body.copy_from!r}") from exc
+        return {"bot": body.id, "revision": check.revision}
+
+    @app.delete("/v1/builder/bots/{bot}", dependencies=deps, status_code=202, response_model=BotDeletedOut)
+    def delete_bot(bot: str = BOT_ID) -> Any:
+        """Request bot's deletion: out of service now (chat 404s), purged after 7 days unless restored."""
+        try:
+            purge_after = host.delete_bot(bot)
+        except AlreadyDeleting:
+            return JSONResponse({"detail": "the bot is already waiting to be deleted"}, status_code=409)
+        except KeyError as exc:
+            raise HTTPException(404, f"unknown bot {bot!r}") from exc
+        return {"bot": bot, "purge_after": purge_after}
+
+    @app.post("/v1/builder/bots/{bot}/restore", dependencies=deps, response_model=BotRestoredOut)
+    def restore_bot(bot: str = BOT_ID) -> Any:
+        """Cancel a pending deletion and serve the bot's deployed pair again."""
+        try:
+            key = host.restore_bot(bot)
+        except NoDeletionPending as exc:
+            raise HTTPException(404, f"no deletion is pending for {bot!r}") from exc
+        return {"bot": bot, "live": key[0] if key else None}
 
     @app.get("/v1/builder/bots/{bot}/draft", dependencies=deps,
              responses=DRAFT_RESPONSE)
@@ -990,6 +1116,47 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
                 "candidates": [{"id": h.entry.id, "kind": h.entry.kind, "title": h.entry.title, "cosine": h.cosine,
                                 "score": h.score, "passed": h.entry.id in passed} for h in result.candidates]}
 
+    @app.get("/v1/builder/bots/{bot}/analytics", dependencies=deps, response_model=AnalyticsOut)
+    def analytics_report(bot: str = BOT_ID, from_date: str | None = Query(None, alias="from"),
+                         to: str | None = Query(None)) -> Any:
+        """Period totals, a daily table, block-call ranking and new-user retention (분석, E12).
+        Default period: the 7 days ending today (KST). Only `{bot}:` sessions count."""
+        known(bot)
+        today = dt.datetime.now(KST).date()
+        try:
+            to_d = today if to is None else dt.date.fromisoformat(to)
+            from_d = (to_d - dt.timedelta(days=6)) if from_date is None else dt.date.fromisoformat(from_date)
+        except (ValueError, OverflowError) as exc:
+            raise HTTPException(422, f"malformed date: {exc}") from exc
+        if not (EARLIEST <= from_d and to_d <= LATEST):  # far dates would overflow the read window
+            raise HTTPException(422, f"dates must be between {EARLIEST} and {LATEST}")
+        if from_d > to_d:
+            raise HTTPException(422, "'from' must not be after 'to'")
+        if (to_d - from_d).days + 1 > MAX_DAYS:
+            raise HTTPException(422, f"the period must be at most {MAX_DAYS} days")
+
+        runtime = host.runtime(bot)
+        if runtime is not None:
+            labels = {sid: (s.label or sid) for sid, s in runtime.bot.scenarios.items()}
+        else:
+            document = host.repository.get_draft(bot)
+            scenarios = document.get("scenarios") if isinstance(document, dict) else None
+            labels = ({sid: (s.get("label") or sid) if isinstance(s, dict) else sid
+                      for sid, s in scenarios.items()} if isinstance(scenarios, dict) else {})
+
+        prefix = f"{bot}:"
+        rows = host.store.activity(prefix, ACTIVITY_TYPES, start_of(from_d) - SESSION_GAP,
+                                   start_of(to_d + dt.timedelta(days=8)))
+        first_seen = host.store.first_seen(prefix)
+        report = compute_report(rows, first_seen, from_d, to_d, labels, today)
+        return {
+            "bot": bot, "from": report.from_, "to": report.to, "timezone": "Asia/Seoul",
+            "totals": asdict(report.totals),
+            "days": [asdict(d) for d in report.days],
+            "blocks": [asdict(b) for b in report.blocks],
+            "retention": [asdict(r) for r in report.retention],
+        }
+
     @app.post("/v1/builder/bots/{bot}/deploy", dependencies=deps, response_model=LiveOut)
     def deploy(body: DeployIn, bot: str = BOT_ID) -> Any:
         known(bot)
@@ -1086,10 +1253,13 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
     if args.skill_allow_private:
         log.warning("--skill-allow-private: HTTP skills may call internal addresses; never use this on a shared server")
     host.start()
+    host.start_purge_daemon()  # permanently deletes bots past their 7-day deletion grace period, hourly
     for directory in args.bot:
         host.seed(directory)
     if not host.bots():
-        parser.error("no deployed bots: pass --bot <directory>")
+        if not host.repository.deletions():
+            parser.error("no deployed bots: pass --bot <directory>")
+        log.warning("every bot is waiting to be deleted; restore one with POST /v1/builder/bots/{bot}/restore")
     for bot_id in host.bots():  # load the model weights before the first user waits for them
         runtime = host.runtime(bot_id)
         assert runtime is not None

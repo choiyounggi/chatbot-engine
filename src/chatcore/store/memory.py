@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
-from chatcore.dialogue.events import CommandsReceived, Event
+from chatcore.dialogue.events import CommandsReceived, Event, UserUttered
 from chatcore.store.base import SessionBusy, Tracker, Utterance, check_session_id
 
 
@@ -41,6 +41,15 @@ class InMemoryStore:
         with self._guard:
             return list(self._events.get(session_id, []))
 
+    def delete_sessions(self, prefix: str) -> int:
+        with self._guard:
+            removed = [sid for sid in self._events if sid.startswith(prefix)]
+            for sid in removed:
+                del self._events[sid]
+                self._locks.pop(sid, None)
+            self._log = [entry for entry in self._log if not entry[0].startswith(prefix)]
+        return len(removed)
+
     def recent(self, prefix: str, event_type: str, limit: int) -> list[tuple[str, Event]]:
         if limit < 1:
             return []
@@ -65,4 +74,22 @@ class InMemoryStore:
                     out.append(Utterance(sid, at, dict(e.nlu)))
                     if len(out) >= limit:
                         break
+        return out
+
+    def activity(self, prefix: str, types: frozenset[str], since: dt.datetime | None,
+                 until: dt.datetime | None) -> list[tuple[str, Event, dt.datetime]]:
+        out: list[tuple[str, Event, dt.datetime]] = []
+        with self._guard:
+            for sid, e, at in self._log:  # oldest first already (commit order)
+                if (sid.startswith(prefix) and e.type in types
+                        and (since is None or at >= since) and (until is None or at < until)):
+                    out.append((sid, e, at))
+        return out
+
+    def first_seen(self, prefix: str) -> dict[str, dt.datetime]:
+        out: dict[str, dt.datetime] = {}
+        with self._guard:
+            for sid, e, at in self._log:  # oldest first already (commit order)
+                if sid.startswith(prefix) and isinstance(e, UserUttered) and sid not in out:
+                    out[sid] = at
         return out

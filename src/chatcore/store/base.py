@@ -47,6 +47,11 @@ class TrackerStore(Protocol):
         """Committed events of a session (read-only, no lock)."""
         ...
 
+    def delete_sessions(self, prefix: str) -> int:
+        """Delete every session whose id starts with `prefix` (a literal prefix, not a pattern).
+        Returns how many sessions were removed."""
+        ...
+
     def recent(self, prefix: str, event_type: str, limit: int) -> list[tuple[str, Event]]:
         """Newest committed events of one type across sessions whose id starts with `prefix`."""
         ...
@@ -55,6 +60,16 @@ class TrackerStore(Protocol):
                    limit: int) -> list[Utterance]:
         """Understood user messages of sessions whose id starts with `prefix`, stored in
         [since, until) (None: unbounded), newest first, at most `limit`."""
+        ...
+
+    def activity(self, prefix: str, types: frozenset[str], since: dt.datetime | None,
+                 until: dt.datetime | None) -> list[tuple[str, Event, dt.datetime]]:
+        """(session id, event, stored at) of committed events of these types whose session id starts with
+        `prefix`, stored in [since, until), oldest first (ties: commit order). `at` is timezone-aware UTC."""
+        ...
+
+    def first_seen(self, prefix: str) -> dict[str, dt.datetime]:
+        """Session id -> when its first user_uttered event was stored (sessions starting with prefix)."""
         ...
 
 

@@ -139,6 +139,21 @@ class BotRepository(Protocol):
         ...
     def deployments(self, bot_id: str) -> list[str]: ...  # newest first; [0] is live
     def history(self, bot_id: str) -> list[Deployment]: ...  # newest first
+    def request_deletion(self, bot_id: str, purge_after: str) -> None:
+        """Record that bot_id is waiting to be purged (ISO 8601 UTC purge_after). Raises KeyError
+        if a deletion is already pending for this bot (cancel_deletion it first)."""
+        ...
+    def cancel_deletion(self, bot_id: str) -> bool:
+        """Cancel a pending deletion. False: none was pending."""
+        ...
+    def deletions(self) -> dict[str, str]:
+        """bot_id -> purge_after (ISO 8601 UTC), for every bot waiting to be purged."""
+        ...
+    def purge_bot(self, bot_id: str) -> None:
+        """Permanently delete every stored row of bot_id: drafts, edits, versions, deployments,
+        marks, secrets, skill errors, knowledge-base drafts/versions and the deletion record
+        itself. Idempotent: purging a bot with nothing stored does nothing."""
+        ...
 
 
 def _check_mark(status: str, intent: str | None) -> None:
@@ -167,6 +182,7 @@ class InMemoryRepository:
         self._marks: dict[str, list[Mark]] = {}  # newest first
         self._secrets: dict[str, dict[str, tuple[str, str]]] = {}  # bot -> name -> (value, updated_at)
         self._skill_errors: dict[str, list[dict[str, Any]]] = {}  # newest first
+        self._deletions: dict[str, str] = {}  # bot -> purge_after (ISO 8601 UTC)
         self._lock = threading.Lock()
 
     def bots(self) -> list[str]:
@@ -317,6 +333,33 @@ class InMemoryRepository:
         with self._lock:
             return list(self._deployments.get(bot_id, []))
 
+    def request_deletion(self, bot_id: str, purge_after: str) -> None:
+        with self._lock:
+            if bot_id in self._deletions:
+                raise KeyError(f"deletion already pending for {bot_id}")
+            self._deletions[bot_id] = purge_after
+
+    def cancel_deletion(self, bot_id: str) -> bool:
+        with self._lock:
+            return self._deletions.pop(bot_id, None) is not None
+
+    def deletions(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._deletions)
+
+    def purge_bot(self, bot_id: str) -> None:
+        with self._lock:
+            self._drafts.pop(bot_id, None)
+            self._versions.pop(bot_id, None)
+            self._kb_drafts.pop(bot_id, None)
+            self._kb_versions.pop(bot_id, None)
+            self._deployments.pop(bot_id, None)
+            self._edits.pop(bot_id, None)
+            self._marks.pop(bot_id, None)
+            self._secrets.pop(bot_id, None)
+            self._skill_errors.pop(bot_id, None)
+            self._deletions.pop(bot_id, None)
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bot_drafts (
@@ -404,6 +447,10 @@ CREATE TABLE IF NOT EXISTS bot_kb_versions (
 CREATE UNIQUE INDEX IF NOT EXISTS bot_kb_versions_number ON bot_kb_versions (bot_id, number);
 -- a deployment pairs a bot version with a knowledge-base version (or none)
 ALTER TABLE bot_deployments ADD COLUMN IF NOT EXISTS kb_version text;
+CREATE TABLE IF NOT EXISTS bot_deletions (
+    bot_id      text PRIMARY KEY,
+    purge_after timestamptz NOT NULL
+);
 """
 
 
@@ -620,6 +667,37 @@ class PostgresRepository:
                 "WHERE d.bot_id = %s ORDER BY d.id DESC", (bot_id,)).fetchall()
         return [Deployment(str(v), int(n), str(note), _iso(at), str(kb) if kb is not None else None)
                 for v, n, note, at, kb in rows]
+
+    def request_deletion(self, bot_id: str, purge_after: str) -> None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "INSERT INTO bot_deletions (bot_id, purge_after) VALUES (%s, %s::timestamptz) "
+                "ON CONFLICT (bot_id) DO NOTHING RETURNING bot_id", (bot_id, purge_after)).fetchone()
+        if row is None:
+            raise KeyError(f"deletion already pending for {bot_id}")
+
+    def cancel_deletion(self, bot_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("DELETE FROM bot_deletions WHERE bot_id = %s RETURNING bot_id", (bot_id,)).fetchone()
+        return row is not None
+
+    def deletions(self) -> dict[str, str]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT bot_id, purge_after FROM bot_deletions").fetchall()
+        return {str(b): _iso(at) for b, at in rows}
+
+    def purge_bot(self, bot_id: str) -> None:
+        with self._connect() as conn:  # one transaction: child rows before their parents, every table
+            conn.execute("DELETE FROM bot_deployments WHERE bot_id = %s", (bot_id,))
+            conn.execute("DELETE FROM bot_versions WHERE bot_id = %s", (bot_id,))
+            conn.execute("DELETE FROM bot_drafts WHERE bot_id = %s", (bot_id,))
+            conn.execute("DELETE FROM bot_draft_edits WHERE bot_id = %s", (bot_id,))
+            conn.execute("DELETE FROM bot_utterance_marks WHERE bot_id = %s", (bot_id,))
+            conn.execute("DELETE FROM bot_secrets WHERE bot_id = %s", (bot_id,))
+            conn.execute("DELETE FROM bot_skill_errors WHERE bot_id = %s", (bot_id,))
+            conn.execute("DELETE FROM bot_kb_drafts WHERE bot_id = %s", (bot_id,))
+            conn.execute("DELETE FROM bot_kb_versions WHERE bot_id = %s", (bot_id,))
+            conn.execute("DELETE FROM bot_deletions WHERE bot_id = %s", (bot_id,))
 
     def set_secret(self, bot_id: str, name: str, value: str) -> None:
         with self._connect() as conn:
