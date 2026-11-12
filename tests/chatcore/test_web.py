@@ -12,7 +12,15 @@ from chatcore.bot.repository import InMemoryRepository
 from chatcore.conversations import synthetic_actions
 from chatcore.host import BotHost, StaticHost
 from chatcore.store.memory import InMemoryStore
-from chatcore.web import DEFAULT_COLOR, DEFAULT_PLACEHOLDER, MAX_ORIGINS, OriginCache, WebSettings, normalize_origin
+from chatcore.web import (
+    DEFAULT_COLOR,
+    DEFAULT_PLACEHOLDER,
+    MAX_ORIGINS,
+    OriginCache,
+    WebSettings,
+    normalize_origin,
+    public,
+)
 
 from .conftest import SAMPLE
 from .test_bot_lifecycle import postgres_repository
@@ -59,6 +67,11 @@ def test_settings_have_defaults_and_are_normalized() -> None:
 def test_settings_refuse(bad) -> None:
     with pytest.raises(ValidationError):
         WebSettings(**bad)
+
+
+def test_public_settings_never_name_the_allowed_sites() -> None:
+    out = public(WebSettings(allowed_origins=[SHOP]), "sample", "")
+    assert out == {"bot": "sample", "title": "sample", "color": DEFAULT_COLOR, "placeholder": DEFAULT_PLACEHOLDER}
 
 
 def test_the_origin_cache_reads_again_after_its_time_or_when_told() -> None:
