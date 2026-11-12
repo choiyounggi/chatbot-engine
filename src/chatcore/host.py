@@ -34,6 +34,7 @@ from chatcore.bot.schema import BotDefinition
 from chatcore.dialogue.events import SessionStarted
 from chatcore.dialogue.turn import TurnProcessor
 from chatcore.dialogue.values import ActionFn, ActionRegistry
+from chatcore.generation import Generator
 from chatcore.knowledge import (
     CosineJudge,
     Judge,
@@ -42,7 +43,6 @@ from chatcore.knowledge import (
     Knowledge,
     KnowledgeError,
     KnowledgeIndex,
-    compose,
     kb_version,
     parse_kb,
 )
@@ -208,11 +208,13 @@ class BotHost:
                  bulk_embedder: Embedder | None = None, test_keep: int = 2, test_ttl: float = 1800.0,
                  skill_allow_private: bool = False, skill_transport: Transport = post_json,
                  judge: Judge | None = None,
-                 clock: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC)) -> None:
+                 clock: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+                 generator: Generator | None = None) -> None:
         """bulk_embedder: the same model for training (e.g. BatchedEmbedder.bulk(), so chat goes first).
         test_keep / test_ttl: builder test builds kept loaded, and for how long after their last use.
         skill_allow_private: let HTTP skills call internal addresses (development and tests only).
         judge: decides whether a knowledge-base candidate answers (default: cosine, for hashing mode).
+        generator: the server's LLM for knowledge bases whose settings ask for generated answers (E-F).
         clock: now() for bot deletion/purge timing (tests pin it to control when purge_after is due)."""
         if keep < 1 or test_keep < 1 or test_ttl <= 0:
             raise ValueError("keep and test_keep must be >= 1 and test_ttl > 0")
@@ -224,6 +226,7 @@ class BotHost:
         self.actions, self.keep, self.min_f1 = actions(), keep, min_f1
         self.skill_allow_private, self.skill_transport = skill_allow_private, skill_transport
         self.judge: Judge = judge or CosineJudge()
+        self.generator = generator
         self._loaded: dict[str, OrderedDict[Key, BotRuntime]] = {}  # bot -> (version, kb) -> runtime (LRU)
         self._live: dict[str, Key] = {}
         self._indexes: OrderedDict[tuple[str, str], KnowledgeIndex] = OrderedDict()  # (bot, kb version), LRU
@@ -591,8 +594,10 @@ class BotHost:
             version = versions[0].version
         index = self.kb_index(bot_id, version)
         text = " ".join(query.split())
-        result = index.search(text, self.embedder.encode([normalize(text)])[0], self.judge)
-        return version, result, compose(result, index.settings)
+        knowledge = Knowledge(index, self.judge, self.embedder, self.generator)
+        found = index.search(text, self.embedder.encode([normalize(text)])[0], self.judge)
+        result, answer = knowledge.answer(text, found)
+        return version, result, answer
 
     def _remember_index(self, bot_id: str, index: KnowledgeIndex) -> None:
         """Lock held. A lookup cache (runtimes hold their own index): the KB_CACHE most recently used."""
@@ -706,7 +711,8 @@ class BotHost:
         # model.bot carries the thresholds meta.json was trained with (NluModel.load, docs/
         # engine-core-plan.md "빌더 단계 E-B4"), not necessarily the document's own numbers.
         served = model.bot
-        knowledge = Knowledge(kb, self.judge, self.embedder) if kb is not None and not kb.empty else None
+        knowledge = (Knowledge(kb, self.judge, self.embedder, self.generator)
+                     if kb is not None and not kb.empty else None)
         processor = TurnProcessor(served, self.store, NluInterpreter(model.parse, knowledge),
                                   self.actions_for(served, knowledge), kb_version=kb.version if kb else None)
         return BotRuntime(served, processor, model)
