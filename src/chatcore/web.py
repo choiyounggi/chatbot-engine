@@ -6,13 +6,16 @@ a save applies at once, like a skill secret.
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+log = logging.getLogger(__name__)
 
 MAX_ORIGINS = 20
 DEFAULT_COLOR = "#2563EB"
@@ -22,7 +25,8 @@ _ORIGIN = re.compile(r"^https?://(\[[0-9a-f:.]+\]|[a-z0-9]([a-z0-9-]*[a-z0-9])?(
 
 
 def normalize_origin(origin: str) -> str:
-    """An origin as browsers send it (`scheme://host[:port]`, lower case). ValueError otherwise."""
+    """An origin as browsers send it (`scheme://host[:port]`, lower case, no default port).
+    ValueError otherwise."""
     value = origin.strip().lower()
     match = _ORIGIN.fullmatch(value)
     if match is None:
@@ -30,6 +34,8 @@ def normalize_origin(origin: str) -> str:
     port = match.group(5)
     if port is not None and not 0 < int(port[1:]) <= 65535:
         raise ValueError(f"{origin!r} has a port outside 1-65535")
+    if (value.startswith("https://") and port == ":443") or (value.startswith("http://") and port == ":80"):
+        return value.removesuffix(port)  # browsers leave the default port out
     return value
 
 
@@ -62,6 +68,18 @@ class WebSettings(BaseModel):
     @classmethod
     def _color(cls, value: str) -> str:
         return value.upper()
+
+
+def load(stored: dict[str, Any] | None) -> WebSettings | None:
+    """Stored settings as this version reads them: keys it does not know are ignored, and a row it
+    cannot read at all counts as defaults (no site allowed) rather than breaking every request."""
+    if stored is None:
+        return None
+    try:
+        return WebSettings(**{k: v for k, v in stored.items() if k in WebSettings.model_fields})
+    except ValidationError:
+        log.warning("unreadable web settings %r: using the defaults (no site allowed)", stored)
+        return WebSettings()
 
 
 def public(settings: WebSettings, bot: str, label: str) -> dict[str, Any]:

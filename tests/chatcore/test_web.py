@@ -253,3 +253,57 @@ def test_a_server_without_a_repository_allows_no_site(runtime_client) -> None:
 def runtime_client(host):
     rt = host.runtime("sample")
     return TestClient(create_app(StaticHost({"sample": rt}, host.store))), rt
+
+
+# ---------------------------------------------------------------- review (E-G)
+
+
+def test_behind_a_path_prefix_the_check_still_runs(host) -> None:
+    client = TestClient(create_app(host), root_path="/api")
+    allow(client, SHOP)
+    refused = client.post("/api/v1/bots/sample/sessions/rp/open", headers={"Origin": "https://evil.example"})
+    assert refused.status_code == 403 and list(host.store.events("sample:rp")) == []
+    ok = client.post("/api/v1/bots/sample/sessions/rp/open", headers={"Origin": SHOP})
+    assert ok.status_code == 200 and ok.headers["access-control-allow-origin"] == SHOP
+
+
+def test_a_bot_this_server_does_not_serve_is_404_without_reading_settings(client, host, monkeypatch) -> None:
+    reads = []
+    real = host.repository.web_settings
+    monkeypatch.setattr(host.repository, "web_settings", lambda bot: reads.append(bot) or real(bot))
+    for n in range(3):
+        r = client.options(f"/v1/bots/nobody{n}/web", headers={"Origin": SHOP})
+        assert r.status_code == 404 and r.headers["vary"] == "Origin"
+    assert reads == []
+
+
+def test_a_stored_row_from_another_version_still_works(client, host) -> None:
+    host.repository.save_web_settings("sample", {"allowed_origins": [SHOP], "title": "날씨봇", "added_later": True})
+    assert say(client, "안녕", SHOP).status_code == 200
+    assert client.get("/v1/bots/sample/web").json()["title"] == "날씨봇"
+    assert client.get(WEB).json()["allowed_origins"] == [SHOP]
+    host.repository.save_web_settings("sample", {"allowed_origins": ["not an origin"], "title": 3})
+    client.put(WEB, json={"allowed_origins": [SHOP]})  # forget the cached list
+    host.repository.save_web_settings("sample", {"allowed_origins": ["not an origin"], "title": 3})
+    assert say(client, "안녕", SHOP, session="broken").status_code in (200, 403)  # cached or not: never 503
+    assert client.get("/v1/bots/sample/web").status_code == 200 and client.get(WEB).status_code == 200
+
+
+@pytest.mark.parametrize("given, stored", [("https://shop.example:443", SHOP), ("http://shop.example:80", "http://shop.example"),
+                                           ("https://shop.example:80", "https://shop.example:80")])
+def test_a_default_port_is_dropped_as_browsers_do(given, stored) -> None:
+    assert normalize_origin(given) == stored
+
+
+def test_refusals_vary_by_origin_and_a_crash_still_carries_the_header(client, host, monkeypatch) -> None:
+    allow(client, SHOP)
+    refused = say(client, "안녕", "https://evil.example")
+    assert refused.status_code == 403 and refused.headers["vary"] == "Origin"
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("chatcore.api.run_turn", crash)
+    r = TestClient(create_app(host), raise_server_exceptions=False).post(
+        "/v1/bots/sample/sessions/c/messages", json={"text": "안녕"}, headers={"Origin": SHOP})
+    assert r.status_code == 500 and r.headers["access-control-allow-origin"] == SHOP

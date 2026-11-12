@@ -66,7 +66,7 @@ from chatcore.runtime import BotRuntime
 from chatcore.store.base import SessionBusy
 from chatcore.training_queue import RuleFilter, StatusFilter, group
 from chatcore.training_queue import key as queue_key
-from chatcore.web import OriginCache, WebSettings, public
+from chatcore.web import OriginCache, WebSettings, load, public
 
 try:  # storage errors that mean "try again later"
     from psycopg import OperationalError as _DbDown
@@ -583,8 +583,7 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
 
     def stored_web(bot: str) -> WebSettings | None:
         repository = getattr(host, "repository", None)  # a StaticHost has none: no site is allowed
-        stored = repository.web_settings(bot) if repository is not None else None
-        return WebSettings(**stored) if stored is not None else None
+        return load(repository.web_settings(bot)) if repository is not None else None
 
     origins = OriginCache(stored_web)
 
@@ -592,20 +591,31 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
     async def cors(request: Request, call_next: Any) -> Any:
         """Browsers may call a bot's chat endpoints only from the sites its web settings allow."""
         origin = request.headers.get("origin")
-        match = CORS_PATH.match(request.url.path)
+        path = request.scope["path"]
+        root = request.scope.get("root_path", "")
+        if root and path.startswith(root):  # behind a path prefix: match what the router matches
+            path = path[len(root):]
+        match = CORS_PATH.match(path)
         if origin is None or match is None:
             return await call_next(request)
+        bot, vary = match.group(1), {"Vary": "Origin"}
+        if host.runtime(bot) is None:  # not served here: no settings read, nothing cached
+            return JSONResponse({"detail": f"unknown bot {bot!r}"}, status_code=404, headers=vary)
         try:
-            allowed = await run_in_threadpool(origins.allowed, match.group(1), origin)
+            allowed = await run_in_threadpool(origins.allowed, bot, origin)
         except Exception:
-            log.exception("could not read the web settings of %s", match.group(1))
-            return JSONResponse({"detail": "temporarily unavailable, please retry"}, status_code=503)
+            log.exception("could not read the web settings of %s", bot)
+            return JSONResponse({"detail": "temporarily unavailable, please retry"}, status_code=503, headers=vary)
         if not allowed:
-            return JSONResponse({"detail": "this site may not talk to this bot"}, status_code=403)
-        headers = {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
+            return JSONResponse({"detail": "this site may not talk to this bot"}, status_code=403, headers=vary)
+        headers = {"Access-Control-Allow-Origin": origin, **vary}
         if request.method == "OPTIONS":
             return Response(status_code=204, headers={**headers, **PREFLIGHT_HEADERS})
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:  # the widget should see a 500, not an unreadable network error
+            log.exception("unhandled error for %s", path)
+            return JSONResponse({"detail": "internal error"}, status_code=500, headers=headers)
         response.headers.update(headers)
         return response
 
@@ -936,8 +946,7 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner, or
     def web_settings(bot: str = BOT_ID) -> Any:
         """The bot's web chat settings: allowed sites and the widget's look (defaults until saved)."""
         known(bot)
-        stored = host.repository.web_settings(bot)
-        return {"bot": bot, **(WebSettings(**stored) if stored is not None else WebSettings()).model_dump()}
+        return {"bot": bot, **(load(host.repository.web_settings(bot)) or WebSettings()).model_dump()}
 
     @app.put("/v1/builder/bots/{bot}/web", dependencies=deps, response_model=WebOut)
     def save_web_settings(body: WebSettings, bot: str = BOT_ID) -> Any:
