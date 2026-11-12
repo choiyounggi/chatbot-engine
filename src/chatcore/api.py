@@ -1488,6 +1488,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
     parser.add_argument("--augment-llm-model", default=None,
                         help="the model (on the --llm-url server) that proposes block examples and FAQ similar "
                              "questions in the builder (default: --llm-model; a larger one writes better typos)")
+    parser.add_argument("--spelling", action="store_true",
+                        help="correct one-jamo typos against each bot's own words before understanding a turn "
+                             "(docs/benchmarks/spelling.md: safe, helps single-jamo slips; off by default)")
     parser.add_argument("--keep-warm-ms", type=float, default=None,
                         help="when idle, run the model this often so the first request after a pause stays fast "
                              "(keeps the GPU busy; see docs/benchmarks/api_latency.md)")
@@ -1513,7 +1516,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
     judge = embedder.judge() or CosineJudge(args.kb_threshold if args.kb_threshold is not None else COSINE_THRESHOLD)
     host = BotHost(default_repository(), default_store(), embedder, args.artifacts, bulk_embedder=embedder.bulk(),
                    min_f1=args.min_f1, skill_allow_private=args.skill_allow_private, judge=judge,
-                   generator=llm_generator(parser, args))
+                   generator=llm_generator(parser, args), spelling=args.spelling)
     if args.skill_allow_private:
         log.warning("--skill-allow-private: HTTP skills may call internal addresses; never use this on a shared server")
     host.start()

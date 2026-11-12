@@ -47,6 +47,10 @@ With an LLM, the builder can also ask for more block examples and FAQ similar qu
 synonyms): the engine screens the proposals and a person adds the ones to keep. A larger model writes better
 typos: `--augment-llm-model mlx-community/Qwen3-14B-4bit` (same server). Measured: [docs/benchmarks/augment.md](docs/benchmarks/augment.md).
 
+`--spelling` corrects a word one jamo away from the bot's own words ("날시" → "날씨") before a turn is understood,
+when the Korean analyzer finds the bot's word clearly more likely. Off by default: safe on every measured set, but
+the gain on naturally written typos was not significant. Measured: [docs/benchmarks/spelling.md](docs/benchmarks/spelling.md).
+
 ## Layout
 
 | Path | What |
