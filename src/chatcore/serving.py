@@ -255,5 +255,5 @@ class _BatchedJudge:
     def score(self, query: str, candidates: Sequence[Candidate]) -> NDArray[np.float64]:
         if not candidates:
             return np.zeros(0)
-        return np.asarray(self._owner._batcher([Pair(query, c.entry.judge_text) for c in candidates]),
+        return np.asarray(self._owner._batcher([Pair(query, c.judge_input) for c in candidates]),
                           dtype=np.float64).ravel()

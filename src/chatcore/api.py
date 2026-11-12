@@ -19,6 +19,7 @@ import datetime as dt
 import hmac
 import json
 import logging
+import random
 import re
 import sys
 import time
@@ -34,6 +35,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from chatcore import augment
 from chatcore.actions.builtin import KST
 from chatcore.analytics import ACTIVITY_TYPES, MAX_DAYS, SESSION_GAP, compute_report, start_of
 from chatcore.bot.loader import BotError, document_version
@@ -61,7 +63,8 @@ from chatcore.host import (
 )
 from chatcore.jobs import JobFailed, JobRunner
 from chatcore.knowledge import KnowledgeBase, KnowledgeError, extract_text
-from chatcore.nlu.train import TrainingError
+from chatcore.nlu.entities import normalize
+from chatcore.nlu.train import PLACEHOLDER, TrainingError, entity_forms, fill
 from chatcore.runtime import BotRuntime
 from chatcore.store.base import SessionBusy
 from chatcore.training_queue import RuleFilter, StatusFilter, group
@@ -509,6 +512,28 @@ class SecretsOut(BaseModel):
     items: list[SecretOut]  # names only: values are never sent back
 
 
+class AugmentIn(BaseModel):
+    kind: Literal["intent", "faq"]  # a block's examples, or an FAQ entry's similar questions
+    id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    count: int = Field(augment.DEFAULT_COUNT, ge=1, le=augment.MAX_COUNT)
+
+
+class ProposalOut(BaseModel):
+    text: str
+    type: Literal["typo", "casual", "paraphrase", "synonym"]
+    status: Literal["ok", "duplicate", "invalid", "conflict"]
+    detail: str
+
+
+class AugmentOut(BaseModel):
+    bot: str
+    kind: str
+    id: str
+    model: str
+    ms: int
+    items: list[ProposalOut]
+
+
 class WebOut(WebSettings):
     bot: str
 
@@ -943,6 +968,84 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner, or
         except KeyError as exc:
             raise HTTPException(404, f"the saved draft has no skill {skill!r}") from exc
         return asdict(outcome)
+
+    @app.post("/v1/builder/bots/{bot}/augment", dependencies=deps, response_model=AugmentOut)
+    def augment_proposals(body: AugmentIn, bot: str = BOT_ID) -> Any:
+        """Sentences the LLM proposes for a block's examples or an FAQ's similar questions, screened by
+        the engine (duplicate / invalid / conflict / ok). Nothing is saved: the builder adds what a
+        person keeps (docs/engine-core-plan.md "빌더 단계 E-H")."""
+        known(bot)
+        if host.generator is None:
+            raise HTTPException(409, "this server has no LLM (start it with --llm-url)")
+        config = host.generator.client.config
+        client = LlmClient(LlmConfig(config.url, config.model, augment.TIMEOUT, config.api_key),
+                           host.generator.client.transport)
+        if body.kind == "intent":
+            messages, existing, placeholders, conflict, skipped = _intent_task(bot, body.id, body.count)
+        else:
+            messages, existing, placeholders, conflict, skipped = _faq_task(bot, body.id, body.count)
+        start = time.perf_counter()
+        try:
+            items = augment.propose(client, messages)
+        except GenerationError as exc:
+            raise HTTPException(502, f"the LLM did not answer: {exc.outcome}: {exc.detail}") from exc
+        ms = round((time.perf_counter() - start) * 1000)
+        proposals = augment.screen(items, existing, placeholders, conflict, skipped)
+        return {"bot": bot, "kind": body.kind, "id": body.id, "model": config.model, "ms": ms,
+                "items": [p.to_dict() for p in proposals]}
+
+    def _intent_task(bot: str, intent: str, count: int) -> Any:
+        draft = host.repository.get_draft(bot) or {}
+        spec = (draft.get("intents") or {}).get(intent)
+        if not isinstance(spec, dict) or not isinstance(spec.get("examples"), list):
+            raise HTTPException(404, f"the saved draft has no block {intent!r}")
+        examples = [e for e in spec["examples"] if isinstance(e, str)]
+        labels = {k: (v.get("label") or k) for k, v in (draft.get("intents") or {}).items() if isinstance(v, dict)}
+        placeholders = {p for e in examples for p in PLACEHOLDER.findall(e)}
+        rt = host.runtime(bot)
+        if rt is None or intent not in rt.model.classifier.classes:
+            return (augment.intent_messages(labels.get(intent, intent), examples, count), examples, placeholders,
+                    None, "배포된 모델에 이 블록이 없어 다른 블록과 헷갈리는지는 보지 않았어요")
+        forms, rng = entity_forms(rt.bot), random.Random(0)
+
+        def conflict(text: str) -> str | None:
+            try:
+                parsed = rt.model.parse(fill(text, rng, forms))
+            except TrainingError:
+                return None
+            top = parsed.intents[0]
+            if top.intent != intent and top.score >= augment.CONFLICT_PROB:
+                name = "범위 밖" if top.intent == "out_of_scope" else f"‘{labels.get(top.intent, top.intent)}’ 블록"
+                return f"{name}으로 판단돼요 ({top.score:.2f})"
+            return None
+
+        messages = augment.intent_messages(labels.get(intent, intent), examples, count)
+        return messages, examples, placeholders, conflict, ""
+
+    def _faq_task(bot: str, faq_id: str, count: int) -> Any:
+        draft = host.repository.kb_draft(bot)
+        faq = (draft.document.get("faq") if draft is not None else None) or []
+        entry = next((f for f in faq if isinstance(f, dict) and f.get("id") == faq_id), None)
+        if entry is None:
+            raise HTTPException(404, f"the saved knowledge base has no FAQ {faq_id!r}")
+        similar = [q for q in entry.get("similar") or [] if isinstance(q, str)]
+        messages = augment.faq_messages(str(entry.get("question", "")), str(entry.get("answer", "")), similar, count)
+        existing = [str(entry.get("question", "")), *similar]
+        versions = host.repository.kb_versions(bot)
+        index = host.kb_index(bot, versions[0].version) if versions else None
+        if index is None or faq_id not in {e.id for e in index.faq}:
+            return messages, existing, set(), None, "만든 색인에 이 FAQ가 없어 다른 FAQ와 헷갈리는지는 보지 않았어요"
+        titles = {e.id: e.title for e in index.faq}
+
+        def conflict(text: str) -> str | None:
+            scores = index.faq_scores(host.embedder.encode([normalize(text)])[0])
+            mine = scores.pop(faq_id, -1.0)
+            if not scores:
+                return None
+            other, best = max(scores.items(), key=lambda kv: kv[1])
+            return f"‘{titles[other]}’ FAQ에 더 가까워요" if best > mine + augment.FAQ_MARGIN else None
+
+        return messages, existing, set(), conflict, ""
 
     @app.get("/v1/builder/bots/{bot}/web", dependencies=deps, response_model=WebOut)
     def web_settings(bot: str = BOT_ID) -> Any:

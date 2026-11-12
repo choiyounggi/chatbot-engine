@@ -147,9 +147,9 @@ class LlmClient:
     def __init__(self, config: LlmConfig, transport: Transport = post) -> None:
         self.config, self.transport = config, transport
 
-    def chat(self, messages: list[dict[str, str]], max_tokens: int = MAX_TOKENS) -> str:
+    def chat(self, messages: list[dict[str, str]], max_tokens: int = MAX_TOKENS, temperature: float = 0) -> str:
         """The reply text (a model's <think> block removed). GenerationError on timeout / failure."""
-        body = json.dumps({"model": self.config.model, "messages": messages, "temperature": 0,
+        body = json.dumps({"model": self.config.model, "messages": messages, "temperature": temperature,
                            "max_tokens": max_tokens, "stream": False}, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.config.api_key:
