@@ -19,6 +19,7 @@ import datetime as dt
 import hmac
 import json
 import logging
+import re
 import sys
 import time
 from collections.abc import AsyncIterator, Iterator, Sequence
@@ -31,6 +32,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi import Path as PathParam
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from chatcore.actions.builtin import KST
 from chatcore.analytics import ACTIVITY_TYPES, MAX_DAYS, SESSION_GAP, compute_report, start_of
@@ -64,6 +66,7 @@ from chatcore.runtime import BotRuntime
 from chatcore.store.base import SessionBusy
 from chatcore.training_queue import RuleFilter, StatusFilter, group
 from chatcore.training_queue import key as queue_key
+from chatcore.web import OriginCache, WebSettings, load, public
 
 try:  # storage errors that mean "try again later"
     from psycopg import OperationalError as _DbDown
@@ -506,6 +509,23 @@ class SecretsOut(BaseModel):
     items: list[SecretOut]  # names only: values are never sent back
 
 
+class WebOut(WebSettings):
+    bot: str
+
+
+class WebPublicOut(BaseModel):
+    bot: str
+    title: str
+    color: str
+    placeholder: str
+
+
+# the chat endpoints a browser may call from an allowed site (docs/engine-core-plan.md "빌더 단계 E-G")
+CORS_PATH = re.compile(r"^/v1/bots/([a-z][a-z0-9_]{0,63})/(?:web|sessions/[A-Za-z0-9_-]{1,63}/(?:open|messages))$")
+PREFLIGHT_HEADERS = {"Access-Control-Allow-Methods": "GET, POST", "Access-Control-Allow-Headers": "Content-Type",
+                     "Access-Control-Max-Age": "600"}
+
+
 class SecretIn(BaseModel):
     value: str = Field(min_length=1, max_length=4000)
 
@@ -561,6 +581,46 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
         if expected is not None and not hmac.compare_digest(given, expected):  # constant time
             raise HTTPException(401, "builder endpoints need the admin token")
 
+    def stored_web(bot: str) -> WebSettings | None:
+        repository = getattr(host, "repository", None)  # a StaticHost has none: no site is allowed
+        return load(repository.web_settings(bot)) if repository is not None else None
+
+    origins = OriginCache(stored_web)
+
+    @app.middleware("http")
+    async def cors(request: Request, call_next: Any) -> Any:
+        """Browsers may call a bot's chat endpoints only from the sites its web settings allow."""
+        origin = request.headers.get("origin")
+        path = request.scope["path"]
+        root = request.scope.get("root_path", "")
+        if root and path.startswith(root):  # behind a path prefix: match what the router matches
+            path = path[len(root):]
+        match = CORS_PATH.match(path)
+        if origin is None or match is None:
+            return await call_next(request)
+        bot, vary = match.group(1), {"Vary": "Origin"}
+        # a refusal the widget can read (fixed text, no turn ran); a refused preflight stops the browser's POST
+        readable = vary if request.method == "OPTIONS" else {"Access-Control-Allow-Origin": origin, **vary}
+        if host.runtime(bot) is None:  # not served here: no settings read, nothing cached
+            return JSONResponse({"detail": f"unknown bot {bot!r}"}, status_code=404, headers=readable)
+        try:
+            allowed = await run_in_threadpool(origins.allowed, bot, origin)
+        except Exception:
+            log.exception("could not read the web settings of %s", bot)
+            return JSONResponse({"detail": "temporarily unavailable, please retry"}, status_code=503, headers=readable)
+        if not allowed:
+            return JSONResponse({"detail": "this site may not talk to this bot"}, status_code=403, headers=readable)
+        headers = {"Access-Control-Allow-Origin": origin, **vary}
+        if request.method == "OPTIONS":
+            return Response(status_code=204, headers={**headers, **PREFLIGHT_HEADERS})
+        try:
+            response = await call_next(request)
+        except Exception:  # the widget should see a 500, not an unreadable network error
+            log.exception("unhandled error for %s", path)
+            return JSONResponse({"detail": "internal error"}, status_code=500, headers=headers)
+        response.headers.update(headers)
+        return response
+
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
         return {"ok": True, "bots": host.bots()}
@@ -608,6 +668,12 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
             return result
         return TurnOut(bot=bot, session=session, messages=messages_out(result))
 
+    @app.get("/v1/bots/{bot}/web", response_model=WebPublicOut)
+    def web_public(bot: str = BOT_ID) -> Any:
+        """How the chat widget looks for this bot (never which sites are allowed)."""
+        rt = runtime(bot)
+        return public(stored_web(bot) or WebSettings(), bot, rt.bot.label)
+
     @app.post("/v1/bots/{bot}/nlu/parse", response_model=ParseOut)
     def parse(body: MessageIn, bot: str = BOT_ID) -> Any:
         rt = runtime(bot)
@@ -640,7 +706,7 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
 
     if isinstance(host, BotHost):
         runner = jobs or JobRunner()
-        _builder_routes(app, host, admin, runner)
+        _builder_routes(app, host, admin, runner, origins)
         if jobs is None:  # ours: finish queued jobs on shutdown
             app.router.on_shutdown.append(runner.close)
     return app
@@ -689,7 +755,7 @@ def parse_if_match(value: str | None) -> int | None:
     return int(tag)
 
 
-def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) -> None:
+def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner, origins: OriginCache) -> None:
     deps = [Depends(admin)]
 
     def known(bot: str) -> None:
@@ -877,6 +943,20 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
         except KeyError as exc:
             raise HTTPException(404, f"the saved draft has no skill {skill!r}") from exc
         return asdict(outcome)
+
+    @app.get("/v1/builder/bots/{bot}/web", dependencies=deps, response_model=WebOut)
+    def web_settings(bot: str = BOT_ID) -> Any:
+        """The bot's web chat settings: allowed sites and the widget's look (defaults until saved)."""
+        known(bot)
+        return {"bot": bot, **(load(host.repository.web_settings(bot)) or WebSettings()).model_dump()}
+
+    @app.put("/v1/builder/bots/{bot}/web", dependencies=deps, response_model=WebOut)
+    def save_web_settings(body: WebSettings, bot: str = BOT_ID) -> Any:
+        """Replace the web chat settings; they apply at once (no deploy)."""
+        known(bot)
+        host.repository.save_web_settings(bot, body.model_dump())
+        origins.forget(bot)
+        return {"bot": bot, **body.model_dump()}
 
     @app.get("/v1/builder/bots/{bot}/secrets", dependencies=deps, response_model=SecretsOut)
     def secrets(bot: str = BOT_ID) -> Any:

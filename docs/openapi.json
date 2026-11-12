@@ -3551,6 +3551,124 @@
         ],
         "title": "VersionsOut",
         "type": "object"
+      },
+      "WebOut": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_origins": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Allowed Origins",
+            "type": "array"
+          },
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "color": {
+            "default": "#2563EB",
+            "pattern": "^#[0-9A-Fa-f]{6}$",
+            "title": "Color",
+            "type": "string"
+          },
+          "placeholder": {
+            "default": "메시지를 입력하세요",
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Placeholder",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "bot"
+        ],
+        "title": "WebOut",
+        "type": "object"
+      },
+      "WebPublicOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "color": {
+            "title": "Color",
+            "type": "string"
+          },
+          "placeholder": {
+            "title": "Placeholder",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bot",
+          "title",
+          "color",
+          "placeholder"
+        ],
+        "title": "WebPublicOut",
+        "type": "object"
+      },
+      "WebSettings": {
+        "additionalProperties": false,
+        "description": "What the builder edits. `title` None: the bot's label.",
+        "properties": {
+          "allowed_origins": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Allowed Origins",
+            "type": "array"
+          },
+          "color": {
+            "default": "#2563EB",
+            "pattern": "^#[0-9A-Fa-f]{6}$",
+            "title": "Color",
+            "type": "string"
+          },
+          "placeholder": {
+            "default": "메시지를 입력하세요",
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Placeholder",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "WebSettings",
+        "type": "object"
       }
     }
   },
@@ -3749,6 +3867,47 @@
           }
         },
         "summary": "Open Session"
+      }
+    },
+    "/v1/bots/{bot}/web": {
+      "get": {
+        "description": "How the chat widget looks for this bot (never which sites are allowed).",
+        "operationId": "web_public_v1_bots__bot__web_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebPublicOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Web Public"
       }
     },
     "/v1/builder/bots": {
@@ -6016,6 +6175,128 @@
           }
         },
         "summary": "Train Version"
+      }
+    },
+    "/v1/builder/bots/{bot}/web": {
+      "get": {
+        "description": "The bot's web chat settings: allowed sites and the widget's look (defaults until saved).",
+        "operationId": "web_settings_v1_builder_bots__bot__web_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Web Settings"
+      },
+      "put": {
+        "description": "Replace the web chat settings; they apply at once (no deploy).",
+        "operationId": "save_web_settings_v1_builder_bots__bot__web_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Web Settings"
       }
     },
     "/v1/builder/jobs/{job_id}": {

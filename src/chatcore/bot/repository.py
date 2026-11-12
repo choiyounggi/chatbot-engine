@@ -7,6 +7,7 @@ twice gives the same version (idempotent).
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import threading
 from dataclasses import dataclass
@@ -114,6 +115,8 @@ class BotRepository(Protocol):
     def secrets(self, bot_id: str) -> list[SecretInfo]: ...  # names, sorted
     def add_skill_error(self, bot_id: str, error: dict[str, Any]) -> None: ...  # keeps the newest SKILL_ERRORS_KEPT
     def skill_errors(self, bot_id: str, limit: int = SKILL_ERRORS_KEPT) -> list[dict[str, Any]]: ...  # newest first
+    def web_settings(self, bot_id: str) -> dict[str, Any] | None: ...  # chatcore.web.WebSettings; None: never saved
+    def save_web_settings(self, bot_id: str, settings: dict[str, Any]) -> None: ...  # replaces them
     def add_version(
         self, bot_id: str, version: str, document: dict[str, Any], macro_f1: float | None
     ) -> VersionInfo: ...
@@ -151,8 +154,8 @@ class BotRepository(Protocol):
         ...
     def purge_bot(self, bot_id: str) -> None:
         """Permanently delete every stored row of bot_id: drafts, edits, versions, deployments,
-        marks, secrets, skill errors, knowledge-base drafts/versions and the deletion record
-        itself. Idempotent: purging a bot with nothing stored does nothing."""
+        marks, secrets, skill errors, knowledge-base drafts/versions, web settings and the deletion
+        record itself. Idempotent: purging a bot with nothing stored does nothing."""
         ...
 
 
@@ -182,6 +185,7 @@ class InMemoryRepository:
         self._marks: dict[str, list[Mark]] = {}  # newest first
         self._secrets: dict[str, dict[str, tuple[str, str]]] = {}  # bot -> name -> (value, updated_at)
         self._skill_errors: dict[str, list[dict[str, Any]]] = {}  # newest first
+        self._web: dict[str, dict[str, Any]] = {}
         self._deletions: dict[str, str] = {}  # bot -> purge_after (ISO 8601 UTC)
         self._lock = threading.Lock()
 
@@ -254,6 +258,15 @@ class InMemoryRepository:
     def skill_errors(self, bot_id: str, limit: int = SKILL_ERRORS_KEPT) -> list[dict[str, Any]]:
         with self._lock:
             return [dict(e) for e in self._skill_errors.get(bot_id, [])[:max(limit, 0)]]
+
+    def web_settings(self, bot_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            found = self._web.get(bot_id)
+        return copy.deepcopy(found) if found is not None else None
+
+    def save_web_settings(self, bot_id: str, settings: dict[str, Any]) -> None:
+        with self._lock:
+            self._web[bot_id] = copy.deepcopy(settings)
 
     def latest_marks(self, bot_id: str) -> list[Mark]:
         latest: dict[str, Mark] = {}
@@ -358,6 +371,7 @@ class InMemoryRepository:
             self._marks.pop(bot_id, None)
             self._secrets.pop(bot_id, None)
             self._skill_errors.pop(bot_id, None)
+            self._web.pop(bot_id, None)
             self._deletions.pop(bot_id, None)
 
 
@@ -447,6 +461,11 @@ CREATE TABLE IF NOT EXISTS bot_kb_versions (
 CREATE UNIQUE INDEX IF NOT EXISTS bot_kb_versions_number ON bot_kb_versions (bot_id, number);
 -- a deployment pairs a bot version with a knowledge-base version (or none)
 ALTER TABLE bot_deployments ADD COLUMN IF NOT EXISTS kb_version text;
+CREATE TABLE IF NOT EXISTS bot_web_settings (
+    bot_id     text PRIMARY KEY,
+    settings   jsonb NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS bot_deletions (
     bot_id      text PRIMARY KEY,
     purge_after timestamptz NOT NULL
@@ -697,6 +716,7 @@ class PostgresRepository:
             conn.execute("DELETE FROM bot_skill_errors WHERE bot_id = %s", (bot_id,))
             conn.execute("DELETE FROM bot_kb_drafts WHERE bot_id = %s", (bot_id,))
             conn.execute("DELETE FROM bot_kb_versions WHERE bot_id = %s", (bot_id,))
+            conn.execute("DELETE FROM bot_web_settings WHERE bot_id = %s", (bot_id,))
             conn.execute("DELETE FROM bot_deletions WHERE bot_id = %s", (bot_id,))
 
     def set_secret(self, bot_id: str, name: str, value: str) -> None:
@@ -734,3 +754,13 @@ class PostgresRepository:
             rows = conn.execute("SELECT error FROM bot_skill_errors WHERE bot_id = %s ORDER BY id DESC LIMIT %s",
                                 (bot_id, max(limit, 0))).fetchall()
         return [dict(r[0]) for r in rows]
+
+    def web_settings(self, bot_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT settings FROM bot_web_settings WHERE bot_id = %s", (bot_id,)).fetchone()
+        return dict(row[0]) if row is not None else None
+
+    def save_web_settings(self, bot_id: str, settings: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            conn.execute("INSERT INTO bot_web_settings (bot_id, settings) VALUES (%s, %s) ON CONFLICT (bot_id) "
+                         "DO UPDATE SET settings = EXCLUDED.settings, updated_at = now()", (bot_id, Jsonb(settings)))
