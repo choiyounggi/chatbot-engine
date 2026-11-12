@@ -983,7 +983,7 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner, or
         config = host.generator.client.config
         model = augment_model or config.model
         client = LlmClient(LlmConfig(config.url, model, augment.TIMEOUT, config.api_key),
-                           host.generator.client.transport)
+                           host.generator.client.transport, augment.POOL)
         if body.kind == "intent":
             messages, existing, placeholders, conflict, skipped = _intent_task(bot, body.id, body.count)
         else:
@@ -1000,11 +1000,13 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner, or
 
     def _intent_task(bot: str, intent: str, count: int) -> Any:
         draft = host.repository.get_draft(bot) or {}
-        spec = (draft.get("intents") or {}).get(intent)
+        raw = draft.get("intents")
+        intents: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        spec = intents.get(intent)
         if not isinstance(spec, dict) or not isinstance(spec.get("examples"), list):
             raise HTTPException(404, f"the saved draft has no block {intent!r}")
         examples = [e for e in spec["examples"] if isinstance(e, str)]
-        labels = {k: (v.get("label") or k) for k, v in (draft.get("intents") or {}).items() if isinstance(v, dict)}
+        labels = {k: (v.get("label") or k) for k, v in intents.items() if isinstance(v, dict)}
         placeholders = {p for e in examples for p in PLACEHOLDER.findall(e)}
         rt = host.runtime(bot)
         if rt is None or intent not in rt.model.classifier.classes:
@@ -1012,11 +1014,11 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner, or
                     None, "배포된 모델에 이 블록이 없어 다른 블록과 헷갈리는지는 보지 않았어요")
         forms, rng = entity_forms(rt.bot), random.Random(0)
 
-        def conflict(text: str) -> str | None:
+        def conflict(text: str) -> str | augment.Unchecked | None:
             try:
                 parsed = rt.model.parse(fill(text, rng, forms))
             except TrainingError:
-                return None
+                return augment.Unchecked("배포된 모델에 없는 {자리}라 다른 블록과 헷갈리는지는 보지 않았어요")
             top = parsed.intents[0]
             if top.intent != intent and top.score >= augment.CONFLICT_PROB:
                 name = "범위 밖" if top.intent == "out_of_scope" else f"‘{labels.get(top.intent, top.intent)}’ 블록"

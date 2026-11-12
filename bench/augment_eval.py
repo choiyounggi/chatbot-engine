@@ -323,7 +323,9 @@ def main() -> int:  # pragma: no cover - real models
     by_text = {i.text: i for i in items}
     by_id = {i.id: i for i in items}
     questions = [q for q in load_questions(QUESTIONS, items) if q.kind != "block"]
-    noisy_q = [Question(noise(q.text)[0], q.kind, q.gold, q.intent, q.half) for q in questions]
+    noisy_pairs = [noise(q.text) for q in questions]
+    noisy_q = [Question(t, q.kind, q.gold, q.intent, q.half) for q, (t, _) in zip(questions, noisy_pairs, strict=True)]
+    kb_kinds = [k for q, (_, k) in zip(questions, noisy_pairs, strict=True) if q.kind == "answerable"]
     judge = CrossEncoderJudge()
     kb: dict[str, dict[str, dict[str, list[bool]]]] = {name: {} for name in configs}
     for variant, qs in (("clean", questions), ("noisy", noisy_q)):
@@ -357,13 +359,38 @@ def main() -> int:  # pragma: no cover - real models
                 row.append(found.answers[0].entry.title if found.answers else "(답 없음)")
         probes.append(row)
     examples = {run.model.split("/")[-1]: run for run in runs}
-    REPORT.write_text(report(nlu, examples, blocks, kb, probes, noisy_block), encoding="utf-8")
+    block_kinds = [k for s, (_, k) in zip(block, noisy_block, strict=True) if not s.gold.startswith("out_of_scope:")]
+    REPORT.write_text(report(nlu, examples, blocks, kb, probes, noisy_block, block_kinds, kb_kinds), encoding="utf-8")
     print(REPORT.read_text(encoding="utf-8"))
     return 0
 
 
+def by_kind(values: Sequence[bool], kinds: Sequence[str]) -> dict[str, list[bool]]:
+    """The scores of the typo-variant sentences, split by the kind of typo each got."""
+    out: dict[str, list[bool]] = {}
+    for v, k in zip(values, kinds, strict=True):
+        out.setdefault(k, []).append(v)
+    return out
+
+
+def criteria(base: dict[str, Any], kb_base: dict[str, Any], blocks: dict[str, Any], kb: dict[str, Any]) -> list[tuple[str, bool]]:
+    """The pre-registered checks (docs/engine-core-plan.md E-H) of one configuration against the original."""
+    drop = CRITERIA["drop"]
+    mean = lambda v: float(np.mean(v))  # noqa: E731
+    checks = [("오타판 범위 안 정확도가 오름", paired(base["noisy"]["in_scope"], blocks["noisy"]["in_scope"])[1][0] > 0),
+              ("오타판 지식베이스 맞게 답함이 오름", paired(kb_base["noisy"]["correct"], kb["noisy"]["correct"])[1][0] > 0),
+              ("원문 범위 안 정확도 −0.02 이내", mean(blocks["clean"]["in_scope"]) >= mean(base["clean"]["in_scope"]) - drop),
+              ("원문 지식베이스 맞게 답함 −0.02 이내", mean(kb["clean"]["correct"]) >= mean(kb_base["clean"]["correct"]) - drop)]
+    for variant, label in (("clean", "원문"), ("noisy", "오타판")):
+        for key, name in (("oos_hard", "범위 밖(hard)"), ("oos_easy", "범위 밖(easy)")):
+            checks.append((f"{label} {name} 거절률 −0.02 이내", mean(blocks[variant][key]) >= mean(base[variant][key]) - drop))
+        checks.append((f"{label} 답 없는 질문에 답함 +0.02 이내", mean(kb[variant]["unans"]) <= mean(kb_base[variant]["unans"]) + drop))
+    return checks
+
+
 def report(nlu: dict[str, Any], runs: dict[str, Augmented], blocks: dict[str, Any], kb: dict[str, Any],
-           probes: list[list[str]], noisy_block: list[tuple[str, str]]) -> str:  # pragma: no cover - formatting
+           probes: list[list[str]], noisy_block: list[tuple[str, str]], block_kinds: Sequence[str],
+           kb_kinds: Sequence[str]) -> str:  # pragma: no cover - formatting
     names = list(blocks)
     base = names[0]
 
@@ -397,18 +424,21 @@ def report(nlu: dict[str, Any], runs: dict[str, Augmented], blocks: dict[str, An
         for key, title in (("correct", "맞게 답함"), ("wrong", "틀리게 답함"), ("unans", "답 없는 질문에 답함")):
             a = kb[base][variant][key]
             lines.append(f"| {label} {title} (n={len(a)}) | " + " | ".join(cell(a, kb[n][variant][key]) for n in names) + " |")
+    lines += ["", "## 오타 종류별 (오타판, 범위 안 정확도 / 지식베이스 맞게 답함)", "",
+              "오타 프롬프트가 예로 드는 종류: vowel(ㅐ↔ㅔ)·final(받침)·tense(된소리)·space(띄어쓰기). **yo(끝 '요'→'여')는 프롬프트에 없다** — 생성기가 본 적 없는 오타.", "",
+              "| 종류 | " + " | ".join(names) + " |", sep]
+    for kind in sorted(set(block_kinds) | set(kb_kinds)):
+        row = []
+        for n in names:
+            b = by_kind(blocks[n]["noisy"]["in_scope"], block_kinds).get(kind, [])
+            k = by_kind(kb[n]["noisy"]["correct"], kb_kinds).get(kind, [])
+            row.append(f"{np.mean(b):.2f} (n={len(b)}) / {np.mean(k):.2f} (n={len(k)})" if b and k else "—")
+        lines.append(f"| {kind} | " + " | ".join(row) + " |")
     lines += ["", "## 처음 확인한 문장", "", "| 문장 | " + " | ".join(names) + " |", sep]
     lines += ["| " + " | ".join(row) + " |" for row in probes]
     lines += ["", "## 기준 (미리 정함)", ""]
     for name in names[1:]:
-        checks = [
-            ("오타판 범위 안 정확도가 오름", paired(blocks[base]["noisy"]["in_scope"], blocks[name]["noisy"]["in_scope"])[1][0] > 0),
-            ("오타판 지식베이스 맞게 답함이 오름", paired(kb[base]["noisy"]["correct"], kb[name]["noisy"]["correct"])[1][0] > 0),
-            ("원문 범위 안 정확도 −0.02 이내", np.mean(blocks[name]["clean"]["in_scope"]) >= np.mean(blocks[base]["clean"]["in_scope"]) - CRITERIA["drop"]),
-            ("원문 지식베이스 맞게 답함 −0.02 이내", np.mean(kb[name]["clean"]["correct"]) >= np.mean(kb[base]["clean"]["correct"]) - CRITERIA["drop"]),
-            ("범위 밖(hard) 거절률 −0.02 이내", np.mean(blocks[name]["clean"]["oos_hard"]) >= np.mean(blocks[base]["clean"]["oos_hard"]) - CRITERIA["drop"]),
-            ("답 없는 질문에 답함 +0.02 이내", np.mean(kb[name]["clean"]["unans"]) <= np.mean(kb[base]["clean"]["unans"]) + CRITERIA["drop"]),
-        ]
+        checks = criteria(blocks[base], kb[base], blocks[name], kb[name])
         lines.append(f"- **{name}:** " + " · ".join(f"{'✅' if ok else '❌'} {t}" for t, ok in checks))
     return "\n".join(lines) + "\n"
 

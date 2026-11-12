@@ -144,8 +144,9 @@ _CALLS = ThreadPoolExecutor(max_workers=8, thread_name_prefix="llm")
 class LlmClient:
     """OpenAI-compatible Chat Completions, non-streaming, temperature 0, at most `timeout` seconds."""
 
-    def __init__(self, config: LlmConfig, transport: Transport = post) -> None:
-        self.config, self.transport = config, transport
+    def __init__(self, config: LlmConfig, transport: Transport = post, pool: ThreadPoolExecutor | None = None) -> None:
+        """`pool`: where calls run (default: the one chat answers share)."""
+        self.config, self.transport, self.pool = config, transport, pool or _CALLS
 
     def chat(self, messages: list[dict[str, str]], max_tokens: int = MAX_TOKENS, temperature: float = 0) -> str:
         """The reply text (a model's <think> block removed). GenerationError on timeout / failure."""
@@ -154,7 +155,7 @@ class LlmClient:
         headers = {"Content-Type": "application/json"}
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
-        call = _CALLS.submit(self.transport, self.config.url.rstrip("/") + "/v1/chat/completions", headers, body,
+        call = self.pool.submit(self.transport, self.config.url.rstrip("/") + "/v1/chat/completions", headers, body,
                              self.config.timeout)
         try:
             raw = call.result(timeout=self.config.timeout)  # the deadline holds whatever the transport does

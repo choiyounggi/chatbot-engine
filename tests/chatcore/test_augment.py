@@ -60,6 +60,16 @@ def test_parse_reads_the_json_asked_for_a_bare_list_or_lines() -> None:
     assert parse_items("") == []
 
 
+def test_parse_takes_the_first_json_value_and_never_ships_fragments_of_broken_json() -> None:
+    assert parse_items('{"casual": ["날씨 어떰"], "synonym": 3, "paraphrase": "문자열"}') == [("날씨 어떰", "casual")]
+    assert parse_items('{"typo": ["날시 어때"]}\n비고: {이름}은 그대로 뒀어요') == [("날시 어때", "typo")]
+    # a trailing comma breaks the object; the sentences inside still read, never the fragment `casual": [...`
+    assert parse_items('{"casual": ["a b", "c d"],}') == [("a b", "paraphrase"), ("c d", "paraphrase")]
+    assert parse_items('{"casual": ["a b",') == []  # cut off: nothing whole to read, asked again
+    assert parse_items("[" * 5000 + "]" * 5000) == []  # too deep to read
+    assert parse_items('설명 [1, 2] 다음\n{"casual": ["진짜"]}') == [("진짜", "casual")]
+
+
 def test_screen_marks_duplicates_invalid_conflicts_and_keeps_the_rest() -> None:
     items = [("오늘 날시 알려줘", "typo"), ("오늘  날씨 알려줘", "paraphrase"), ("오늘 날시 알려줘", "typo"),
              ("{location} 날씨 어떰", "casual"), ("{city} 날씨", "synonym"), ("날씨 {알려", "typo"),
@@ -70,6 +80,9 @@ def test_screen_marks_duplicates_invalid_conflicts_and_keeps_the_rest() -> None:
         ("ok", "{location} 날"), ("invalid", "{city} 날씨"), ("invalid", "날씨 {알려"),
         ("invalid", "가" * 12), ("invalid", ""), ("conflict", "안녕하세요")]
     assert out[-1].detail == "‘인사’ 블록으로 판단돼요 (0.98)"
+    assert screen([("?!", "typo"), ("...", "casual")], [], set(), None)[0].status == "invalid"
+    unchecked = screen([("날씨", "casual")], [], set(), lambda t: augment.Unchecked("못 봤어요"))
+    assert unchecked == [Proposal("날씨", "casual", "ok", "못 봤어요")]
     skipped = screen([("날씨 어떰", "casual")], [], set(), None, "검사 건너뜀")
     assert skipped == [Proposal("날씨 어떰", "casual", "ok", "검사 건너뜀")]
     assert skipped[0].to_dict() == {"text": "날씨 어떰", "type": "casual", "status": "ok", "detail": "검사 건너뜀"}
@@ -101,14 +114,39 @@ def test_propose_asks_every_task_for_varied_sentences_and_once_more_when_one_is_
         propose(empty, intent_messages("날씨", ["날씨"], 5))
 
 
+def test_a_whole_proposal_has_one_deadline_and_runs_on_its_own_threads() -> None:
+    import time
+
+    def slow(url, headers, body, timeout):
+        time.sleep(0.3)
+        return reply({"typo": ["날시"]})
+
+    client = LlmClient(LlmConfig("http://llm.local", "m", 5), slow, augment.POOL)
+    assert client.pool is augment.POOL and LlmClient(LlmConfig("x", "m")).pool is not augment.POOL
+    with pytest.raises(GenerationError) as exc:
+        propose(client, intent_messages("날씨", ["날씨"], 8), seconds=0.4)  # two requests of 0.3 s
+    assert exc.value.outcome == "timeout"
+
+
 # ---------------------------------------------------------------- FAQ similar questions
 
 
-@pytest.mark.parametrize("similar", [["   "], ["가" * 301], ["구독 환불은  어떻게 하나요"], ["환불?", "환불?"],
+@pytest.mark.parametrize("similar", [["   "], ["?!"], ["가" * 301], ["구독 환불은  어떻게 하나요"], ["환불?", "환불!"],
                                      [f"q{i}" for i in range(MAX_SIMILAR + 1)]])
 def test_similar_questions_are_checked(similar) -> None:
     with pytest.raises(ValidationError):
         FaqEntry(id="refund", question="구독 환불은 어떻게 하나요", answer="7일 안에", similar=similar)
+
+
+def test_a_knowledge_base_holds_at_most_ten_thousand_similar_questions() -> None:
+    from chatcore.knowledge import MAX_SIMILAR_TOTAL, KnowledgeError, parse_kb
+
+    faq = [{"id": f"f{i}", "question": f"질문 {i}", "answer": "답", "similar": [f"{i} 비슷한 {j}" for j in range(MAX_SIMILAR)]}
+           for i in range(MAX_SIMILAR_TOTAL // MAX_SIMILAR)]
+    assert len(parse_kb({"faq": faq}).faq) == len(faq)
+    faq.append({"id": "one_more", "question": "하나 더", "answer": "답", "similar": ["넘침"]})
+    with pytest.raises(KnowledgeError):
+        parse_kb({"faq": faq})
 
 
 def kb_with_similar():
@@ -189,7 +227,7 @@ def test_block_proposals_are_screened_against_the_draft_and_the_deployed_model(m
         ("ok", "typo"), ("conflict", "casual"), ("duplicate", "paraphrase"), ("invalid", "synonym")]
     assert "‘인사’ 블록" in body["items"][1]["detail"]
     sent, timeout = llm.requests[1]
-    assert timeout == augment.TIMEOUT and "[블록] 날씨 문의" in sent["messages"][1]["content"]
+    assert augment.TIMEOUT - 5 < timeout <= augment.TIMEOUT and "[블록] 날씨 문의" in sent["messages"][1]["content"]
 
 
 def test_a_separate_model_can_propose(make_host) -> None:
@@ -225,6 +263,13 @@ def test_augment_refuses_without_an_llm_an_unknown_target_bad_input_and_a_failed
     assert failed.status_code == 424 and "did not answer" in failed.json()["detail"]
     down = TestClient(create_app(make_host(FakeLlm(TimeoutError()))))
     assert "timeout" in down.post(f"{B}/augment", json={"kind": "intent", "id": "weather"}).json()["detail"]
+
+
+def test_a_draft_with_an_odd_shape_is_404_not_500(make_host) -> None:
+    host = make_host(FakeLlm(reply({"typo": ["x"]})))
+    doc = host.repository.get_draft("sample")
+    host.repository.save_draft("sample", {**doc, "intents": []})
+    assert TestClient(create_app(host)).post(f"{B}/augment", json={"kind": "intent", "id": "weather"}).status_code == 404
 
 
 def test_augment_needs_the_admin_token_and_a_bot_not_being_deleted(make_host) -> None:

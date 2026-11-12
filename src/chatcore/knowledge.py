@@ -48,6 +48,7 @@ MAX_PDF_PAGES = 500
 CHUNKER = 3  # stored with an index: a different chunker means the index is stale (built again)
 INDEX_FORMAT = 2  # 2: one FAQ vector per question and similar question (E-H); another format is built again
 MAX_SIMILAR = 50  # similar questions per FAQ entry
+MAX_SIMILAR_TOTAL = 10_000  # in a whole knowledge base (each is a vector searched on every question)
 FloatArray = NDArray[np.float32]
 # a rejected generation answers nothing (docs/benchmarks/rag.md: fewer answers to unanswerable questions)
 ON_REJECT: Literal["extract", "fallback"] = "fallback"
@@ -83,8 +84,8 @@ class FaqEntry(_Model):
             raise ValueError("an FAQ question and answer must not be blank")
         seen = {bare(self.question)}
         for q in self.similar:
-            if not q.strip() or len(q) > 300:
-                raise ValueError("a similar question must be 1-300 characters and not blank")
+            if not bare(q) or len(q) > 300:
+                raise ValueError("a similar question must be 1-300 characters with some letters")
             if bare(q) in seen:
                 raise ValueError(f"similar question {q!r} repeats the question or another similar question")
             seen.add(bare(q))
@@ -110,6 +111,8 @@ class KnowledgeBase(_Model):
 
     @model_validator(mode="after")
     def _unique_ids(self) -> KnowledgeBase:
+        if sum(len(f.similar) for f in self.faq) > MAX_SIMILAR_TOTAL:
+            raise ValueError(f"at most {MAX_SIMILAR_TOTAL} similar questions in a knowledge base")
         for what, ids in (("FAQ", [f.id for f in self.faq]), ("document", [d.id for d in self.documents])):
             dup = sorted({i for i in ids if ids.count(i) > 1})
             if dup:

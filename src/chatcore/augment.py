@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from chatcore.generation import GenerationError, LlmClient
@@ -20,7 +22,9 @@ from chatcore.nlu.train import PLACEHOLDER
 TYPES = ("typo", "casual", "paraphrase", "synonym")
 STATUSES = ("ok", "duplicate", "invalid", "conflict")
 DEFAULT_COUNT, MAX_COUNT = 20, 40
-TIMEOUT = 90.0  # seconds: a list of sentences takes far longer than a chat answer
+TIMEOUT = 90.0  # seconds for a whole proposal (both requests, retries included); chat answers have 3.5
+# its own two threads: proposals queue behind each other, never in front of chat answers
+POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="augment")
 TEMPERATURE = 0.7  # varied sentences, not the same one twenty times
 MAX_TOKENS = 2000  # forty short sentences as JSON fit with room to spare
 MAX_TEXT = 300
@@ -106,27 +110,43 @@ def _text_of(item: Any) -> tuple[str, str] | None:
 _BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s*")
 
 
+_JSONISH = re.compile(r'[{\[]\s*"')
+
+
+def _items(data: Any) -> list[tuple[str, str]] | None:
+    if isinstance(data, dict) and any(isinstance(data.get(t), list) for t in TYPES):  # grouped by type
+        return [(x, t) for t in TYPES if isinstance(v := data.get(t), list) for x in v if isinstance(x, str)]
+    items = data.get("items") if isinstance(data, dict) else data
+    if isinstance(items, list):
+        return [t for t in (_text_of(x) for x in items) if t is not None]
+    return None
+
+
 def parse_items(raw: str) -> list[tuple[str, str]]:
-    """(text, type) from the model's answer: the JSON asked for, a bare JSON list, or failing both,
-    one sentence per line (bullets and numbers removed)."""
-    for start, end in (("{", "}"), ("[", "]")):
-        i, j = raw.find(start), raw.rfind(end)
-        if i == -1 or j <= i:
-            continue
+    """(text, type) from the model's answer: the first JSON value in it (the object asked for or a bare
+    list; text after it ignored), or — only when the answer is no JSON at all — one sentence per line
+    (bullets and numbers removed). Broken JSON gives nothing (asked again), never its fragments."""
+    decoder = json.JSONDecoder()
+    for match in _JSONISH.finditer(raw):
         try:
-            data: Any = json.loads(raw[i:j + 1])
-        except ValueError:
+            data, _ = decoder.raw_decode(raw, match.start())
+        except (ValueError, RecursionError):
             continue
-        if isinstance(data, dict) and any(isinstance(data.get(t), list) for t in TYPES):  # grouped by type
-            return [(x, t) for t in TYPES for x in data.get(t) or [] if isinstance(x, str)]
-        items = data.get("items") if isinstance(data, dict) else data
-        if isinstance(items, list):
-            return [t for t in (_text_of(x) for x in items) if t is not None]
+        found = _items(data)
+        if found is not None:
+            return found
+    if _JSONISH.search(raw):
+        return []
     lines = (_BULLET.sub("", line).strip().strip('"') for line in raw.splitlines())
     return [(line, "paraphrase") for line in lines if line and not line.startswith(("{", "}", "[", "]", "```"))]
 
 
-Conflict = Callable[[str], str | None]  # a sentence -> why it looks like something else, or None
+@dataclass(frozen=True)
+class Unchecked:
+    note: str  # why this sentence could not be checked for a conflict
+
+
+Conflict = Callable[[str], "str | Unchecked | None"]  # a sentence -> why it looks like something else, or None
 
 
 def screen(items: Sequence[tuple[str, str]], existing: Sequence[str], placeholders: set[str],
@@ -138,29 +158,40 @@ def screen(items: Sequence[tuple[str, str]], existing: Sequence[str], placeholde
     for raw, kind in items:
         text = " ".join(raw.split())
         names = set(PLACEHOLDER.findall(text))
-        if not text or len(text) > MAX_TEXT:
-            out.append(Proposal(text, kind, "invalid", f"1~{MAX_TEXT}자가 아니에요"))
+        if not bare(text) or len(text) > MAX_TEXT:
+            out.append(Proposal(text, kind, "invalid", f"글자가 없거나 {MAX_TEXT}자를 넘어요"))
         elif "{" in PLACEHOLDER.sub("", text) or "}" in PLACEHOLDER.sub("", text) or not names <= placeholders:
             out.append(Proposal(text, kind, "invalid", "원래 예문에 없는 {자리} 표시가 있어요"))
         elif bare(text) in seen:
             out.append(Proposal(text, kind, "duplicate", "이미 있는 문장이에요"))
         else:
             why = conflict(text) if conflict is not None else None
-            out.append(Proposal(text, kind, "conflict", why) if why else Proposal(text, kind, "ok", skipped))
+            if isinstance(why, Unchecked):
+                out.append(Proposal(text, kind, "ok", why.note))
+            else:
+                out.append(Proposal(text, kind, "conflict", why) if why else Proposal(text, kind, "ok", skipped))
         seen.add(bare(text))
     return out
 
 
-def ask(client: LlmClient, messages: Messages, tries: int = 2) -> list[tuple[str, str]]:
-    """One request's sentences, asked again once when an answer has none (sampling varies).
-    GenerationError when it does not answer or never answers anything usable."""
+def ask(client: LlmClient, messages: Messages, tries: int = 2, deadline: float | None = None
+        ) -> list[tuple[str, str]]:
+    """One request's sentences, asked again once when an answer has none (sampling varies), each call
+    within what is left before `deadline` (time.monotonic()). GenerationError when it does not answer,
+    runs out of time, or never answers anything usable."""
     for _ in range(tries):
-        items = parse_items(client.chat(messages, max_tokens=MAX_TOKENS, temperature=TEMPERATURE))
+        left = client.config.timeout if deadline is None else deadline - time.monotonic()
+        if left <= 0:
+            raise GenerationError("timeout", f"no proposals within {TIMEOUT:g}s")
+        config = replace(client.config, timeout=min(left, client.config.timeout))
+        timed = LlmClient(config, client.transport, client.pool)
+        items = parse_items(timed.chat(messages, max_tokens=MAX_TOKENS, temperature=TEMPERATURE))
         if items:
             return items
     raise GenerationError("error", "the LLM's answer has no sentences")
 
 
-def propose(client: LlmClient, tasks: Sequence[Messages]) -> list[tuple[str, str]]:
-    """Every task's sentences, in order."""
-    return [item for messages in tasks for item in ask(client, messages)]
+def propose(client: LlmClient, tasks: Sequence[Messages], seconds: float = TIMEOUT) -> list[tuple[str, str]]:
+    """Every task's sentences, in order, all within `seconds`."""
+    deadline = time.monotonic() + seconds
+    return [item for messages in tasks for item in ask(client, messages, deadline=deadline)]

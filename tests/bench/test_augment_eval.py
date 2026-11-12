@@ -66,3 +66,20 @@ def test_the_block_test_set_and_the_proposal_cache() -> None:
     ask = lambda m: calls.append(1) or [("날시", "typo")]  # noqa: E731
     assert proposals("m", [messages], cache, ask) == [("날시", "typo")] == proposals("m", [messages], cache, ask)
     assert calls == [1] and proposals("other-model", [messages], cache, ask) and calls == [1, 1]
+
+
+def test_criteria_gate_every_set_the_spec_names_and_kinds_split_the_typo_scores() -> None:
+    from bench.augment_eval import by_kind, criteria
+
+    t, f = True, False
+    side = lambda ins, hard, easy: {"in_scope": ins, "oos_hard": hard, "oos_easy": easy}  # noqa: E731
+    base = {"clean": side([t, f], [t, t], [t, t]), "noisy": side([f, f], [t, t], [t, t])}
+    kbb = {"clean": {"correct": [t, f], "unans": [f, f]}, "noisy": {"correct": [f, f], "unans": [f, f]}}
+    better = {"clean": side([t, f], [t, t], [t, t]), "noisy": side([t, t], [t, t], [t, t])}
+    kbg = {"clean": {"correct": [t, f], "unans": [f, f]}, "noisy": {"correct": [t, t], "unans": [f, f]}}
+    names = [n for n, _ in criteria(base, kbb, better, kbg)]
+    assert len(names) == 10 and "오타판 범위 밖(easy) 거절률 −0.02 이내" in names and "오타판 답 없는 질문에 답함 +0.02 이내" in names
+    assert all(ok for _, ok in criteria(base, kbb, better, kbg))
+    worse = {**better, "noisy": side([t, t], [t, t], [f, f])}  # easy out-of-scope rejection fell on the typo variant
+    assert dict(criteria(base, kbb, worse, kbg))["오타판 범위 밖(easy) 거절률 −0.02 이내"] is False
+    assert by_kind([t, f, t], ["yo", "space", "yo"]) == {"yo": [t, t], "space": [f]}
