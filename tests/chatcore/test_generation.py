@@ -1,6 +1,10 @@
 """E-F: generative answers — prompt, OpenAI-compatible client, grounding check, generator."""
 
+import http.client
 import json
+import socket
+import threading
+import time
 import urllib.error
 
 import pytest
@@ -16,6 +20,8 @@ from chatcore.generation import (
     build_messages,
     check,
     numbers,
+    post,
+    strip_thinking,
 )
 from chatcore.knowledge import Entry
 
@@ -109,6 +115,9 @@ def test_client_sends_no_authorization_without_a_key() -> None:
     (json.dumps({"choices": []}).encode(), "error"),
     (json.dumps({"choices": [{"message": {"content": None}}]}).encode(), "error"),
     (b"\xff\xfe", "error"),
+    (http.client.BadStatusLine("garbage"), "error"),  # not an HTTP server
+    (http.client.IncompleteRead(b"ab"), "error"),  # a chunked reply cut short
+    (ValueError("the reply is too large"), "error"),
 ])
 def test_client_turns_every_failure_into_a_generation_error(failure, outcome) -> None:
     c, _ = client(failure)
@@ -154,3 +163,108 @@ def test_generator_without_passages_does_not_call_the_model_and_depth_must_be_po
     assert Generator(c).generate("q", []).outcome == "no_answer" and t.calls == []
     with pytest.raises(ValueError):
         Generator(c, depth=0)
+
+
+# ---------------------------------------------------------------- thinking, deadline, the key
+
+
+@pytest.mark.parametrize("content, answer", [
+    ("<think>음…</think>답", "답"),
+    ("자료에 7일이라고 있으니…</think>\n7일 안에 환불돼요.", "7일 안에 환불돼요."),  # the template opened the block
+    ("<think>a</think><think>b</think> 답 ", "답"),
+])
+def test_thinking_is_removed(content, answer) -> None:
+    assert strip_thinking(content) == answer
+
+
+@pytest.mark.parametrize("content", ["<think>자료에 7일이라고", "답이에요 <think>그런데"])
+def test_an_answer_still_thinking_is_an_error_never_text(content) -> None:
+    c, _ = client(reply(content))
+    with pytest.raises(GenerationError) as exc:
+        c.chat([])
+    assert exc.value.outcome == "error" and "thinking" in exc.value.detail
+
+
+def test_the_timeout_bounds_the_whole_call_whatever_the_transport_does() -> None:
+    def stuck(url, headers, body, timeout):
+        time.sleep(1.5)
+        return reply("늦은 답")
+
+    c = LlmClient(LlmConfig("http://llm.local", "m1", timeout=0.2), stuck)
+    start = time.monotonic()
+    with pytest.raises(GenerationError) as exc:
+        c.chat([])
+    assert exc.value.outcome == "timeout" and time.monotonic() - start < 1.0
+
+
+def test_the_api_key_is_not_in_the_config_repr() -> None:
+    config = LlmConfig("http://llm.local", "m1", api_key="sk-test-not-real")
+    assert "sk-test-not-real" not in repr(config) and config.api_key == "sk-test-not-real"
+
+
+# ---------------------------------------------------------------- post (a real socket on 127.0.0.1)
+
+
+@pytest.fixture
+def server():
+    """A one-connection TCP server: `server(handler)` runs handler(conn) and returns the URL."""
+    socks = []
+
+    def start(handler):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        socks.append(s)
+
+        def serve():
+            conn, _ = s.accept()
+            with conn:
+                conn.recv(65536)
+                try:
+                    handler(conn)
+                except OSError:  # the client gave up
+                    pass
+
+        threading.Thread(target=serve, daemon=True).start()
+        return f"http://127.0.0.1:{s.getsockname()[1]}/v1/chat/completions"
+
+    yield start
+    for s in socks:
+        s.close()
+
+
+def http_reply(body: bytes) -> bytes:
+    return b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%b" % (len(body), body)
+
+
+def test_post_returns_the_reply_body(server) -> None:
+    url = server(lambda conn: conn.sendall(http_reply(reply("답"))))
+    assert json.loads(post(url, {}, b"{}", 2))["choices"][0]["message"]["content"] == "답"
+
+
+def test_post_gives_up_on_a_slow_reply_after_the_timeout(server) -> None:
+    def drip(conn):
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n")
+        for _ in range(20):
+            time.sleep(0.15)
+            conn.sendall(b"x")
+
+    url = server(drip)
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        post(url, {}, b"{}", 0.5)
+    assert time.monotonic() - start < 1.5  # each byte comes within the socket timeout; the deadline still holds
+
+
+def test_post_refuses_a_reply_that_is_too_large(server) -> None:
+    url = server(lambda conn: conn.sendall(http_reply(b"x" * 1_000_001)))
+    with pytest.raises(ValueError):
+        post(url, {}, b"{}", 2)
+
+
+def test_a_server_that_is_not_http_is_a_generation_error(server) -> None:
+    url = server(lambda conn: conn.sendall(b"garbage\r\n\r\n"))
+    c = LlmClient(LlmConfig(url.removesuffix("/v1/chat/completions"), "m1", timeout=2))
+    with pytest.raises(GenerationError) as exc:
+        c.chat([])
+    assert exc.value.outcome == "error"

@@ -1225,18 +1225,29 @@ def deploy_errors(what: str) -> Iterator[None]:
         raise unusable_kb(exc) from exc
 
 
-def llm_generator(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Generator | None:  # pragma: no cover
+def llm_generator(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Generator | None:
     """The generator the --llm-* options describe, or None without --llm-url."""
     import os
+    import urllib.parse
 
     if args.llm_url is None:
         return None
+    try:
+        url = urllib.parse.urlsplit(args.llm_url)
+        port = url.port  # ValueError when not a number
+    except ValueError:
+        url, port = urllib.parse.urlsplit(""), None
+    if url.scheme not in ("http", "https") or not url.hostname:
+        parser.error("--llm-url must be an http(s) URL")
     if not args.llm_model:
         parser.error("--llm-model is required with --llm-url")
+    if not args.llm_timeout > 0:
+        parser.error("--llm-timeout must be positive")
     key = os.environ.get(args.llm_api_key_env) if args.llm_api_key_env else None
     if args.llm_api_key_env and not key:
         parser.error(f"environment variable {args.llm_api_key_env} is not set")
-    log.info("generated knowledge-base answers: %s at %s", args.llm_model, args.llm_url)
+    log.info("generated knowledge-base answers: %s at %s://%s", args.llm_model, url.scheme,  # no user:password@
+             url.hostname if port is None else f"{url.hostname}:{port}")
     return Generator(LlmClient(LlmConfig(args.llm_url, args.llm_model, args.llm_timeout, key)), depth=GENERATION_DEPTH)
 
 
@@ -1278,7 +1289,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
                              "settings ask for generated answers; without it they answer with the passage itself")
     parser.add_argument("--llm-model", default=None, help="the model name to send (required with --llm-url)")
     parser.add_argument("--llm-timeout", type=float, default=LLM_TIMEOUT,
-                        help="seconds for one generated answer; slower ones show the passage instead")
+                        help="seconds for one generated answer in all; slower ones show the passage instead "
+                             "(the server must answer without a thinking block)")
     parser.add_argument("--llm-api-key-env", default=None,
                         help="the NAME of an environment variable holding the server's API key (never the key itself)")
     parser.add_argument("--keep-warm-ms", type=float, default=None,

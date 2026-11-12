@@ -4,18 +4,26 @@ The knowledge base decides WHETHER to answer (retrieval + judge, E-D); an LLM on
 it, from the passages that passed. Any server speaking OpenAI-compatible Chat Completions works
 (`POST {url}/v1/chat/completions`: mlx_lm.server, llama.cpp, Ollama, vLLM, LM Studio, gateways).
 A generated answer is kept only when a deterministic check finds nothing it cannot back: no
-"NO_ANSWER", not empty or too long, and every number in it appears in the passages.
+"NO_ANSWER", not empty or too long, and every number in it appears in the passages. The check is about
+numbers, not meaning: a flipped negation ("환불돼요" for "환불되지 않아요"), a number word ("일주일"),
+or a number taken from the FAQ question in the wrong sense passes it; a number the user said and the
+model repeats ("3일 전에 샀는데" -> "3일이 지나서") fails it.
+
+The server must answer without a thinking block (Qwen3: `enable_thinking: false` in the server's chat
+template arguments); an answer still inside one is an error, never shown.
 """
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any
 
 from chatcore.knowledge import Entry
@@ -25,7 +33,8 @@ MAX_ANSWER_CHARS = 600
 MAX_TOKENS = 320
 OUTCOMES = ("generated", "no_answer", "unsupported_number", "too_long", "empty", "timeout", "error")
 GENERATION_DEPTH = 1  # passages given to the model (docs/benchmarks/rag.md: 1 is as good as 3 and faster)
-LLM_TIMEOUT = 5.0  # seconds: Kakao waits 5 s for a skill's answer
+LLM_TIMEOUT = 3.5  # seconds for the whole call: Kakao waits 5 s for a skill, and the turn also needs NLU and the judge
+MAX_REPLY_BYTES = 1_000_000
 
 SYSTEM_PROMPT = """당신은 고객 상담 챗봇입니다. 아래 [자료]에 있는 내용만으로 사용자의 [질문]에 답하세요.
 규칙:
@@ -81,22 +90,48 @@ def check(answer: str, passages: Sequence[Entry]) -> str:
 Transport = Callable[[str, dict[str, str], bytes, float], bytes]
 
 
-def post(url: str, headers: dict[str, str], body: bytes, timeout: float) -> bytes:  # pragma: no cover - network
+def post(url: str, headers: dict[str, str], body: bytes, timeout: float) -> bytes:
+    """One HTTP POST that gives up after `timeout` seconds in all (a server sending its reply slowly
+    included). TimeoutError, OSError, http.client.HTTPException or ValueError (reply too large)."""
+    deadline = time.monotonic() + timeout
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return bytes(response.read(1_000_000))
+        reply = bytearray()
+        while chunk := response.read1(65536):
+            reply += chunk
+            if len(reply) > MAX_REPLY_BYTES:
+                raise ValueError("the reply is too large")
+            if time.monotonic() > deadline:
+                raise TimeoutError
+        return bytes(reply)
+
+
+def strip_thinking(content: str) -> str:
+    """The answer without a model's thinking: whole <think>…</think> blocks, or everything up to a
+    </think> whose opening tag the chat template put in the prompt. GenerationError when a block is
+    left open (the model ran out of tokens while thinking)."""
+    text = _THINK.sub("", content)
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    if "<think>" in text:
+        raise GenerationError("error", "the answer is still thinking: turn thinking off on the LLM server")
+    return text.strip()
 
 
 @dataclass(frozen=True)
 class LlmConfig:
     url: str  # the server's base URL, e.g. http://127.0.0.1:8800
     model: str
-    timeout: float = 8.0  # seconds for the whole call
-    api_key: str | None = None  # sent as a Bearer token (taken from an environment variable)
+    timeout: float = LLM_TIMEOUT  # seconds for the whole call
+    api_key: str | None = field(default=None, repr=False)  # sent as a Bearer token (taken from an environment variable)
+
+
+# a call that overruns its deadline is abandoned, not waited for (post() ends it soon after)
+_CALLS = ThreadPoolExecutor(max_workers=8, thread_name_prefix="llm")
 
 
 class LlmClient:
-    """OpenAI-compatible Chat Completions, non-streaming, temperature 0."""
+    """OpenAI-compatible Chat Completions, non-streaming, temperature 0, at most `timeout` seconds."""
 
     def __init__(self, config: LlmConfig, transport: Transport = post) -> None:
         self.config, self.transport = config, transport
@@ -108,16 +143,18 @@ class LlmClient:
         headers = {"Content-Type": "application/json"}
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
+        call = _CALLS.submit(self.transport, self.config.url.rstrip("/") + "/v1/chat/completions", headers, body,
+                             self.config.timeout)
         try:
-            raw = self.transport(self.config.url.rstrip("/") + "/v1/chat/completions", headers, body,
-                                 self.config.timeout)
-        except TimeoutError as exc:
+            raw = call.result(timeout=self.config.timeout)  # the deadline holds whatever the transport does
+        except TimeoutError as exc:  # ours, or the transport's
+            call.cancel()
             raise GenerationError("timeout", f"no answer within {self.config.timeout:g}s") from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
                 raise GenerationError("timeout", f"no answer within {self.config.timeout:g}s") from exc
             raise GenerationError("error", f"cannot reach the LLM server: {exc.reason}") from exc
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, http.client.HTTPException) as exc:
             raise GenerationError("error", type(exc).__name__) from exc
         try:
             data: Any = json.loads(raw.decode("utf-8"))
@@ -126,7 +163,7 @@ class LlmClient:
             raise GenerationError("error", "the LLM server's answer is not a chat completion") from exc
         if not isinstance(content, str):
             raise GenerationError("error", "the LLM server's answer has no text")
-        return _THINK.sub("", content).strip()
+        return strip_thinking(content)
 
 
 @dataclass(frozen=True)

@@ -47,8 +47,9 @@ ID = r"^[A-Za-z0-9_-]{1,64}$"
 MAX_PDF_PAGES = 500
 CHUNKER = 3  # stored with an index: a different chunker means the index is stale (built again)
 FloatArray = NDArray[np.float32]
-# a rejected generation answers nothing (docs/benchmarks/rag.md: fewer answers to unanswerable questions)
-ON_REJECT: Literal["extract", "fallback"] = "fallback"
+# a rejected generation shows the passage (docs/benchmarks/rag.md: chosen on the dev half)
+ON_REJECT: Literal["extract", "fallback"] = "extract"
+LLM_FAILURES = ("timeout", "error")  # generation outcomes where the LLM did not answer (chatcore.generation)
 
 if TYPE_CHECKING:  # chatcore.generation imports this module
     from chatcore.generation import Generator
@@ -467,6 +468,13 @@ def _section(entry: Entry) -> str:
     return entry.section or entry.heading or entry.title  # no section: the document's title
 
 
+def answers_nothing(outcome: str, on_reject: str) -> bool:
+    """Whether a generation that was not kept leaves the turn without a knowledge-base answer: only when
+    the check rejected what the model said, under "fallback". When the LLM did not answer at all
+    (timeout, error) the passage is shown, as if generation were off."""
+    return on_reject == "fallback" and outcome not in LLM_FAILURES
+
+
 def compose(result: KbResult, settings: KbSettings) -> KbAnswer | None:
     """The message for a search result; None when nothing passed. 답안 추천형 offers one button per FAQ
     entry or document section (its best chunk), up to SUGGESTIONS, with labels that differ."""
@@ -507,7 +515,8 @@ class Knowledge:
     def answer(self, text: str, result: KbResult) -> tuple[KbResult, KbAnswer | None]:
         """The message for a search result: compose() as before, or — 즉문즉답형 with generation on — the
         LLM's answer from the passing passages (judge first, so it never answers what the judge refused).
-        A rejected or failed generation shows the extractive answer or nothing (`on_reject`)."""
+        A rejected generation shows the extractive answer or nothing (`on_reject`); a failed one (the LLM
+        did not answer) shows the extractive answer."""
         answer = compose(result, self.index.settings)
         settings = self.index.settings
         if (answer is None or self.generator is None or not settings.generate or settings.mode != "instant"
@@ -516,7 +525,7 @@ class Knowledge:
         made = self.generator.generate(text, [h.entry for h in result.answers])
         result = replace(result, generated=made.to_log(self.generator.model))
         if made.text is None:
-            return result, (answer if self.on_reject == "extract" else None)
+            return result, (None if answers_nothing(made.outcome, self.on_reject) else answer)
         used = [h.entry for h in result.answers if h.entry.id in made.used]
         sources = list(dict.fromkeys(e.source for e in used if e.kind == "doc"))
         body = made.text + (f"\n\n출처: {', '.join(sources)}" if sources else "")

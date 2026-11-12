@@ -80,14 +80,32 @@ def test_a_generated_answer_from_a_document_names_its_source():
     assert answer.text == "위치 정보는 30일 뒤에 지워요.\n\n출처: 이용 안내"
 
 
-@pytest.mark.parametrize("on_reject, expected", [("extract", "결제 후 7일 안에 설정 > 구독에서 환불할 수 있어요."), ("fallback", None)])
-@pytest.mark.parametrize("reply", ["NO_ANSWER", "14일 안에 환불돼요.", TimeoutError()])  # 14 is in no passage
-def test_a_rejected_generation_shows_the_passage_or_nothing(on_reject, expected, reply):
-    gen, _ = generator(reply)
+PASSAGE = "결제 후 7일 안에 설정 > 구독에서 환불할 수 있어요."
+
+
+@pytest.mark.parametrize("on_reject, expected", [("extract", PASSAGE), ("fallback", None)])
+@pytest.mark.parametrize("reply, outcome", [("NO_ANSWER", "no_answer"), ("14일 안에 환불돼요.", "unsupported_number")])
+def test_a_rejected_generation_shows_the_passage_or_nothing(on_reject, expected, reply, outcome):
+    gen, _ = generator(reply)  # 14 is in no passage
     k = knowledge({"mode": "instant", "generate": True}, gen, on_reject)
     result, answer = k.answer("구독 환불 어떻게 해요", found(k, "구독 환불 어떻게 해요"))
-    assert (answer.text if answer else None) == expected
-    assert result.generated["outcome"] in ("no_answer", "unsupported_number", "timeout")
+    assert (answer.text if answer else None) == expected and result.generated["outcome"] == outcome
+
+
+@pytest.mark.parametrize("on_reject", ["extract", "fallback"])
+@pytest.mark.parametrize("failure, outcome", [(TimeoutError(), "timeout"), (ConnectionRefusedError(), "error"),
+                                              ("<think>자료에", "error")])
+def test_when_the_llm_does_not_answer_the_passage_is_shown(on_reject, failure, outcome):
+    gen, _ = generator(failure)
+    k = knowledge({"mode": "instant", "generate": True}, gen, on_reject)
+    result, answer = k.answer("구독 환불 어떻게 해요", found(k, "구독 환불 어떻게 해요"))
+    assert answer.text == PASSAGE and result.generated["outcome"] == outcome
+
+
+def test_the_knowledge_action_finds_nothing_when_the_generation_is_rejected():
+    gen, _ = generator("NO_ANSWER")
+    k = knowledge({"mode": "instant", "generate": True}, gen, "fallback")
+    assert k.action()({"query": "구독 환불 어떻게 해요"}) == {"found": "no", "answer": "", "source": "", "title": ""}
 
 
 def test_suggestions_and_chosen_titles_are_never_generated():
@@ -161,6 +179,16 @@ def test_a_conversation_and_the_search_test_answer_with_the_generated_text(make_
     assert body["answer"]["text"] == GENERATED and body["generated"]["outcome"] == "generated"
 
 
+@pytest.mark.parametrize("reply", ["NO_ANSWER", "14일 안에 환불돼요.", TimeoutError()])
+def test_the_server_default_shows_the_passage_for_a_rejection_or_a_failure(make_host, reply):
+    gen, _ = generator(reply)
+    host = make_host(gen)
+    deploy_kb(host, {"mode": "instant", "generate": True})
+    client = TestClient(create_app(host))
+    (msg,) = client.post("/v1/bots/sample/sessions/s/messages", json={"text": "구독 환불 어떻게 해요"}).json()["messages"]
+    assert (msg["response"], msg["text"]) == ("knowledge", PASSAGE)
+
+
 def test_without_an_llm_the_setting_changes_nothing(make_host):
     host = make_host(None)
     deploy_kb(host, {"mode": "instant", "generate": True})
@@ -177,6 +205,7 @@ def test_llm_status_reports_configuration_and_reachability(make_host):
     ok, llm = generator("네")
     body = TestClient(create_app(make_host(ok))).get("/v1/builder/llm").json()
     assert body["configured"] and body["ok"] and body["model"] == "test-model" and llm.requests[0]["max_tokens"] == 8
+    assert "llm.local" not in json.dumps(body)  # never the server's address
     down, _ = generator(ConnectionRefusedError())
     body = TestClient(create_app(make_host(down))).get("/v1/builder/llm").json()
     assert body["configured"] and body["ok"] is False and body["error"]
@@ -184,3 +213,39 @@ def test_llm_status_reports_configuration_and_reachability(make_host):
 
 def test_llm_status_needs_the_admin_token(make_host):
     assert TestClient(create_app(make_host(None), "secret-token-for-tests")).get("/v1/builder/llm").status_code == 401
+
+
+# ---------------------------------------------------------------- --llm-* options
+
+
+def parse(*argv):
+    import argparse
+
+    from chatcore.api import llm_generator
+    from chatcore.generation import LLM_TIMEOUT
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--llm-url")
+    parser.add_argument("--llm-model")
+    parser.add_argument("--llm-timeout", type=float, default=LLM_TIMEOUT)
+    parser.add_argument("--llm-api-key-env")
+    return llm_generator(parser, parser.parse_args(argv))
+
+
+def test_llm_options_build_a_generator_and_log_no_credentials(caplog, monkeypatch):
+    monkeypatch.setenv("TEST_LLM_KEY", "sk-test-not-real")
+    with caplog.at_level("INFO", logger="chatcore.api"):
+        gen = parse("--llm-url", "http://user:pw@127.0.0.1:8800", "--llm-model", "m", "--llm-api-key-env", "TEST_LLM_KEY")
+    assert gen.client.config.api_key == "sk-test-not-real" and gen.client.config.timeout == 3.5 and gen.depth == 1
+    assert "127.0.0.1:8800" in caplog.text and "pw" not in caplog.text and "sk-test" not in caplog.text
+    assert parse() is None
+
+
+@pytest.mark.parametrize("argv", [
+    ("--llm-url", "ftp://h", "--llm-model", "m"), ("--llm-url", "http://h:port", "--llm-model", "m"),
+    ("--llm-url", "http://h",), ("--llm-url", "http://h", "--llm-model", "m", "--llm-timeout", "0"),
+    ("--llm-url", "http://h", "--llm-model", "m", "--llm-api-key-env", "TEST_LLM_KEY_UNSET"),
+])
+def test_bad_llm_options_stop_the_server(argv):
+    with pytest.raises(SystemExit):
+        parse(*argv)
