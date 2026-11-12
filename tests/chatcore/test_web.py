@@ -192,7 +192,7 @@ def test_any_other_site_is_refused_before_the_turn(client, host) -> None:
     for origin in ("https://evil.example", "https://shop.example:8443", "http://shop.example", "null"):
         r = say(client, "안녕", origin, session="refused")
         assert r.status_code == 403 and r.json() == {"detail": "this site may not talk to this bot"}
-        assert "access-control-allow-origin" not in r.headers
+        assert r.headers["access-control-allow-origin"] == origin  # the widget can show why; nothing ran
     assert list(host.store.events("sample:refused")) == []  # no turn ran
 
 
@@ -211,7 +211,8 @@ def test_preflight_answers_for_allowed_sites_only(client) -> None:
                                        "access-control-allow-headers", "access-control-max-age")} == {
         "access-control-allow-origin": SHOP, "access-control-allow-methods": "GET, POST",
         "access-control-allow-headers": "Content-Type", "access-control-max-age": "600"}
-    assert client.options(path, headers={"Origin": "https://evil.example"}).status_code == 403
+    refused = client.options(path, headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"})
+    assert refused.status_code == 403 and "access-control-allow-origin" not in refused.headers  # the POST never comes
 
 
 def test_a_save_applies_at_once(client) -> None:
@@ -273,7 +274,9 @@ def test_a_bot_this_server_does_not_serve_is_404_without_reading_settings(client
     monkeypatch.setattr(host.repository, "web_settings", lambda bot: reads.append(bot) or real(bot))
     for n in range(3):
         r = client.options(f"/v1/bots/nobody{n}/web", headers={"Origin": SHOP})
-        assert r.status_code == 404 and r.headers["vary"] == "Origin"
+        assert r.status_code == 404 and r.headers["vary"] == "Origin" and "access-control-allow-origin" not in r.headers
+    r = client.get("/v1/bots/nobody/web", headers={"Origin": SHOP})
+    assert r.status_code == 404 and r.headers["access-control-allow-origin"] == SHOP  # readable: "챗봇을 찾을 수 없어요"
     assert reads == []
 
 

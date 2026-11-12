@@ -599,15 +599,17 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
         if origin is None or match is None:
             return await call_next(request)
         bot, vary = match.group(1), {"Vary": "Origin"}
+        # a refusal the widget can read (fixed text, no turn ran); a refused preflight stops the browser's POST
+        readable = vary if request.method == "OPTIONS" else {"Access-Control-Allow-Origin": origin, **vary}
         if host.runtime(bot) is None:  # not served here: no settings read, nothing cached
-            return JSONResponse({"detail": f"unknown bot {bot!r}"}, status_code=404, headers=vary)
+            return JSONResponse({"detail": f"unknown bot {bot!r}"}, status_code=404, headers=readable)
         try:
             allowed = await run_in_threadpool(origins.allowed, bot, origin)
         except Exception:
             log.exception("could not read the web settings of %s", bot)
-            return JSONResponse({"detail": "temporarily unavailable, please retry"}, status_code=503, headers=vary)
+            return JSONResponse({"detail": "temporarily unavailable, please retry"}, status_code=503, headers=readable)
         if not allowed:
-            return JSONResponse({"detail": "this site may not talk to this bot"}, status_code=403, headers=vary)
+            return JSONResponse({"detail": "this site may not talk to this bot"}, status_code=403, headers=readable)
         headers = {"Access-Control-Allow-Origin": origin, **vary}
         if request.method == "OPTIONS":
             return Response(status_code=204, headers={**headers, **PREFLIGHT_HEADERS})

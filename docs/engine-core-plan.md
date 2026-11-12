@@ -659,7 +659,7 @@ Makefile      setup / check / test / bench / db-up (Phase 3 이후 train / chat 
 - **CORS 규칙 (`/v1/bots/{bot}/web`, `…/sessions/{session}/open`, `…/messages`에만):**
   - `Origin` 헤더가 없으면(서버 간 호출, 카카오, curl) 지금과 같다.
   - `Origin`이 그 봇의 허용 목록에 있으면 응답에 `Access-Control-Allow-Origin: <그 출처>`, `Vary: Origin`. 사전 요청(`OPTIONS`)은 204 + `Allow-Methods: GET, POST`, `Allow-Headers: Content-Type`, `Max-Age: 600`.
-  - 목록에 없으면 403 `{"detail": "this site may not talk to this bot"}` — 대화 턴을 돌리지 않는다(사전 요청도 403). 이 서버가 답하지 않는 봇은 설정을 읽지 않고 404. 거부·오류 응답에도 `Vary: Origin`, 처리 중 예외로 난 500에도 허용된 사이트에는 `Access-Control-Allow-Origin`을 붙인다.
+  - 목록에 없으면 403 `{"detail": "this site may not talk to this bot"}` — 대화 턴을 돌리지 않는다(사전 요청도 403). 이 서버가 답하지 않는 봇은 설정을 읽지 않고 404. 실제 요청(GET·POST)의 거부 403·404·503에는 그 출처의 `Access-Control-Allow-Origin`을 붙여 위젯이 이유를 읽게 한다(고정 문구, 턴은 돌지 않음). 거부된 사전 요청에는 붙이지 않아 브라우저가 POST를 보내지 않는다. 거부·오류 응답에도 `Vary: Origin`, 처리 중 예외로 난 500에도 허용된 사이트에는 `Access-Control-Allow-Origin`을 붙인다.
   - 경로 접두사(`--root-path`) 뒤에서도 라우터가 보는 경로로 검사한다. 저장된 설정을 이 버전이 읽지 못하면 기본값(허용 없음)으로 보고 경고를 남긴다.
   - 다른 경로(빌더 API, `nlu/parse`)에는 CORS 헤더를 붙이지 않는다.
   - 허용 목록은 엔진 안에서 10초까지 기억하고, 같은 엔진에서 저장하면 바로 새로 읽는다.
