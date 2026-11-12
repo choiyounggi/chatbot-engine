@@ -119,13 +119,23 @@ def cache_key(model: str, messages: list[dict[str, str]]) -> str:
 
 
 def proposals(model: str, tasks: list[list[dict[str, str]]], cache: dict[str, Any],
-              ask: Callable[[list[dict[str, str]]], list[tuple[str, str]]]) -> list[tuple[str, str]]:
-    """Every task's sentences, each task asked once and kept (sampling at temperature 0.7 varies)."""
+              ask: Callable[[list[dict[str, str]]], list[tuple[str, str]]], failed: list[str] | None = None
+              ) -> list[tuple[str, str]]:
+    """Every task's sentences, each task asked once and kept (sampling at temperature 0.7 varies). A task
+    the LLM never answers usably gives nothing (as when a builder user gives up) and is listed in
+    `failed`; a failure is not cached, so a later run asks again."""
+    from chatcore.generation import GenerationError
+
     out: list[tuple[str, str]] = []
     for messages in tasks:
         key = cache_key(model, messages)
         if key not in cache:
-            cache[key] = [list(x) for x in ask(messages)]
+            try:
+                cache[key] = [list(x) for x in ask(messages)]
+            except GenerationError as exc:
+                if failed is not None:
+                    failed.append(f"{exc.outcome}: {exc.detail}")
+                continue
         out += [(str(t), str(k)) for t, k in cache[key]]
     return out
 
@@ -235,6 +245,7 @@ def decisions(rt: Any, texts: Sequence[str]) -> list[tuple[str, str | None]]:  #
 class Augmented:
     model: str
     stats: dict[str, dict[str, int]]
+    failed: list[str]  # tasks the LLM never answered usably
     added: dict[str, list[str]]  # intent -> examples added
     similar: dict[str, list[str]]  # FAQ id -> similar questions added
     seconds: float
@@ -249,6 +260,7 @@ def generate(model: str, nlu: dict[str, Any], base_rt: Any, faq: list[dict[str, 
     client = llm_client(model)
     save = lambda: CACHE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")  # noqa: E731
     stats: dict[str, dict[str, int]] = {"intent": {}, "faq": {}}
+    failed: list[str] = []
     forms, rng = entity_forms(base_rt.bot), random.Random(0)
     started = time.perf_counter()
     added: dict[str, list[str]] = {}
@@ -257,7 +269,7 @@ def generate(model: str, nlu: dict[str, Any], base_rt: Any, faq: list[dict[str, 
             continue
         examples = spec["examples"]
         items = proposals(model, augment.intent_messages(spec.get("label") or intent, examples, PER_INTENT), cache,
-                          lambda m: augment.ask(client, m))
+                          lambda m: augment.ask(client, m), failed)
         save()
 
         def conflict(text: str, intent: str = intent) -> str | None:
@@ -272,7 +284,7 @@ def generate(model: str, nlu: dict[str, Any], base_rt: Any, faq: list[dict[str, 
     similar: dict[str, list[str]] = {}
     for f in faq:
         items = proposals(model, augment.faq_messages(f["question"], f["answer"], [], PER_FAQ), cache,
-                          lambda m: augment.ask(client, m))
+                          lambda m: augment.ask(client, m), failed)
         save()
 
         def faq_conflict(text: str, fid: str = f["id"]) -> str | None:
@@ -286,7 +298,7 @@ def generate(model: str, nlu: dict[str, Any], base_rt: Any, faq: list[dict[str, 
             stats["faq"][p.status] = stats["faq"].get(p.status, 0) + 1
         similar[f["id"]] = [p.text for p in screened if p.status == "ok"][:50]
     print(model, "faq done", flush=True)
-    return Augmented(model, stats, added, similar, time.perf_counter() - started)
+    return Augmented(model, stats, failed, added, similar, time.perf_counter() - started)
 
 
 def main() -> int:  # pragma: no cover - real models
@@ -407,11 +419,11 @@ def report(nlu: dict[str, Any], runs: dict[str, Augmented], blocks: dict[str, An
              f"- 블록마다 {PER_INTENT}개·FAQ마다 {PER_FAQ}개를 제안받아(오타는 따로 한 번, 나머지 종류는 한 번) 엔진이 거른 뒤 `ok`를 모두 넣음(사람이 전부 받아들인 경우).",
              "- 오타판: 문장마다 규칙으로 오타 하나(LLM과 다른 방식). 종류별 문장 수 " + ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())) + ".",
              "- 칸: 값 (원래와의 차이 [같은 문장끼리 쌍 부트스트랩 95% 구간]). 블록은 배포 학습 후 실제 해석기, 지식베이스는 `Knowledge.consult`(재순위 판단, 블록 판단은 양쪽 다 원래 모델).", "",
-             "## 무엇이 늘었나", "", "| 생성 모델 | 블록 예문 | FAQ 비슷한 질문 | 블록 제안 결과 | FAQ 제안 결과 | 걸린 시간 |", "|---|---|---|---|---|---|"]
+             "## 무엇이 늘었나", "", "| 생성 모델 | 블록 예문 | FAQ 비슷한 질문 | 블록 제안 결과 | FAQ 제안 결과 | 답 못 받은 요청 | 이번 실행의 생성 시간(캐시에 있던 것 제외) |", "|---|---|---|---|---|---|---|"]
     before = sum(len(s["examples"]) for i, s in nlu["intents"].items() if i != "out_of_scope" and not s.get("exact_only"))
     for name, run in runs.items():
         lines.append(f"| {name} | {before} → {before + sum(len(v) for v in run.added.values())} | 0 → {sum(len(v) for v in run.similar.values())} "
-                     f"| {run.stats['intent']} | {run.stats['faq']} | {run.seconds:.0f}초 |")
+                     f"| {run.stats['intent']} | {run.stats['faq']} | {len(run.failed)} | {run.seconds:.0f}초 |")
     header = "| | " + " | ".join(names) + " |"
     sep = "|---" * (len(names) + 1) + "|"
     lines += ["", "## 블록 (bench/data/test_independent.yaml)", "", header, sep]

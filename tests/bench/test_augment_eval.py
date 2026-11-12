@@ -66,6 +66,14 @@ def test_the_block_test_set_and_the_proposal_cache() -> None:
     ask = lambda m: calls.append(1) or [("날시", "typo")]  # noqa: E731
     assert proposals("m", [messages], cache, ask) == [("날시", "typo")] == proposals("m", [messages], cache, ask)
     assert calls == [1] and proposals("other-model", [messages], cache, ask) and calls == [1, 1]
+    from chatcore.generation import GenerationError
+
+    def broken(m):
+        raise GenerationError("error", "no sentences")
+
+    failed: list[str] = []
+    assert proposals("third", [messages], cache, broken, failed) == [] and failed == ["error: no sentences"]
+    assert "third" not in str(cache.keys()) and len(cache) == 2  # not cached: asked again next run
 
 
 def test_criteria_gate_every_set_the_spec_names_and_kinds_split_the_typo_scores() -> None:
