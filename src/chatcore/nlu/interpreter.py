@@ -45,6 +45,7 @@ from chatcore.dialogue.turn import Interpretation
 from chatcore.knowledge import Knowledge
 from chatcore.nlu.entities import EntityMatch, bare, normalize, pick
 from chatcore.nlu.model import OOS, NluResult
+from chatcore.nlu.spelling import Speller
 
 log = logging.getLogger(__name__)
 TEXT = "sys.text"  # never extracted: it is the whole answer to a pending question
@@ -83,19 +84,27 @@ def entity_only(text: str, entities: tuple[EntityMatch, ...]) -> list[EntityMatc
 
 
 class NluInterpreter:
-    def __init__(self, parse: Callable[[str], NluResult], knowledge: Knowledge | None = None) -> None:
-        """`parse` is NluModel.parse (or a stand-in in tests); `knowledge`: the bot's knowledge base."""
+    def __init__(self, parse: Callable[[str], NluResult], knowledge: Knowledge | None = None,
+                 speller: Speller | None = None) -> None:
+        """`parse` is NluModel.parse (or a stand-in in tests); `knowledge`: the bot's knowledge base;
+        `speller`: typo correction against the bot's own words (E-I), or None."""
         self.parse = parse
         self.knowledge = knowledge
+        self.speller = speller
 
     def interpret(self, text: str, state: DialogueState, bot: BotDefinition) -> Interpretation:
-        result = self.parse(text)
+        # understood with typos corrected; a free-text slot still takes what was typed (_decide gets `text`)
+        fixed = self.speller.correct(text) if self.speller is not None else None
+        understood = fixed.text if fixed is not None else text
+        result = self.parse(understood)
         rule, commands = self._decide(text, result, state, bot)
         info: dict[str, Any] = {"rule": rule, "text": text, **result.to_log()}
+        if fixed is not None and fixed.changes:
+            info["corrected"] = {"text": fixed.text, "changes": [list(c) for c in fixed.changes]}
         waiting = state.top is not None and state.top.awaiting is not None  # a pending question: ask again
         if self.knowledge is not None and not waiting:
             try:
-                found, answer = self.knowledge.consult(text, rule, result.similarity, result.vector)
+                found, answer = self.knowledge.consult(understood, rule, result.similarity, result.vector)
             except Exception as exc:  # the knowledge base must not break a turn the rules already decided
                 log.exception("knowledge-base search failed")
                 info["knowledge"] = {"error": type(exc).__name__}

@@ -49,6 +49,7 @@ from chatcore.knowledge import (
 from chatcore.nlu.entities import EntityExtractor, bare, normalize
 from chatcore.nlu.interpreter import NluInterpreter
 from chatcore.nlu.model import CachedEmbedder, Embedder, ModelMismatch, NluModel
+from chatcore.nlu.spelling import Speller, shared_score, vocabulary
 from chatcore.nlu.train import ConfusablePair, Report, confusable_intents, fit_only, train
 from chatcore.runtime import BotRuntime
 from chatcore.skills import SkillClient, SkillOutcome, Transport, error_dict, post_json, user_key
@@ -209,7 +210,7 @@ class BotHost:
                  skill_allow_private: bool = False, skill_transport: Transport = post_json,
                  judge: Judge | None = None,
                  clock: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
-                 generator: Generator | None = None) -> None:
+                 generator: Generator | None = None, spelling: bool = False) -> None:
         """bulk_embedder: the same model for training (e.g. BatchedEmbedder.bulk(), so chat goes first).
         test_keep / test_ttl: builder test builds kept loaded, and for how long after their last use.
         skill_allow_private: let HTTP skills call internal addresses (development and tests only).
@@ -227,6 +228,7 @@ class BotHost:
         self.skill_allow_private, self.skill_transport = skill_allow_private, skill_transport
         self.judge: Judge = judge or CosineJudge()
         self.generator = generator
+        self.spelling = spelling  # correct typos against each bot's own words (E-I)
         self._loaded: dict[str, OrderedDict[Key, BotRuntime]] = {}  # bot -> (version, kb) -> runtime (LRU)
         self._live: dict[str, Key] = {}
         self._indexes: OrderedDict[tuple[str, str], KnowledgeIndex] = OrderedDict()  # (bot, kb version), LRU
@@ -713,7 +715,9 @@ class BotHost:
         served = model.bot
         knowledge = (Knowledge(kb, self.judge, self.embedder, self.generator)
                      if kb is not None and not kb.empty else None)
-        processor = TurnProcessor(served, self.store, NluInterpreter(model.parse, knowledge),
+        speller = (Speller(vocabulary(served, kb if knowledge is not None else None), shared_score())
+                   if self.spelling else None)
+        processor = TurnProcessor(served, self.store, NluInterpreter(model.parse, knowledge, speller),
                                   self.actions_for(served, knowledge), kb_version=kb.version if kb else None)
         return BotRuntime(served, processor, model)
 
