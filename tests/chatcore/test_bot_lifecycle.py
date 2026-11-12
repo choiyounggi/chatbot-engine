@@ -86,6 +86,7 @@ def test_purge_bot_removes_every_table(repository):
     kb = {"faq": [], "documents": [], "settings": {"mode": "instant"}}
     repository.save_kb_draft(bot, kb)
     repository.add_kb_version(bot, "bbbbbbbbbbbb", kb, 0, 0)
+    repository.save_web_settings(bot, {"allowed_origins": ["https://shop.example"]})
     repository.request_deletion(bot, "2026-01-01T00:00:00+00:00")
 
     repository.purge_bot(bot)
@@ -99,6 +100,7 @@ def test_purge_bot_removes_every_table(repository):
     assert repository.skill_errors(bot) == []
     assert repository.kb_draft(bot) is None
     assert repository.kb_versions(bot) == []
+    assert repository.web_settings(bot) is None
     assert bot not in repository.deletions()
     repository.purge_bot(bot)  # idempotent: purging an already-empty bot is a no-op, not an error
 
