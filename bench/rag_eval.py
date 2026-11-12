@@ -8,9 +8,13 @@ OpenAI-compatible server (`mlx_lm.server`, started here for each model).
 Configurations: extractive (today) / generative per model x passages given (k) x what happens when a
 generated answer is rejected ("extract": show the extractive answer, "fallback": answer nothing).
 Metrics on the test half (dev half chooses), bootstrap 95% intervals:
-  correct  = answerable question, answered, and >= 60% of the gold facts (numbers and nouns of the
-             gold FAQ answer / document evidence, Kiwi) appear in the answer
+  correct  = answerable question, answered, and what the answer says is backed by a right source: at
+             least one fact (nouns, numbers, content verb/adjective stems; Kiwi), >= 60% of its facts found in a right source (the
+             gold FAQ entry, or the chunk holding the gold evidence) and every number in that source
   wrong    = answered but not correct (answerable), or answered at all (unanswerable)
+  recall   = the first metric tried: share of the gold text's facts found in the answer (>= 0.6). It
+             marks a short, right answer ("나쁨입니다.") wrong because it drops the rest of the gold
+             sentence, and an extractive answer (the gold text itself) right — reported, not used to choose
   unsupported = generated answers with a number not in the passages, BEFORE the check (model quality)
   length   = median characters of answers given; latency = knowledge-base turn p50/p95 incl. generation
 No LLM grades another LLM: every metric is counted on strings.
@@ -51,12 +55,17 @@ CRITERIA = {"fact_drop": 0.02, "p95_ms": 5000.0, "median_chars": 200}
 # ---------------------------------------------------------------- facts (pure)
 
 
+GENERIC_STEMS = frozenset({"하", "되", "있", "없", "그렇", "이렇", "저렇", "같", "않", "이", "아니"})
+
+
 def fact_tokens(text: str, tokenize: Any) -> set[str]:
-    """Numbers and nouns of a text (what a right answer must carry)."""
+    """Numbers, nouns and content verb/adjective stems ("나쁘" of 나쁨) of a text; generic stems
+    (하다, 되다, 있다, 그렇다 ...) say nothing checkable and are left out."""
     from chatcore.generation import numbers
 
-    nouns = {t.form.lower() for t in tokenize(text) if t.tag.startswith(("NNG", "NNP", "SL"))}
-    return nouns | numbers(text)
+    words = {t.form.lower() for t in tokenize(text)
+             if t.tag.startswith(("NNG", "NNP", "SL", "VV", "VA", "XR")) and t.form not in GENERIC_STEMS}
+    return words | numbers(text)
 
 
 def fact_score(answer: str, gold_texts: Sequence[str], tokenize: Any) -> float:
@@ -78,6 +87,22 @@ class Case:
     extract: str | None  # today's answer text
     gold: tuple[str, ...]
     kb_ms: float  # retrieval + judge
+    sources: tuple[str, ...] = ()  # right sources in full: gold FAQ entries (question + answer), chunks with the evidence
+
+
+def backed(answer: str, sources: Sequence[str], tokenize: Any) -> bool:
+    """The answer states something (a fact) and what it states is in one right source: >= FACT_BAR of
+    its facts, and all of its numbers."""
+    from chatcore.generation import numbers
+
+    facts = fact_tokens(answer, tokenize)
+    if not facts:
+        return False
+    for src in sources:
+        have = fact_tokens(src, tokenize)
+        if len(facts & have) / len(facts) >= FACT_BAR and numbers(answer) <= numbers(src):
+            return True
+    return False
 
 
 def final_text(case: Case, generated: dict[str, Any] | None, on_reject: str) -> str | None:
@@ -114,10 +139,12 @@ def build_cases() -> tuple[list[Case], Any]:  # pragma: no cover - real models
         result, answer = knowledge.consult(q.text, n.rule, n.similarity, None)
         kb_ms = (time.perf_counter() - start) * 1000
         gold: tuple[str, ...] = ()
+        sources: tuple[str, ...] = ()
         if q.gold is not None:
             gold = tuple(answers[i] for i in sorted(q.gold.faq)) + tuple(p for _, p in q.gold.phrases)
+            sources = tuple(i.text for i in items if q.gold.hit(i))
         passages = tuple(h.entry for h in result.answers) if (result is not None and answer is not None) else ()
-        cases.append(Case(q, n.rule, passages, answer.text if answer is not None else None, gold, kb_ms))
+        cases.append(Case(q, n.rule, passages, answer.text if answer is not None else None, gold, kb_ms, sources))
     return cases, Kiwi()
 
 
@@ -167,7 +194,7 @@ def generate_all(cases: list[Case]) -> dict[str, Any]:  # pragma: no cover - rea
 def evaluate(cases: list[Case], cache: dict[str, Any], tokenize: Any, model: str | None, k: int,
              on_reject: str, half: int) -> dict[str, Any]:
     """Metrics of one configuration on one half (model None: extractive)."""
-    correct, wrong_ans, wrong_unans, lengths, lat, unsupported, attempts = [], [], [], [], [], 0, 0
+    correct, wrong_ans, wrong_unans, recall, lengths, lat, unsupported, attempts = [], [], [], [], [], [], 0, 0
     for c in cases:
         if c.q.half != half or c.q.kind == "block":
             continue
@@ -185,18 +212,57 @@ def evaluate(cases: list[Case], cache: dict[str, Any], tokenize: Any, model: str
         if text is not None:
             lengths.append(len(text))
         if c.q.kind == "answerable":
-            ok = text is not None and fact_score(text, c.gold, tokenize) >= FACT_BAR
+            ok = text is not None and backed(text, c.sources, tokenize)
             correct.append(ok)
             wrong_ans.append(text is not None and not ok)
+            recall.append(text is not None and fact_score(text, c.gold, tokenize) >= FACT_BAR)
         else:
             wrong_unans.append(text is not None)
     arr = lambda v: np.array(v, dtype=float)  # noqa: E731
     return {"correct": (float(np.mean(correct)), bootstrap(arr(correct))),
             "wrong": (float(np.mean(wrong_ans)), bootstrap(arr(wrong_ans))),
             "unans_answered": (float(np.mean(wrong_unans)), bootstrap(arr(wrong_unans))),
+            "recall": float(np.mean(recall)) if recall else 0.0,
             "unsupported": unsupported / attempts if attempts else 0.0,
             "median_chars": statistics.median(lengths) if lengths else 0,
             "p50_ms": float(np.percentile(lat, 50)) if lat else 0.0, "p95_ms": float(np.percentile(lat, 95)) if lat else 0.0}
+
+
+def paired(cases: list[Case], cache: dict[str, Any], tokenize: Any, model: str | None, k: int, on_reject: str,
+           seed: int = 7, n: int = 4000) -> dict[str, Any]:
+    """This configuration minus extractive, question by question over BOTH halves (answerable questions
+    for correct/wrong, unanswerable for answered), with paired bootstrap 95% intervals."""
+    def per_question(m: str | None) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[int]]:
+        corr, wrong, unans, doc_chars = [], [], [], []
+        for c in cases:
+            if c.q.kind == "block":
+                continue
+            g = cache.get(f"{m}|{k}|{c.q.text}") if m is not None and c.passages else None
+            text = final_text(c, g, on_reject if m is not None else "-")
+            if c.q.kind == "answerable":
+                ok = text is not None and backed(text, c.sources, tokenize)
+                corr.append(ok)
+                wrong.append(text is not None and not ok)
+                if text is not None and c.passages and c.passages[0].kind == "doc":
+                    doc_chars.append(len(text))
+            else:
+                unans.append(text is not None)
+        return np.array(corr, float), np.array(wrong, float), np.array(unans, float), doc_chars
+
+    base, cur = per_question(None), per_question(model)
+    rng = np.random.default_rng(seed)
+    out: dict[str, Any] = {}
+    for i, name in ((0, "correct"), (1, "wrong")):
+        d = cur[i] - base[i]
+        boots = d[rng.integers(0, len(d), size=(n, len(d)))].mean(axis=1)
+        out[name] = (float(d.mean()), (float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))))
+    out["unans"] = (float(cur[2].mean()), float(base[2].mean()))
+    out["doc_chars"] = (statistics.median(cur[3]) if cur[3] else 0, statistics.median(base[3]) if base[3] else 0)
+    return out
+
+
+# The configuration the engine ships (깜몬's decision from the paired comparison below; see report())
+RECOMMENDED = ("mlx-community/Qwen3-8B-4bit", 1, "fallback")
 
 
 def passes(r: dict[str, Any], base: dict[str, Any]) -> bool:
@@ -216,33 +282,55 @@ def main() -> int:  # pragma: no cover - real models
     test = {cfg: evaluate(cases, cache, tokenize, *cfg, half=1) for cfg in configs}
     base_dev = dev[configs[0]]
     chosen = next((cfg for cfg in configs[1:] if passes(dev[cfg], base_dev)), None)  # smallest model, k, first
-    REPORT.write_text(report(configs, dev, test, chosen, cases), encoding="utf-8")
+    pairs = {cfg: paired(cases, cache, tokenize, *cfg) for cfg in configs[1:]}
+    REPORT.write_text(report(configs, dev, test, chosen, cases, pairs), encoding="utf-8")
     print("chosen:", chosen, flush=True)
     return 0
 
 
 def report(configs: Sequence[tuple[str | None, int, str]], dev: dict[Any, Any], test: dict[Any, Any],
-           chosen: tuple[str | None, int, str] | None, cases: Sequence[Case]) -> str:  # pragma: no cover
+           chosen: tuple[str | None, int, str] | None, cases: Sequence[Case],
+           pairs: dict[Any, Any]) -> str:  # pragma: no cover
     def ci(v: tuple[float, tuple[float, float]]) -> str:
         return f"{v[0]:.3f} [{v[1][0]:.3f}–{v[1][1]:.3f}]"
 
     lines = ["# 생성형 RAG 측정 (E-F)", "", "`uv run python bench/rag_eval.py`가 만든 파일. 손으로 고치지 말 것.", "",
              f"- 질문·지식베이스·검색과 판단은 `docs/benchmarks/kb.md`와 같음. 지식베이스가 답한 질문 {sum(bool(c.passages) for c in cases)}개에만 생성.",
-             "- 표는 확인용 절반(설정은 개발용 절반에서 고름), [괄호]는 부트스트랩 95% 구간. 맞음 = 정답 근거의 숫자·명사 60% 이상이 답에 있음.",
+             "- 표는 확인용 절반(설정은 개발용 절반에서 고름), [괄호]는 부트스트랩 95% 구간.",
+             "- **맞게 답함** = 답이 사실(명사·숫자·내용 있는 용언 어간)을 하나 이상 말하고, 그 사실의 60% 이상과 숫자 전부가 맞는 출처(정답 FAQ 항목, 정답 증거가 든 조각)에 있음.",
+             "- **재현율(참고)** = 정답 문장의 사실 60% 이상이 답에 있음 — 처음 쓴 지표. 짧고 맞는 답(\"나쁨입니다.\")을 틀렸다고 보고 정답 문장을 그대로 내는 추출형만 유리해서 고르는 데 쓰지 않음.",
              "- 생성을 버렸을 때: extract = 추출형 답을 대신 보여 줌, fallback = 답하지 않음(폴백).", "",
-             "| 설정 | 맞게 답함 | 틀리게 답함 | 답 없는 질문에 답함 | 근거 없는 숫자(검사 전) | 답 길이 중앙값 | p50 ms | p95 ms | 기준 |",
-             "|---|---|---|---|---|---|---|---|---|"]
+             "| 설정 | 맞게 답함 | 틀리게 답함 | 답 없는 질문에 답함 | 재현율(참고) | 근거 없는 숫자(검사 전) | 답 길이 중앙값 | p50 ms | p95 ms | 기준 |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     base_dev = dev[configs[0]]
     for cfg in configs:
         model, k, rej = cfg
         name = "추출형(지금)" if model is None else f"{model.split('/')[-1]} · k={k} · {rej}"
         t = test[cfg]
         mark = "—" if model is None else ("✅" if passes(dev[cfg], base_dev) else "❌") + (" ← 채택" if cfg == chosen else "")
-        lines.append(f"| {name} | {ci(t['correct'])} | {ci(t['wrong'])} | {ci(t['unans_answered'])} | {t['unsupported']:.3f} "
+        lines.append(f"| {name} | {ci(t['correct'])} | {ci(t['wrong'])} | {ci(t['unans_answered'])} | {t['recall']:.3f} | {t['unsupported']:.3f} "
                      f"| {t['median_chars']:.0f} | {t['p50_ms']:.0f} | {t['p95_ms']:.0f} | {mark} |")
     lines += ["", f"기준(개발용 절반): 맞게 답함이 추출형보다 {CRITERIA['fact_drop']} 넘게 낮지 않음, 틀리게 답함·답 없는 질문에 답함이 추출형 이하, "
               f"p95 ≤ {CRITERIA['p95_ms']:.0f}ms, 답 길이 중앙값 ≤ {CRITERIA['median_chars']}자. 통과한 것 중 가장 작은 모델·적은 자료·단순한 처리를 고른다.",
-              "", "사후 검사 뒤에는 근거 없는 숫자가 나가지 않는다(검사에서 걸러져 위 '버렸을 때' 처리로 감)."]
+              "", "사후 검사 뒤에는 근거 없는 숫자가 나가지 않는다(검사에서 걸러져 위 '버렸을 때' 처리로 감).", "",
+              "## 추출형과 같은 질문끼리 비교 (두 절반 합침, 쌍 부트스트랩 95% 구간)", "",
+              "| 설정 | 맞게 답함 차이 | 틀리게 답함 차이 | 답 없는 질문에 답함 (생성 / 추출형) | 문서 답 길이 중앙값 (생성 / 추출형) |",
+              "|---|---|---|---|---|"]
+    for cfg, p in pairs.items():
+        model, k, rej = cfg
+        lines.append(f"| {str(model).split('/')[-1]} · k={k} · {rej}{' ← 채택' if cfg == RECOMMENDED else ''} "
+                     f"| {p['correct'][0]:+.3f} [{p['correct'][1][0]:+.3f}, {p['correct'][1][1]:+.3f}] "
+                     f"| {p['wrong'][0]:+.3f} [{p['wrong'][1][0]:+.3f}, {p['wrong'][1][1]:+.3f}] "
+                     f"| {p['unans'][0]:.3f} / {p['unans'][1]:.3f} | {p['doc_chars'][0]:.0f} / {p['doc_chars'][1]:.0f} |")
+    rec = pairs[RECOMMENDED]
+    lines += ["", "## 결정 (깜몬, 2026-11-12)",
+              f"- 미리 정한 기준(점추정)은 개발용 절반에서 모든 설정이 넘지 못했다. 가장 가까운 {RECOMMENDED[0].split('/')[-1]} · k={RECOMMENDED[1]}은 "
+              "틀리게 답함이 추출형보다 1문항(88문항 중) 많아 떨어졌고, 확인용 절반에서는 넘었다.",
+              f"- 같은 질문끼리 비교하면 이 설정은 맞게 답함 {rec['correct'][0]:+.3f}, 틀리게 답함 {rec['wrong'][0]:+.3f}로 구간이 모두 0을 포함해 "
+              f"추출형과 구분되지 않고, 답 없는 질문에 답하는 비율은 {rec['unans'][1]:.3f} → {rec['unans'][0]:.3f}로 줄며(모델이 NO_ANSWER로 거절), "
+              f"문서에서 찾은 답은 {rec['doc_chars'][1]:.0f}자 조각 대신 {rec['doc_chars'][0]:.0f}자 답이 된다. 4B는 맞게 답함이 구분될 만큼 낮고, 14B는 낫지 않으면서 느리다.",
+              f"- 그래서 엔진 기본값은 {RECOMMENDED[0]} · 자료 {RECOMMENDED[1]}개 · 생성을 버리면 폴백(`chatcore.generation.GENERATION_DEPTH`, "
+              "`chatcore.knowledge.ON_REJECT`)이고, 생성은 봇마다 지식베이스 설정으로 켠다(기본 꺼짐 — 켜지 않은 봇은 그대로)."]
     return "\n".join(lines) + "\n"
 
 

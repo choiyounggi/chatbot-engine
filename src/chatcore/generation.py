@@ -24,7 +24,7 @@ NO_ANSWER = "NO_ANSWER"
 MAX_ANSWER_CHARS = 600
 MAX_TOKENS = 320
 OUTCOMES = ("generated", "no_answer", "unsupported_number", "too_long", "empty", "timeout", "error")
-GENERATION_DEPTH = 3  # passages given to the model (docs/benchmarks/rag.md)
+GENERATION_DEPTH = 1  # passages given to the model (docs/benchmarks/rag.md: 1 is as good as 3 and faster)
 LLM_TIMEOUT = 5.0  # seconds: Kakao waits 5 s for a skill's answer
 
 SYSTEM_PROMPT = """당신은 고객 상담 챗봇입니다. 아래 [자료]에 있는 내용만으로 사용자의 [질문]에 답하세요.

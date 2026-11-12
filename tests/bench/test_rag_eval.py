@@ -44,3 +44,15 @@ def test_passes_needs_every_criterion() -> None:
     for key, bad in (("correct", (0.57, (0, 0))), ("wrong", (0.07, (0, 0))), ("unans_answered", (0.07, (0, 0))),
                      ("p95_ms", 5001.0), ("median_chars", 201)):
         assert not passes({**good, key: bad}, base), key
+
+
+def test_backed_needs_facts_from_one_right_source_and_all_its_numbers() -> None:
+    from bench.rag_eval import backed
+
+    src = ("PM10 24시간 평균 기준으로 좋음 0~30, 보통 31~80, 나쁨 81~150, 매우나쁨 151 이상으로 표시합니다.",)
+    assert backed("나쁨입니다.", src, TOK)  # short and right
+    assert backed("81이면 나쁨이에요.", src, TOK)
+    assert not backed("70이면 나쁨이에요.", src, TOK)  # 70 is not in the source
+    assert not backed("위젯은 홈 화면에서 추가해요.", src, TOK)  # about something else
+    assert not backed("네, 그렇습니다.", src, TOK)  # states nothing checkable
+    assert not backed("나쁨입니다.", (), TOK)  # no right source
