@@ -37,7 +37,7 @@ OpenAI-compatible server (`POST <url>/v1/chat/completions`) that answers without
 uv tool install mlx-lm   # Apple Silicon; llama.cpp, Ollama, vLLM, LM Studio work the same way
 mlx_lm.server --model mlx-community/Qwen3-8B-4bit --port 8800 --chat-template-args '{"enable_thinking": false}'
 uv run python -m chatcore.api --bot bots/sample --llm-url http://127.0.0.1:8800 --llm-model mlx-community/Qwen3-8B-4bit
-# --llm-timeout 3.5 (seconds for the whole call; slower answers show the passage)
+# --llm-timeout 3.5 (seconds for the whole call, up to 60; slower answers show the passage; redirects are not followed)
 # --llm-api-key-env NAME (the key is read from that environment variable, sent as a Bearer token)
 ```
 

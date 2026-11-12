@@ -118,6 +118,8 @@ def test_client_sends_no_authorization_without_a_key() -> None:
     (http.client.BadStatusLine("garbage"), "error"),  # not an HTTP server
     (http.client.IncompleteRead(b"ab"), "error"),  # a chunked reply cut short
     (ValueError("the reply is too large"), "error"),
+    (b"[" * 200_000, "error"),  # nested too deep for the JSON parser
+    (json.dumps({"choices": ["not an object"]}).encode(), "error"),
 ])
 def test_client_turns_every_failure_into_a_generation_error(failure, outcome) -> None:
     c, _ = client(failure)
@@ -197,6 +199,12 @@ def test_the_timeout_bounds_the_whole_call_whatever_the_transport_does() -> None
     assert exc.value.outcome == "timeout" and time.monotonic() - start < 1.0
 
 
+def test_a_timeout_too_large_for_the_thread_pool_is_an_error() -> None:
+    with pytest.raises(GenerationError) as exc:
+        LlmClient(LlmConfig("http://llm.local", "m1", timeout=float("inf")), lambda *a: time.sleep(0.2) or reply("답")).chat([])
+    assert exc.value.outcome == "error"
+
+
 def test_the_api_key_is_not_in_the_config_repr() -> None:
     config = LlmConfig("http://llm.local", "m1", api_key="sk-test-not-real")
     assert "sk-test-not-real" not in repr(config) and config.api_key == "sk-test-not-real"
@@ -228,7 +236,10 @@ def server():
         socks.append(s)
 
         def serve():
-            conn, _ = s.accept()
+            try:
+                conn, _ = s.accept()
+            except OSError:  # closed at teardown, never called
+                return
             with conn:
                 read_request(conn)  # all of it: closing with unread bytes resets the connection
                 try:
@@ -279,3 +290,23 @@ def test_a_server_that_is_not_http_is_a_generation_error(server) -> None:
     with pytest.raises(GenerationError) as exc:
         c.chat([])
     assert exc.value.outcome == "error"
+
+
+def test_an_answer_cut_off_at_max_tokens_is_too_long_never_text() -> None:
+    cut = json.dumps({"choices": [{"message": {"content": "결제 후 7일 안에 환불"}, "finish_reason": "length"}]}).encode()
+    g = Generator(LlmClient(LlmConfig("http://llm.local", "m1"), lambda *a: cut)).generate("환불 돼요?", [FAQ])
+    assert (g.text, g.outcome) == (None, "too_long")
+    done = json.dumps({"choices": [{"message": {"content": "14일 안에 돼요."}, "finish_reason": "stop"}]}).encode()
+    assert Generator(LlmClient(LlmConfig("http://llm.local", "m1"), lambda *a: done)).generate("환불 돼요?", [FAQ]).outcome == "generated"
+
+
+def test_a_redirect_is_an_error_and_the_key_goes_nowhere_else(server) -> None:
+    reached = []
+    elsewhere = server(lambda conn: reached.append(True))
+    url = server(lambda conn: conn.sendall(
+        f"HTTP/1.1 302 Found\r\nLocation: {elsewhere}\r\nContent-Length: 0\r\n\r\n".encode()))
+    c = LlmClient(LlmConfig(url.removesuffix("/v1/chat/completions"), "m1", timeout=2, api_key="sk-test-not-real"))
+    with pytest.raises(GenerationError) as exc:
+        c.chat([])
+    time.sleep(0.2)
+    assert exc.value.outcome == "error" and reached == []

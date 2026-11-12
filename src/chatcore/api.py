@@ -1227,6 +1227,7 @@ def deploy_errors(what: str) -> Iterator[None]:
 
 def llm_generator(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Generator | None:
     """The generator the --llm-* options describe, or None without --llm-url."""
+    import math
     import os
     import urllib.parse
 
@@ -1234,20 +1235,22 @@ def llm_generator(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         return None
     try:
         url = urllib.parse.urlsplit(args.llm_url)
-        port = url.port  # ValueError when not a number
+        if url.port is not None and not 0 < url.port:  # url.port: ValueError when not a number
+            raise ValueError("port 0")
     except ValueError:
-        url, port = urllib.parse.urlsplit(""), None
+        url = urllib.parse.urlsplit("")
     if url.scheme not in ("http", "https") or not url.hostname:
         parser.error("--llm-url must be an http(s) URL")
+    if url.username or url.password:
+        parser.error("--llm-url must not hold a user or password (use --llm-api-key-env)")
     if not args.llm_model:
         parser.error("--llm-model is required with --llm-url")
-    if not args.llm_timeout > 0:
-        parser.error("--llm-timeout must be positive")
+    if not (math.isfinite(args.llm_timeout) and 0 < args.llm_timeout <= 60):
+        parser.error("--llm-timeout must be more than 0 and at most 60 seconds")
     key = os.environ.get(args.llm_api_key_env) if args.llm_api_key_env else None
     if args.llm_api_key_env and not key:
         parser.error(f"environment variable {args.llm_api_key_env} is not set")
-    log.info("generated knowledge-base answers: %s at %s://%s", args.llm_model, url.scheme,  # no user:password@
-             url.hostname if port is None else f"{url.hostname}:{port}")
+    log.info("generated knowledge-base answers: %s at %s", args.llm_model, args.llm_url)
     return Generator(LlmClient(LlmConfig(args.llm_url, args.llm_model, args.llm_timeout, key)), depth=GENERATION_DEPTH)
 
 

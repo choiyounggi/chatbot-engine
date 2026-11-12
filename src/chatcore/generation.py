@@ -49,7 +49,7 @@ _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
 
 
 class GenerationError(Exception):
-    def __init__(self, outcome: str, detail: str) -> None:  # outcome: "timeout" | "error"
+    def __init__(self, outcome: str, detail: str) -> None:  # outcome: "timeout" | "error" | "too_long" (cut off)
         super().__init__(f"{outcome}: {detail}")
         self.outcome, self.detail = outcome, detail
 
@@ -90,12 +90,23 @@ def check(answer: str, passages: Sequence[Entry]) -> str:
 Transport = Callable[[str, dict[str, str], bytes, float], bytes]
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is an error: following it would send the API key to wherever it points."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def post(url: str, headers: dict[str, str], body: bytes, timeout: float) -> bytes:
     """One HTTP POST that gives up after `timeout` seconds in all (a server sending its reply slowly
-    included). TimeoutError, OSError, http.client.HTTPException or ValueError (reply too large)."""
+    included) and follows no redirect. TimeoutError, OSError (urllib.error.HTTPError for a redirect or
+    an error status), http.client.HTTPException or ValueError (reply too large)."""
     deadline = time.monotonic() + timeout
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with _OPENER.open(request, timeout=timeout) as response:
         reply = bytearray()
         while chunk := response.read1(65536):
             reply += chunk
@@ -154,15 +165,18 @@ class LlmClient:
             if isinstance(exc.reason, TimeoutError):
                 raise GenerationError("timeout", f"no answer within {self.config.timeout:g}s") from exc
             raise GenerationError("error", f"cannot reach the LLM server: {exc.reason}") from exc
-        except (OSError, ValueError, http.client.HTTPException) as exc:
+        except (OSError, ValueError, OverflowError, http.client.HTTPException) as exc:  # OverflowError: timeout=inf
             raise GenerationError("error", type(exc).__name__) from exc
         try:
             data: Any = json.loads(raw.decode("utf-8"))
             content = data["choices"][0]["message"]["content"]
-        except (UnicodeDecodeError, ValueError, KeyError, IndexError, TypeError) as exc:
+            cut = data["choices"][0].get("finish_reason") == "length"
+        except (UnicodeDecodeError, ValueError, KeyError, IndexError, TypeError, AttributeError, RecursionError) as exc:
             raise GenerationError("error", "the LLM server's answer is not a chat completion") from exc
         if not isinstance(content, str):
             raise GenerationError("error", "the LLM server's answer has no text")
+        if cut:  # stopped at max_tokens: a sentence (or the model's thinking) cut off
+            raise GenerationError("too_long", f"the answer was cut off at {max_tokens} tokens")
         return strip_thinking(content)
 
 

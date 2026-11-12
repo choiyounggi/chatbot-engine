@@ -235,18 +235,22 @@ def parse(*argv):
     return llm_generator(parser, parser.parse_args(argv))
 
 
-def test_llm_options_build_a_generator_and_log_no_credentials(caplog, monkeypatch):
+def test_llm_options_build_a_generator_and_log_no_key(caplog, monkeypatch):
     monkeypatch.setenv("TEST_LLM_KEY", "sk-test-not-real")
     with caplog.at_level("INFO", logger="chatcore.api"):
-        gen = parse("--llm-url", "http://user:pw@127.0.0.1:8800", "--llm-model", "m", "--llm-api-key-env", "TEST_LLM_KEY")
+        gen = parse("--llm-url", "http://127.0.0.1:8800", "--llm-model", "m", "--llm-api-key-env", "TEST_LLM_KEY")
     assert gen.client.config.api_key == "sk-test-not-real" and gen.client.config.timeout == 3.5 and gen.depth == 1
-    assert "127.0.0.1:8800" in caplog.text and "pw" not in caplog.text and "sk-test" not in caplog.text
+    assert "127.0.0.1:8800" in caplog.text and "sk-test" not in caplog.text
+    assert parse("--llm-url", "https://llm.example", "--llm-model", "m", "--llm-timeout", "60").client.config.timeout == 60
     assert parse() is None
 
 
 @pytest.mark.parametrize("argv", [
     ("--llm-url", "ftp://h", "--llm-model", "m"), ("--llm-url", "http://h:port", "--llm-model", "m"),
     ("--llm-url", "http://h",), ("--llm-url", "http://h", "--llm-model", "m", "--llm-timeout", "0"),
+    ("--llm-url", "http://h", "--llm-model", "m", "--llm-timeout", "inf"),
+    ("--llm-url", "http://h", "--llm-model", "m", "--llm-timeout", "60.5"),
+    ("--llm-url", "http://user:pw@h", "--llm-model", "m"), ("--llm-url", "http://h:0", "--llm-model", "m"),
     ("--llm-url", "http://h", "--llm-model", "m", "--llm-api-key-env", "TEST_LLM_KEY_UNSET"),
 ])
 def test_bad_llm_options_stop_the_server(argv):
