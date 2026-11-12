@@ -674,7 +674,7 @@ Makefile      setup / check / test / bench / db-up (Phase 3 이후 train / chat 
   - 검색: 질문과 비슷한 질문을 각각 벡터로 두고, 그 FAQ의 점수는 가장 가까운 문장의 코사인. 판단 모델은 그 가장 가까운 문장 + 답을 읽는다. 비슷한 질문이 없으면 지금과 똑같다(E-D 측정이 그대로).
   - 색인 형식이 바뀌므로 예전 색인은 다시 만든다. 답안 추천 버튼(제목 일치)은 원래 질문만.
 - **후보 만들기 API:** `POST /v1/builder/bots/{bot}/augment` `{kind: "intent" | "faq", id, count: 1~40(기본 20)}` → `{kind, id, model, ms, items: [{text, type, status, detail}]}`.
-  - 저장된 초안(블록) / 저장된 지식베이스 초안(FAQ)을 바탕으로 만든다. 엔진에 LLM이 없으면 409, LLM이 실패하면 502(이유 포함). 시간 제한 90초(대화 턴의 3.5초와 따로).
+  - 저장된 초안(블록) / 저장된 지식베이스 초안(FAQ)을 바탕으로 만든다. 엔진에 LLM이 없으면 409, LLM이 실패하면 424(이유 포함; 502·504는 프록시가 엔진에 닿지 못했다는 뜻으로 쓰이므로 피함). 시간 제한 90초(대화 턴의 3.5초와 따로).
   - LLM 요청: OpenAI 호환(E-F와 같은 서버), temperature 0.7, max_tokens 1200, `{"items": [{"text", "type"}]}` JSON. `type`: typo(오타·띄어쓰기) / casual(구어체·줄임말) / paraphrase(다른 표현) / synonym(동의어). 블록은 예문의 `{자리}` 표시를 그대로 쓰게 한다.
   - **엔진이 거르기(결정적, LLM 없이):** `duplicate` — 이미 있는 예문·질문이나 앞 후보와 같음; `invalid` — 길이 밖, 원래 예문에 없는 `{자리}`; `conflict` — 다른 블록·FAQ와 헷갈림(블록: 배포된 모델의 1위가 다른 블록이고 확률 ≥ 0.5; FAQ: 가장 최근에 만든 지식베이스 색인에서 가장 가까운 FAQ가 다른 항목이고 대상보다 코사인이 0.02 넘게 높음). 배포된 모델·만든 색인에 그 블록·FAQ가 없으면 헷갈림 검사는 건너뛴다(`detail`에 적음). 나머지는 `ok`.
 - **측정 (`bench/augment_eval.py` → `docs/benchmarks/augment.md`):**

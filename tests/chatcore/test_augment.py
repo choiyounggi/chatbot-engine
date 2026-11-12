@@ -28,7 +28,9 @@ B = "/v1/builder/bots/sample"
 
 
 def reply(items):
-    return json.dumps({"choices": [{"message": {"content": json.dumps({"items": items}, ensure_ascii=False)},
+    """A chat completion whose text is `items` as JSON (a list -> {"items": [...]}, a dict as is)."""
+    body = {"items": items} if isinstance(items, list) else items
+    return json.dumps({"choices": [{"message": {"content": json.dumps(body, ensure_ascii=False)},
                                     "finish_reason": "stop"}]}).encode()
 
 
@@ -73,18 +75,25 @@ def test_screen_marks_duplicates_invalid_conflicts_and_keeps_the_rest() -> None:
     assert skipped[0].to_dict() == {"text": "날씨 어떰", "type": "casual", "status": "ok", "detail": "검사 건너뜀"}
 
 
-def test_messages_show_at_most_twenty_examples_and_the_count() -> None:
-    system, user = intent_messages("날씨 문의", [f"예문 {i}" for i in range(30)], 15)
-    assert "JSON" in system["content"] and "예문 19" in user["content"] and "예문 20" not in user["content"]
-    assert "새 문장 15개" in user["content"]
-    _, faq = faq_messages("환불 되나요", "7일 안에 돼요", ["환불돼요?"], 10)
-    assert "[질문] 환불 되나요\n- 환불돼요?" in faq["content"] and "[답] 7일 안에 돼요" in faq["content"]
+def test_typos_are_their_own_request_and_the_rest_are_split_by_type() -> None:
+    assert augment.split_count(20) == {"typo": 5, "casual": 5, "paraphrase": 5, "synonym": 5}
+    assert augment.split_count(6) == {"typo": 2, "casual": 2, "paraphrase": 1, "synonym": 1}
+    typo, rest = intent_messages("날씨 문의", [f"예문 {i}" for i in range(30)], 20)
+    assert typo[0]["content"] == augment.TYPO_PROMPT and typo[1]["content"] == "[문장]\n- 예문 0\n- 예문 1\n- 예문 2"
+    assert rest[0]["content"] == augment.SYSTEM_PROMPT and "예문 19" in rest[1]["content"] and "예문 20" not in rest[1]["content"]
+    assert rest[1]["content"].endswith("이 블록으로 가야 하는 새 문장을 만드세요: casual 5개, paraphrase 5개, synonym 5개.")
+    assert len(intent_messages("날씨", ["날씨"], 1)) == 1  # one sentence: a typo only
+    ftypo, frest = faq_messages("환불 되나요", "7일 안에 돼요", ["환불돼요?"], 10)
+    assert ftypo[1]["content"] == "[문장]\n- 환불 되나요\n- 환불돼요?"
+    assert "[질문] 환불 되나요\n- 환불돼요?\n[답] 7일 안에 돼요" in frest[1]["content"]
 
 
-def test_propose_asks_for_varied_sentences_and_refuses_an_empty_answer() -> None:
-    llm = FakeLlm(reply([{"text": "날시", "type": "typo"}]))
+def test_propose_asks_every_task_for_varied_sentences_and_once_more_when_one_is_empty() -> None:
+    llm = FakeLlm(reply({"typo": ["날시"]}), reply([]), reply({"casual": ["날씨 어떰"], "synonym": ["기상 어때"]}))
     client = LlmClient(LlmConfig("http://llm.local", "m"), llm)
-    assert propose(client, intent_messages("날씨", ["날씨"], 5)) == [("날시", "typo")]
+    assert propose(client, intent_messages("날씨", ["날씨"], 5)) == [
+        ("날시", "typo"), ("날씨 어떰", "casual"), ("기상 어때", "synonym")]
+    assert len(llm.requests) == 3  # the second task answered nothing the first time
     body, _ = llm.requests[0]
     assert (body["temperature"], body["max_tokens"]) == (augment.TEMPERATURE, augment.MAX_TOKENS)
     empty = LlmClient(LlmConfig("http://llm.local", "m"), FakeLlm(reply([])))
@@ -169,31 +178,37 @@ def make_host(fake_embedder, tmp_path, trained_sample):
 
 
 def test_block_proposals_are_screened_against_the_draft_and_the_deployed_model(make_host) -> None:
-    llm = FakeLlm(reply([{"text": "{location} 날시 어때요?", "type": "typo"}, {"text": "{location} 날씨 어때요?", "type": "paraphrase"},
-                         {"text": "안녕하세요", "type": "casual"}, {"text": "{도시} 날씨", "type": "synonym"}]))
+    llm = FakeLlm(reply({"typo": ["{location} 날시 어때요?"]}),
+                  reply({"paraphrase": ["{location} 날씨 어때요?"], "casual": ["안녕하세요"], "synonym": ["{도시} 날씨"]}))
     client = TestClient(create_app(make_host(llm)))
     r = client.post(f"{B}/augment", json={"kind": "intent", "id": "weather", "count": 4})
     assert r.status_code == 200, r.text
     body = r.json()
     assert (body["kind"], body["id"], body["model"]) == ("intent", "weather", "test-model") and body["ms"] >= 0
     assert [(i["status"], i["type"]) for i in body["items"]] == [
-        ("ok", "typo"), ("duplicate", "paraphrase"), ("conflict", "casual"), ("invalid", "synonym")]
-    assert "‘인사’ 블록" in body["items"][2]["detail"]
-    sent, timeout = llm.requests[0]
+        ("ok", "typo"), ("conflict", "casual"), ("duplicate", "paraphrase"), ("invalid", "synonym")]
+    assert "‘인사’ 블록" in body["items"][1]["detail"]
+    sent, timeout = llm.requests[1]
     assert timeout == augment.TIMEOUT and "[블록] 날씨 문의" in sent["messages"][1]["content"]
 
 
+def test_a_separate_model_can_propose(make_host) -> None:
+    llm = FakeLlm(reply({"typo": ["날시"], "casual": ["날씨 어떰"]}))
+    client = TestClient(create_app(make_host(llm), augment_model="bigger-model"))
+    body = client.post(f"{B}/augment", json={"kind": "intent", "id": "weather", "count": 2}).json()
+    assert body["model"] == "bigger-model" and {r[0]["model"] for r in llm.requests} == {"bigger-model"}
+
+
 def test_faq_proposals_are_checked_against_the_newest_index(make_host) -> None:
-    llm = FakeLlm(reply([{"text": "구독 환블 어케 해요", "type": "typo"}, {"text": "위젯은 어떻게 추가하나요", "type": "paraphrase"},
-                         {"text": "구독 환불은 어떻게 하나요", "type": "paraphrase"}]))
+    llm = FakeLlm(reply({"typo": ["구독 환블 어케 해요"], "paraphrase": ["위젯은 어떻게 추가하나요", "구독 환불은 어떻게 하나요"]}))
     host = make_host(llm)
     client = TestClient(create_app(host))
     host.save_kb_draft("sample", KB)
-    first = client.post(f"{B}/augment", json={"kind": "faq", "id": "refund"}).json()
+    first = client.post(f"{B}/augment", json={"kind": "faq", "id": "refund", "count": 1}).json()
     assert [i["status"] for i in first["items"]] == ["ok", "ok", "duplicate"]  # no index yet: not checked
     assert "보지 않았어요" in first["items"][0]["detail"]
     host.build_kb("sample")
-    checked = client.post(f"{B}/augment", json={"kind": "faq", "id": "refund"}).json()
+    checked = client.post(f"{B}/augment", json={"kind": "faq", "id": "refund", "count": 1}).json()
     assert [i["status"] for i in checked["items"]] == ["ok", "conflict", "duplicate"]
     assert checked["items"][1]["detail"] == "‘위젯은 어떻게 추가하나요’ FAQ에 더 가까워요"
 
@@ -207,7 +222,7 @@ def test_augment_refuses_without_an_llm_an_unknown_target_bad_input_and_a_failed
                 {"kind": "intent", "id": "weather", "count": 41}, {"kind": "intent", "id": "a b"}):
         assert client.post(f"{B}/augment", json=bad).status_code == 422
     failed = client.post(f"{B}/augment", json={"kind": "intent", "id": "weather"})
-    assert failed.status_code == 502 and "did not answer" in failed.json()["detail"]
+    assert failed.status_code == 424 and "did not answer" in failed.json()["detail"]
     down = TestClient(create_app(make_host(FakeLlm(TimeoutError()))))
     assert "timeout" in down.post(f"{B}/augment", json={"kind": "intent", "id": "weather"}).json()["detail"]
 

@@ -29,17 +29,24 @@ CONFLICT_PROB = 0.5  # a block example the deployed model gives to another block
 FAQ_MARGIN = 0.02  # a similar question nearer another FAQ by more than this is a conflict
 
 SYSTEM_PROMPT = """당신은 한국어 챗봇의 학습 데이터를 만드는 도우미입니다.
-주어진 문장들과 **같은 뜻**으로, 실제 사용자가 입력할 만한 다른 문장을 만드세요.
-- typo: 오타(모음·받침 실수, 된소리·예사소리 혼동, 띄어쓰기 실수, 자판 실수)
-- casual: 구어체·반말·줄임말·이모티콘 없는 채팅 말투
-- paraphrase: 같은 뜻의 다른 표현
-- synonym: 핵심 단어를 동의어·비슷한 말로 바꾼 문장
+주어진 문장들과 **같은 뜻**으로, 실제 사용자가 채팅창에 입력할 만한 **새** 문장을 종류별로 만드세요.
+- casual: 반말·구어체·줄임말 (예: 결제 취소 어떻게 해요 → 결제 취소 어케 함)
+- paraphrase: 같은 뜻의 다른 문장
+- synonym: 핵심 단어를 동의어·비슷한 말로 바꾼 문장 (예: 결제 → 계산, 취소 → 철회)
 규칙:
 1. 뜻을 바꾸거나 새로운 요구를 더하지 마세요.
-2. 주어진 문장과 똑같은 문장은 쓰지 마세요.
+2. 주어진 문장과 똑같은 문장, 서로 같은 문장은 쓰지 마세요.
 3. 문장에 {이름} 같은 중괄호 표시가 있으면 그 표시를 글자 그대로 두세요.
-4. 네 종류를 고르게 섞으세요.
-5. 다른 말 없이 JSON만 쓰세요: {"items": [{"text": "...", "type": "typo"}, ...]}"""
+4. 다른 말 없이 JSON만 쓰세요: {"casual": [...], "paraphrase": [...], "synonym": [...]}"""
+
+# a model rewrites whole words easily but rarely misspells on request: typos get their own task, one
+# sentence at a time, with the kinds spelled out
+TYPO_PROMPT = """당신은 오타 생성기입니다.
+문장마다, 사람이 휴대폰으로 급하게 칠 때 실제로 나는 오타를 한 군데 넣은 문장을 2개씩 만드세요.
+오타 종류: 모음 혼동(ㅐ↔ㅔ, ㅗ↔ㅜ, ㅓ↔ㅏ), 받침을 빠뜨리거나 틀림, 된소리↔예사소리,
+이웃 자판(ㄱ↔ㄷ, ㅅ↔ㅆ 등), 띄어쓰기를 붙이거나 띄움, 글자 순서 바뀜.
+예) 주문 확인해줘 → ["주믄 확인해줘", "주문 확인해저"] / 배송 언제 와요 → ["배숑 언제 와요", "배송 언제와요"]
+원래 문장과 똑같으면 안 됩니다. {이름} 같은 중괄호 표시는 그대로 두세요. 다른 말 없이 JSON만: {"typo": ["...", ...]}"""
 
 
 @dataclass(frozen=True)
@@ -53,18 +60,38 @@ class Proposal:
         return asdict(self)
 
 
-def intent_messages(label: str, examples: Sequence[str], count: int) -> list[dict[str, str]]:
+Messages = list[dict[str, str]]
+
+
+def split_count(count: int) -> dict[str, int]:
+    """How many of each type to ask for: `count` spread over TYPES, typos first."""
+    return {t: count // len(TYPES) + (1 if i < count % len(TYPES) else 0) for i, t in enumerate(TYPES)}
+
+
+def _tasks(sentences: Sequence[str], context: str, request: str, count: int) -> list[Messages]:
+    """Two requests: typos of the given sentences (two each), and the other types."""
+    n = split_count(count)
+    tasks: list[Messages] = []
+    if n["typo"]:
+        picked = list(sentences)[:max(1, (n["typo"] + 1) // 2)]
+        tasks.append([{"role": "system", "content": TYPO_PROMPT},
+                      {"role": "user", "content": "[문장]\n" + "\n".join(f"- {s}" for s in picked)}])
+    rest = ", ".join(f"{t} {k}개" for t, k in n.items() if t != "typo" and k)
+    if rest:
+        tasks.append([{"role": "system", "content": SYSTEM_PROMPT},
+                      {"role": "user", "content": f"{context}\n\n{request}: {rest}."}])
+    return tasks
+
+
+def intent_messages(label: str, examples: Sequence[str], count: int) -> list[Messages]:
     shown = "\n".join(f"- {e}" for e in list(examples)[:SAMPLE])
-    return [{"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",
-             "content": f"[블록] {label}\n[예문]\n{shown}\n\n이 블록으로 가야 하는 새 문장 {count}개를 만드세요."}]
+    return _tasks(examples, f"[블록] {label}\n[예문]\n{shown}", "이 블록으로 가야 하는 새 문장을 만드세요", count)
 
 
-def faq_messages(question: str, answer: str, similar: Sequence[str], count: int) -> list[dict[str, str]]:
+def faq_messages(question: str, answer: str, similar: Sequence[str], count: int) -> list[Messages]:
     known = "".join(f"\n- {q}" for q in list(similar)[:SAMPLE])
-    return [{"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"[질문] {question}{known}\n[답] {answer}\n\n"
-                                        f"이 답을 찾는 사용자가 물을 만한 새 질문 {count}개를 만드세요."}]
+    return _tasks([question, *similar], f"[질문] {question}{known}\n[답] {answer}",
+                  "이 답을 찾는 사용자가 물을 만한 새 질문을 만드세요", count)
 
 
 def _text_of(item: Any) -> tuple[str, str] | None:
@@ -90,6 +117,8 @@ def parse_items(raw: str) -> list[tuple[str, str]]:
             data: Any = json.loads(raw[i:j + 1])
         except ValueError:
             continue
+        if isinstance(data, dict) and any(isinstance(data.get(t), list) for t in TYPES):  # grouped by type
+            return [(x, t) for t in TYPES for x in data.get(t) or [] if isinstance(x, str)]
         items = data.get("items") if isinstance(data, dict) else data
         if isinstance(items, list):
             return [t for t in (_text_of(x) for x in items) if t is not None]
@@ -122,10 +151,16 @@ def screen(items: Sequence[tuple[str, str]], existing: Sequence[str], placeholde
     return out
 
 
-def propose(client: LlmClient, messages: list[dict[str, str]]) -> list[tuple[str, str]]:
-    """The model's sentences. GenerationError when it does not answer or answers nothing usable."""
-    raw = client.chat(messages, max_tokens=MAX_TOKENS, temperature=TEMPERATURE)
-    items = parse_items(raw)
-    if not items:
-        raise GenerationError("error", "the LLM's answer has no sentences")
-    return items
+def ask(client: LlmClient, messages: Messages, tries: int = 2) -> list[tuple[str, str]]:
+    """One request's sentences, asked again once when an answer has none (sampling varies).
+    GenerationError when it does not answer or never answers anything usable."""
+    for _ in range(tries):
+        items = parse_items(client.chat(messages, max_tokens=MAX_TOKENS, temperature=TEMPERATURE))
+        if items:
+            return items
+    raise GenerationError("error", "the LLM's answer has no sentences")
+
+
+def propose(client: LlmClient, tasks: Sequence[Messages]) -> list[tuple[str, str]]:
+    """Every task's sentences, in order."""
+    return [item for messages in tasks for item in ask(client, messages)]

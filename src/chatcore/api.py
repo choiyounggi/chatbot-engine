@@ -582,9 +582,11 @@ MISUNDERSTOOD_RULES = ("fallback", "clarify")
 EARLIEST, LATEST = dt.date(2000, 1, 1), dt.date(2100, 12, 31)  # analytics periods
 
 
-def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | None = None) -> FastAPI:
+def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | None = None,
+               augment_model: str | None = None) -> FastAPI:
     """`admin_token`: when set, builder endpoints require `Authorization: Bearer <token>`.
-    `jobs`: where builder training runs (a new JobRunner when the host is a BotHost)."""
+    `jobs`: where builder training runs (a new JobRunner when the host is a BotHost).
+    `augment_model`: the model that proposes examples (E-H; default: the LLM's own model)."""
     app = FastAPI(title="chatcore", version="0.0.1")
 
     @app.exception_handler(BotDeleting)
@@ -731,7 +733,7 @@ def create_app(host: Host, admin_token: str | None = None, jobs: JobRunner | Non
 
     if isinstance(host, BotHost):
         runner = jobs or JobRunner()
-        _builder_routes(app, host, admin, runner, origins)
+        _builder_routes(app, host, admin, runner, origins, augment_model)
         if jobs is None:  # ours: finish queued jobs on shutdown
             app.router.on_shutdown.append(runner.close)
     return app
@@ -780,7 +782,8 @@ def parse_if_match(value: str | None) -> int | None:
     return int(tag)
 
 
-def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner, origins: OriginCache) -> None:
+def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner, origins: OriginCache,
+                    augment_model: str | None = None) -> None:
     deps = [Depends(admin)]
 
     def known(bot: str) -> None:
@@ -978,7 +981,8 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner, or
         if host.generator is None:
             raise HTTPException(409, "this server has no LLM (start it with --llm-url)")
         config = host.generator.client.config
-        client = LlmClient(LlmConfig(config.url, config.model, augment.TIMEOUT, config.api_key),
+        model = augment_model or config.model
+        client = LlmClient(LlmConfig(config.url, model, augment.TIMEOUT, config.api_key),
                            host.generator.client.transport)
         if body.kind == "intent":
             messages, existing, placeholders, conflict, skipped = _intent_task(bot, body.id, body.count)
@@ -988,10 +992,10 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner, or
         try:
             items = augment.propose(client, messages)
         except GenerationError as exc:
-            raise HTTPException(502, f"the LLM did not answer: {exc.outcome}: {exc.detail}") from exc
+            raise HTTPException(424, f"the LLM did not answer: {exc.outcome}: {exc.detail}") from exc
         ms = round((time.perf_counter() - start) * 1000)
         proposals = augment.screen(items, existing, placeholders, conflict, skipped)
-        return {"bot": bot, "kind": body.kind, "id": body.id, "model": config.model, "ms": ms,
+        return {"bot": bot, "kind": body.kind, "id": body.id, "model": model, "ms": ms,
                 "items": [p.to_dict() for p in proposals]}
 
     def _intent_task(bot: str, intent: str, count: int) -> Any:
@@ -1479,6 +1483,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
                              "(the server must answer without a thinking block)")
     parser.add_argument("--llm-api-key-env", default=None,
                         help="the NAME of an environment variable holding the server's API key (never the key itself)")
+    parser.add_argument("--augment-llm-model", default=None,
+                        help="the model (on the --llm-url server) that proposes block examples and FAQ similar "
+                             "questions in the builder (default: --llm-model; a larger one writes better typos)")
     parser.add_argument("--keep-warm-ms", type=float, default=None,
                         help="when idle, run the model this often so the first request after a pause stays fast "
                              "(keeps the GPU busy; see docs/benchmarks/api_latency.md)")
@@ -1523,7 +1530,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
     if token is None and args.host not in ("127.0.0.1", "localhost", "::1"):
         log.warning("CHATCORE_ADMIN_TOKEN is not set: anyone who can reach %s can edit and deploy bots "
                     "and read users' messages through /v1/builder", args.host)
-    uvicorn.run(create_app(host, token), host=args.host, port=args.port)
+    uvicorn.run(create_app(host, token, augment_model=args.augment_llm_model), host=args.host, port=args.port)
     return 0
 
 
