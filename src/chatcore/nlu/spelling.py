@@ -2,10 +2,11 @@
 
 A sentence embedding reads "날시" as a different word from "날씨", so a block or an FAQ is missed by one
 mistyped jamo. Before a turn is understood, each Hangul word the bot has never used is compared, jamo by
-jamo, with the words it has (block examples, entity values, FAQ, documents): when exactly one known word
-is one jamo away (a jamo replaced, added or dropped) AND a Korean language model (Kiwi) finds that word
-clearly more likely than what was typed, it is used instead. Words the bot knows, short words (one
-syllable), real words the bot just never used ("먼지", "뭐임") and ties are left alone.
+jamo, with the words it has (block examples, entity values, FAQ, documents): when a known word is one
+jamo away (a jamo replaced, added or dropped; of several, the one the bot uses most) AND a Korean
+language model (Kiwi) finds that word clearly more likely than what was typed, it is used instead.
+Words the bot knows, short words (one syllable), real words the bot just never used ("먼지", "뭐임") and
+candidates used equally often are left alone.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ _HANGUL = re.compile(r"[가-힣]+")
 MIN_SYLLABLES = 2
 MAX_SUFFIX = 3  # syllables a word may carry after a known stem (particles, endings): "날시가요" -> "날시"
 MARGIN = 5.0  # how much more likely (Kiwi log score) the known word must be (bench/spelling_eval.py)
+MAX_SCORES = 20_000  # remembered Kiwi scores per bot version; users type new words forever, so it starts over
 
 
 def jamo(word: str) -> str:
@@ -128,6 +130,8 @@ class Speller:
     def _likely(self, word: str) -> float:
         if word not in self._scores:
             assert self.score is not None
+            if len(self._scores) >= MAX_SCORES:
+                self._scores.clear()
             self._scores[word] = self.score(word)
         return self._scores[word]
 

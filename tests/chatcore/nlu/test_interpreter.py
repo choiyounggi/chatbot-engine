@@ -251,3 +251,23 @@ def test_punctuation_only_escape_phrases_never_match(sample_bot, extractor):
     bot = with_escape_and_memo(sample_bot, ["...", "나가기"])
     out = interp(extractor, [(OOS, 0.9)]).interpret("???", waiting_for_note(), bot)
     assert out.commands == [SetSlot("note", "???")]  # an answer, not an escape
+
+
+def test_with_a_speller_a_free_text_slot_keeps_what_was_typed_and_the_knowledge_base_gets_the_fix(sample_bot, extractor):
+    from chatcore.nlu.spelling import Speller
+
+    class Recorder:
+        asked: list[str] = []
+
+        def consult(self, text, rule, similarity, vector):
+            self.asked.append(text)
+            return None, None
+
+    bot = with_escape_and_memo(sample_bot, ["나가기"])
+    speller = Speller(["우유 사기", "오늘 날씨"])  # no language model: every one-jamo match is taken
+    memo = NluInterpreter(lambda t: result(extractor, t, [(OOS, 0.6)]), None, speller)
+    out = memo.interpret("우유 사가", waiting_for_note(), bot)
+    assert out.commands == [SetSlot("note", "우유 사가")] and out.info["corrected"]["text"] == "우유 사기"
+    kb = Recorder()
+    NluInterpreter(lambda t: result(extractor, t, [(OOS, 0.6)]), kb, speller).interpret("오늘 날시", fold([]), sample_bot)
+    assert kb.asked == ["오늘 날씨"]

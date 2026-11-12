@@ -38,7 +38,7 @@ def test_one_jamo_slips_become_the_bots_word(kiwi_speller, typed, understood, ch
     assert (fixed.text, fixed.changes) == (understood, changes)
 
 
-@pytest.mark.parametrize("typed", ["뭐예요", "날씨에요", "먼지", "주식 추천해줘", "날씨 어때", "가", "Hello 날씨", "?!"])
+@pytest.mark.parametrize("typed", ["뭐예요", "뭐임", "날씨에요", "먼지", "주식 추천해줘", "날씨 어때", "가", "Hello 날씨", "?!"])
 def test_known_words_real_words_one_syllable_and_non_hangul_are_left_alone(kiwi_speller, typed) -> None:
     assert kiwi_speller.correct(typed).text == typed and kiwi_speller.correct(typed).changes == ()
 
@@ -49,6 +49,19 @@ def test_without_a_language_model_every_one_jamo_match_is_taken_and_ties_are_not
     tie = Speller(["가방", "가반"])  # "가밤" is one jamo from both, each seen once
     assert tie.correct("가밤").text == "가밤"
     assert Speller([]).correct("날시").text == "날시"
+    more = Speller(["부산"] * 3 + ["부상"])  # "부삼" is one jamo from both: the one the bot uses most
+    assert more.correct("부삼").text == "부산"
+
+
+def test_remembered_scores_start_over_at_the_limit(monkeypatch) -> None:
+    import chatcore.nlu.spelling as spelling
+
+    monkeypatch.setattr(spelling, "MAX_SCORES", 2)
+    calls = []
+    sp = Speller(["날씨", "부산"], lambda w: calls.append(w) or (0.0 if w in ("날씨", "부산") else -10.0))
+    for typed in ("날시", "부삼", "날시"):
+        assert sp.correct(typed).text in ("날씨", "부산")
+    assert len(sp._scores) <= 2 and calls.count("날시") == 2  # forgotten after the limit, asked again
 
 
 def test_a_margin_keeps_words_the_model_finds_about_as_likely() -> None:
@@ -102,6 +115,8 @@ def test_a_host_with_spelling_on_corrects_a_conversation_turn(fake_embedder, tmp
     on.runtime("sample").processor.handle("s", "안녕하세여")
     nlu = [e for e in on.store.events("s") if e.type == "commands_received"][-1].nlu
     assert nlu["corrected"]["text"] == "안녕하세요" and nlu["text"] == "안녕하세여"
+    speller = on.runtime("sample").processor.interpreter.speller
+    assert speller.score is not None and speller.score("날씨") > speller.score("날시")  # Kiwi guards real words
     off = host(False)
     off.runtime("sample").processor.handle("s", "안녕하세여")
     assert "corrected" not in [e for e in off.store.events("s") if e.type == "commands_received"][-1].nlu

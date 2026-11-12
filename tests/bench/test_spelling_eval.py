@@ -49,6 +49,9 @@ def test_margin_is_chosen_on_rule_typos_and_criteria_cover_the_spec() -> None:
     assert choose(blocks, kb, "i") == 8.0  # 5 and 8 tie on rule typos: the larger (fewer changes)
     fewer = {**blocks, 8.0: {**blocks[8.0], "규칙 오타": side([t, f], [t], [t], [])}}
     assert choose(fewer, kb, "i") == 5.0  # more correct answers beat the tie rule
+    unsafe = {m: {**v, "규칙 오타": side([t, t], [f], [t], [])} if m is not None else v for m, v in blocks.items()}
+    with pytest.raises(BenchError, match="no MARGIN"):
+        choose(unsafe, kb, "i")  # every MARGIN rejects fewer out-of-scope sentences: none is chosen
     checks = dict(criteria(blocks, kb, "i", 5.0))
     assert len(checks) == 9 and all(checks.values())
     worse = {**kb[("i", 5.0)], "자연 오타": {**kb[("i", 5.0)]["자연 오타"], "unans": [t]}}

@@ -178,7 +178,10 @@ def choose(blocks: dict[Any, Any], kb: dict[Any, Any], index: str) -> float:
                 and np.mean(k["unans"]) <= np.mean(k0["unans"]) + DROP)
     # a tie goes to the larger MARGIN (fewer changes to what was typed); added after 3 and 5 tied (209 = 209)
     ranked = sorted(MARGINS, key=lambda m: (-(sum(blocks[m]["규칙 오타"]["in_scope"]) + sum(kb[(index, m)]["규칙 오타"]["correct"])), -m))
-    return next((m for m in ranked if ok(m)), max(MARGINS))
+    chosen = next((m for m in ranked if ok(m)), None)
+    if chosen is None:
+        raise BenchError(f"{index}: no MARGIN keeps out-of-scope rejection and unanswerable questions within {DROP}")
+    return chosen
 
 
 def criteria(blocks: dict[Any, Any], kb: dict[Any, Any], index: str, m: float) -> list[tuple[str, bool]]:
