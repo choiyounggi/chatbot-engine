@@ -205,6 +205,17 @@ def test_the_api_key_is_not_in_the_config_repr() -> None:
 # ---------------------------------------------------------------- post (a real socket on 127.0.0.1)
 
 
+def read_request(conn) -> bytes:
+    data = b""
+    while b"\r\n\r\n" not in data:
+        data += conn.recv(65536)
+    head, _, body = data.partition(b"\r\n\r\n")
+    length = int(next((line.split(b":")[1] for line in head.split(b"\r\n") if line.lower().startswith(b"content-length:")), b"0"))
+    while len(body) < length:
+        body += conn.recv(65536)
+    return body
+
+
 @pytest.fixture
 def server():
     """A one-connection TCP server: `server(handler)` runs handler(conn) and returns the URL."""
@@ -219,7 +230,7 @@ def server():
         def serve():
             conn, _ = s.accept()
             with conn:
-                conn.recv(65536)
+                read_request(conn)  # all of it: closing with unread bytes resets the connection
                 try:
                     handler(conn)
                 except OSError:  # the client gave up

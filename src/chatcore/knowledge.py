@@ -47,8 +47,8 @@ ID = r"^[A-Za-z0-9_-]{1,64}$"
 MAX_PDF_PAGES = 500
 CHUNKER = 3  # stored with an index: a different chunker means the index is stale (built again)
 FloatArray = NDArray[np.float32]
-# a rejected generation shows the passage (docs/benchmarks/rag.md: chosen on the dev half)
-ON_REJECT: Literal["extract", "fallback"] = "extract"
+# a rejected generation answers nothing (docs/benchmarks/rag.md: fewer answers to unanswerable questions)
+ON_REJECT: Literal["extract", "fallback"] = "fallback"
 LLM_FAILURES = ("timeout", "error")  # generation outcomes where the LLM did not answer (chatcore.generation)
 
 if TYPE_CHECKING:  # chatcore.generation imports this module

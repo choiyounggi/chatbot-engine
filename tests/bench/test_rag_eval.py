@@ -66,7 +66,7 @@ def test_the_cache_key_is_what_was_sent_and_old_entries_move_to_it() -> None:
     other = Case(Question("환불 돼요?", "answerable"), "fallback", (Entry("x", "faq", "다른", "자료"),), "추출", (), 1.0)
     assert cache_key("m", 1, c) == cache_key("m", 1, c) != cache_key("m", 1, other) != cache_key("m2", 1, other)
     old = {"m|1|환불 돼요?": {"text": "t", "outcome": "generated", "ms": 5, "raw": "r"},
-           "m|3|환불 돼요?": {"text": None, "outcome": "timeout", "ms": 60000, "raw": ""},  # a failure: tried again
+           "m2|1|환불 돼요?": {"text": None, "outcome": "timeout", "ms": 60000, "raw": ""},  # a failure: tried again
            "m|1|모르는 질문": {"text": "t", "outcome": "generated", "ms": 5, "raw": "r"}}
     assert migrate(old, [c]) == {cache_key("m", 1, c): {"raw": "r", "ms": 5}}
     assert migrate({}, [c]) == {}
@@ -80,6 +80,8 @@ def test_choose_takes_the_first_passing_else_the_closest() -> None:
     cfgs = [(None, 1, "-"), ("a", 1, "extract"), ("b", 1, "extract"), ("c", 1, "extract")]
     assert choose(cfgs, {cfgs[0]: base, cfgs[1]: far, cfgs[2]: good, cfgs[3]: good}) == (cfgs[2], True)
     assert choose(cfgs, {cfgs[0]: base, cfgs[1]: far, cfgs[2]: near, cfgs[3]: far}) == (cfgs[2], False)
+    quieter = {**near, "unans_answered": (0.03, (0, 0))}  # same misses, answers fewer unanswerable questions
+    assert choose(cfgs, {cfgs[0]: base, cfgs[1]: far, cfgs[2]: near, cfgs[3]: quieter}) == (cfgs[3], False)
 
 
 def test_evaluate_and_paired_count_one_half_and_skip_exact_matches() -> None:

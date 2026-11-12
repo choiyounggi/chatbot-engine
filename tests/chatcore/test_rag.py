@@ -179,14 +179,17 @@ def test_a_conversation_and_the_search_test_answer_with_the_generated_text(make_
     assert body["answer"]["text"] == GENERATED and body["generated"]["outcome"] == "generated"
 
 
-@pytest.mark.parametrize("reply", ["NO_ANSWER", "14일 안에 환불돼요.", TimeoutError()])
-def test_the_server_default_shows_the_passage_for_a_rejection_or_a_failure(make_host, reply):
+@pytest.mark.parametrize("reply, text", [("NO_ANSWER", None), ("14일 안에 환불돼요.", None), (TimeoutError(), PASSAGE)])
+def test_the_server_default_answers_nothing_for_a_rejection_and_the_passage_for_a_failure(make_host, reply, text):
     gen, _ = generator(reply)
     host = make_host(gen)
     deploy_kb(host, {"mode": "instant", "generate": True})
     client = TestClient(create_app(host))
     (msg,) = client.post("/v1/bots/sample/sessions/s/messages", json={"text": "구독 환불 어떻게 해요"}).json()["messages"]
-    assert (msg["response"], msg["text"]) == ("knowledge", PASSAGE)
+    if text is None:
+        assert msg["response"] != "knowledge"  # the bot's own fallback
+    else:
+        assert (msg["response"], msg["text"]) == ("knowledge", text)
 
 
 def test_without_an_llm_the_setting_changes_nothing(make_host):

@@ -385,15 +385,20 @@ def failed(r: dict[str, Any], base: dict[str, Any]) -> list[str]:
     return out
 
 
+def quality(r: dict[str, Any]) -> float:
+    return float(r["correct"][0] - r["wrong"][0] - r["unans_answered"][0])
+
+
 def choose(configs: Sequence[Any], dev: dict[Any, Any]) -> tuple[Any, bool]:
     """The configuration to ship, from the dev half only: the first that passes every criterion
     (smallest model, fewest passages, "extract" before "fallback"), else the one missing the fewest,
-    then the highest correct minus wrong. Returns (config, passed)."""
+    then the highest quality: correct minus wrong minus answered-unanswerable (a wrong answer either
+    way). Returns (config, passed)."""
     base = dev[configs[0]]
     for cfg in configs[1:]:
         if passes(dev[cfg], base):
             return cfg, True
-    best = min(configs[1:], key=lambda cfg: (len(failed(dev[cfg], base)), -(dev[cfg]["correct"][0] - dev[cfg]["wrong"][0])))
+    best = min(configs[1:], key=lambda cfg: (len(failed(dev[cfg], base)), -quality(dev[cfg])))
     return best, False
 
 
@@ -452,7 +457,7 @@ def report(configs: Sequence[tuple[str | None, int, str]], dev: dict[Any, Any], 
                      f"| {t['median_chars']:.0f} | {t['p50_ms']:.0f} | {t['p95_ms']:.0f} | {mark} |")
     lines += ["", f"기준(개발용 절반, 점추정): 맞게 답함이 추출형보다 {CRITERIA['fact_drop']} 넘게 낮지 않음, 틀리게 답함·답 없는 질문에 답함이 추출형 이하, "
               f"p95 ≤ {CRITERIA['p95_ms']:.0f}ms, 답 길이 중앙값 ≤ {CRITERIA['median_chars']}자. 통과한 것 중 가장 작은 모델·적은 자료·extract 먼저. "
-              "통과한 것이 없으면 놓친 기준이 가장 적고, 그다음 (맞게 답함 − 틀리게 답함)이 큰 것.",
+              "통과한 것이 없으면 놓친 기준이 가장 적고, 그다음 (맞게 답함 − 틀리게 답함 − 답 없는 질문에 답함)이 큰 것.",
               "", "사후 검사 뒤에는 근거 없는 숫자가 나가지 않는다(검사에서 걸러져 위 '버렸을 때' 처리로 감).", "",
               f"## 채택한 설정과 추출형을 같은 질문끼리 비교 ({name(chosen)}, 쌍 부트스트랩 95% 구간)", "",
               "| 절반 | 맞게 답함 차이 | 틀리게 답함 차이 | 답 없는 질문에 답함 (생성 / 추출형) | 문서 답 길이 중앙값 (생성 / 추출형) |",
