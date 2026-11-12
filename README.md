@@ -43,6 +43,10 @@ uv run python -m chatcore.api --bot bots/sample --llm-url http://127.0.0.1:8800 
 
 Measured choice of model, passages and handling: [docs/benchmarks/rag.md](docs/benchmarks/rag.md).
 
+With an LLM, the builder can also ask for more block examples and FAQ similar questions (typos, casual wording,
+synonyms): the engine screens the proposals and a person adds the ones to keep. A larger model writes better
+typos: `--augment-llm-model mlx-community/Qwen3-14B-4bit` (same server). Measured: [docs/benchmarks/augment.md](docs/benchmarks/augment.md).
+
 ## Layout
 
 | Path | What |

@@ -14,7 +14,7 @@ from chatcore.dialogue.commands import AnswerKnowledge, CommandFormatError, from
 from chatcore.dialogue.events import SessionStarted
 from chatcore.dialogue.turn import ScriptedInterpreter, TurnProcessor
 from chatcore.host import BotHost, NoKnowledgeBase
-from chatcore.knowledge import CosineJudge, Knowledge, KnowledgeIndex
+from chatcore.knowledge import Candidate, CosineJudge, Knowledge, KnowledgeIndex
 from chatcore.nlu.hashing import HashingEmbedder
 from chatcore.serving import BatchedEmbedder, Pair, Passage, run_items
 from chatcore.store.memory import InMemoryStore
@@ -364,8 +364,9 @@ def test_a_cross_encoder_failure_fails_only_its_own_items() -> None:
     batched = BatchedEmbedder(HashingEmbedder(), cross_encoder=Failing())  # type: ignore[arg-type]
     try:
         with pytest.raises(RuntimeError, match="out of memory"):
-            batched.judge().score("q", KnowledgeIndex.build(KB, HashingEmbedder()).search(
-                "환불", HashingEmbedder().encode(["환불"])[0], CosineJudge(0)).candidates)
+            hits = KnowledgeIndex.build(KB, HashingEmbedder()).search(
+                "환불", HashingEmbedder().encode(["환불"])[0], CosineJudge(0)).candidates
+            batched.judge().score("q", [Candidate(h.entry, h.cosine) for h in hits])
         assert batched.encode(["문장"]).shape == (1, HashingEmbedder.dims)  # the worker survives
     finally:
         batched.close()

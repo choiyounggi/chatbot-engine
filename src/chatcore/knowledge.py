@@ -46,6 +46,9 @@ MAX_FAQ, MAX_DOCUMENTS, MAX_DOCUMENT_CHARS = 2000, 200, 200_000
 ID = r"^[A-Za-z0-9_-]{1,64}$"
 MAX_PDF_PAGES = 500
 CHUNKER = 3  # stored with an index: a different chunker means the index is stale (built again)
+INDEX_FORMAT = 2  # 2: one FAQ vector per question and similar question (E-H); another format is built again
+MAX_SIMILAR = 50  # similar questions per FAQ entry
+MAX_SIMILAR_TOTAL = 10_000  # in a whole knowledge base (each is a vector searched on every question)
 FloatArray = NDArray[np.float32]
 # a rejected generation answers nothing (docs/benchmarks/rag.md: fewer answers to unanswerable questions)
 ON_REJECT: Literal["extract", "fallback"] = "fallback"
@@ -72,11 +75,20 @@ class FaqEntry(_Model):
     id: str = Field(pattern=ID)
     question: str = Field(min_length=1, max_length=300)
     answer: str = Field(min_length=1, max_length=2000)
+    # other ways to ask it (typos, casual wording, synonyms): found like the question (E-H)
+    similar: list[str] = Field(default_factory=list, max_length=MAX_SIMILAR)
 
     @model_validator(mode="after")
     def _not_blank(self) -> FaqEntry:
         if not self.question.strip() or not self.answer.strip():
             raise ValueError("an FAQ question and answer must not be blank")
+        seen = {bare(self.question)}
+        for q in self.similar:
+            if not bare(q) or len(q) > 300:
+                raise ValueError("a similar question must be 1-300 characters with some letters")
+            if bare(q) in seen:
+                raise ValueError(f"similar question {q!r} repeats the question or another similar question")
+            seen.add(bare(q))
         return self
 
 
@@ -99,6 +111,8 @@ class KnowledgeBase(_Model):
 
     @model_validator(mode="after")
     def _unique_ids(self) -> KnowledgeBase:
+        if sum(len(f.similar) for f in self.faq) > MAX_SIMILAR_TOTAL:
+            raise ValueError(f"at most {MAX_SIMILAR_TOTAL} similar questions in a knowledge base")
         for what, ids in (("FAQ", [f.id for f in self.faq]), ("document", [d.id for d in self.documents])):
             dup = sorted({i for i in ids if ids.count(i) > 1})
             if dup:
@@ -172,6 +186,12 @@ class Entry:
     source: str = ""  # the document's name (chunks)
     heading: str = ""  # a chunk's "<document title> - <section>" (its title may add " (2/3)"); FAQ: unused
     section: str = ""  # a chunk's `##` section ("" before the first one); what its suggestion button says
+    similar: tuple[str, ...] = ()  # FAQ: other ways to ask it, each searched like the title
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        """FAQ: the sentences it is found by (the question, then the similar questions)."""
+        return (self.title, *self.similar)
 
     @property
     def judge_text(self) -> str:
@@ -232,7 +252,8 @@ def chunk_document(doc_id: str, name: str, text: str) -> list[Entry]:
 
 def entries(kb: KnowledgeBase) -> tuple[list[Entry], list[Entry]]:
     """(FAQ entries, document chunks)."""
-    faq = [Entry(f.id, "faq", " ".join(f.question.split()), f.answer.strip()) for f in kb.faq]
+    faq = [Entry(f.id, "faq", " ".join(f.question.split()), f.answer.strip(),
+                 similar=tuple(" ".join(q.split()) for q in f.similar)) for f in kb.faq]
     chunks = [c for d in kb.documents for c in chunk_document(d.id, d.name, d.text)]
     seen: dict[str, int] = {}
     for e in [*faq, *chunks]:
@@ -249,6 +270,11 @@ def entries(kb: KnowledgeBase) -> tuple[list[Entry], list[Entry]]:
 class Candidate:
     entry: Entry
     cosine: float
+    key: str = ""  # FAQ: the question or similar question that matched (the judge reads it with the answer)
+
+    @property
+    def judge_input(self) -> str:
+        return f"{self.key}\n{self.entry.body}" if self.key else self.entry.judge_text
 
 
 class Judge(Protocol):
@@ -294,7 +320,7 @@ class CrossEncoderJudge:  # pragma: no cover - needs the real model; measured by
         return np.asarray(self._model.predict(list(pairs), batch_size=32), dtype=np.float64)
 
     def score(self, query: str, candidates: Sequence[Candidate]) -> NDArray[np.float64]:
-        return self.score_pairs([(query, c.entry.judge_text) for c in candidates])
+        return self.score_pairs([(query, c.judge_input) for c in candidates])
 
 
 # ---------------------------------------------------------------- index
@@ -329,7 +355,9 @@ def _matrix(rows: FloatArray, n: int, dims: int) -> FloatArray:
 class KnowledgeIndex:
     def __init__(self, version: str, settings: KbSettings, faq: list[Entry], chunks: list[Entry],
                  faq_vectors: FloatArray, chunk_vectors: FloatArray, model_id: str, prompt: str) -> None:
-        if len(faq) != len(faq_vectors) or len(chunks) != len(chunk_vectors):
+        # one FAQ row per key: row -> (entry index, key)
+        self._faq_rows = [(i, key) for i, e in enumerate(faq) for key in e.keys]
+        if len(self._faq_rows) != len(faq_vectors) or len(chunks) != len(chunk_vectors):
             raise ValueError("entries and vectors do not match")
         self.version, self.settings, self.faq, self.chunks = version, settings, faq, chunks
         self.faq_vectors, self.chunk_vectors = faq_vectors, chunk_vectors
@@ -347,11 +375,12 @@ class KnowledgeIndex:
         """KnowledgeError for an invalid document."""
         kb = parse_kb(document)
         faq, chunks = entries(kb)
-        fv = embedder.encode([normalize(e.title) for e in faq]) if faq else np.zeros((0, 0), dtype=np.float32)
+        keys = [k for e in faq for k in e.keys]
+        fv = embedder.encode([normalize(k) for k in keys]) if keys else np.zeros((0, 0), dtype=np.float32)
         cv = (encode_passages(embedder, [normalize(e.judge_text) for e in chunks]) if chunks
               else np.zeros((0, 0), dtype=np.float32))
         dims = max(fv.shape[1] if fv.ndim == 2 else 0, cv.shape[1] if cv.ndim == 2 else 0)
-        return cls(kb_version(document), kb.settings, faq, chunks, _matrix(fv, len(faq), dims),
+        return cls(kb_version(document), kb.settings, faq, chunks, _matrix(fv, len(keys), dims),
                    _matrix(cv, len(chunks), dims), embedder.model_id, embedder.prompt)
 
     # ------------------------------------------------------------ files
@@ -361,6 +390,7 @@ class KnowledgeIndex:
         half a file (a crash leaves the old file or the new one)."""
         directory.mkdir(parents=True, exist_ok=True)
         meta = {"version": self.version, "model_id": self.model_id, "prompt": self.prompt, "chunker": CHUNKER,
+                "format": INDEX_FORMAT,
                 "settings": self.settings.model_dump(), "faq": [asdict(e) for e in self.faq],
                 "chunks": [asdict(e) for e in self.chunks]}
         vectors = io.BytesIO()
@@ -382,15 +412,15 @@ class KnowledgeIndex:
             meta = json.loads((directory / "index.json").read_text(encoding="utf-8"))
             with np.load(directory / "vectors.npz") as data:
                 fv, cv = np.asarray(data["faq"], dtype=np.float32), np.asarray(data["chunks"], dtype=np.float32)
-            faq = [Entry(**e) for e in meta["faq"]]
-            chunks = [Entry(**e) for e in meta["chunks"]]
+            faq = [Entry(**{**e, "similar": tuple(e.get("similar", ()))}) for e in meta["faq"]]
+            chunks = [Entry(**{**e, "similar": tuple(e.get("similar", ()))}) for e in meta["chunks"]]
             settings = KbSettings.model_validate(meta["settings"])
         except FileNotFoundError:
             raise
         except Exception as exc:  # damaged files (a truncated zip, bad JSON ...): build it again
             raise ValueError(f"unreadable knowledge-base index in {directory}: {exc}") from exc
-        if meta.get("chunker") != CHUNKER:
-            raise ValueError(f"the index in {directory} was made by another chunker")
+        if meta.get("chunker") != CHUNKER or meta.get("format", 1) != INDEX_FORMAT:
+            raise ValueError(f"the index in {directory} was made by another chunker or index format")
         if meta.get("version") != version:
             raise ValueError(f"the index in {directory} is for {meta.get('version')}, not {version}")
         if meta.get("model_id") != embedder.model_id or meta.get("prompt") != embedder.prompt:
@@ -405,7 +435,28 @@ class KnowledgeIndex:
             return None
         cos = self.faq_vectors @ vector
         i = int(np.argmax(cos))
-        return self.faq[i], float(cos[i])
+        return self.faq[self._faq_rows[i][0]], float(cos[i])
+
+    def faq_scores(self, vector: FloatArray) -> dict[str, float]:
+        """FAQ id -> the cosine of its nearest key (question or similar question) to the sentence."""
+        best: dict[str, float] = {}
+        if self.faq:
+            for (entry, _), c in zip(self._faq_rows, (self.faq_vectors @ vector).tolist(), strict=True):
+                eid = self.faq[entry].id
+                best[eid] = max(best.get(eid, -1.0), float(c))
+        return best
+
+    def _faq_candidates(self, vector: FloatArray) -> list[Candidate]:
+        """The JUDGE_DEPTH FAQ entries nearest the sentence, each by its nearest key."""
+        cos = self.faq_vectors @ vector
+        best: dict[int, tuple[float, str]] = {}
+        for row in np.argsort(-cos, kind="stable"):
+            entry, key = self._faq_rows[int(row)]
+            if entry not in best:
+                best[entry] = (float(cos[int(row)]), key)
+                if len(best) == JUDGE_DEPTH:
+                    break
+        return [Candidate(self.faq[i], c, key) for i, (c, key) in best.items()]
 
     def exact(self, text: str) -> KbResult | None:
         """The entry whose title is this sentence (what a suggestion button sends), if any."""
@@ -420,12 +471,11 @@ class KnowledgeIndex:
         exact = self.exact(text)
         if exact is not None:
             return exact
-        candidates: list[Candidate] = []
-        for pool, vectors in ((self.faq, self.faq_vectors), (self.chunks, self.chunk_vectors)):
-            if pool:
-                cos = vectors @ vector
-                for i in np.argsort(-cos, kind="stable")[:JUDGE_DEPTH]:
-                    candidates.append(Candidate(pool[int(i)], float(cos[int(i)])))
+        candidates: list[Candidate] = self._faq_candidates(vector) if self.faq else []
+        if self.chunks:
+            cos = self.chunk_vectors @ vector
+            for i in np.argsort(-cos, kind="stable")[:JUDGE_DEPTH]:
+                candidates.append(Candidate(self.chunks[int(i)], float(cos[int(i)])))
         if not candidates:
             return KbResult((), ())
         scores = np.asarray(judge.score(normalize(text), candidates), dtype=np.float64)

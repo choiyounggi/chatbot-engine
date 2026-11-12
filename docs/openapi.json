@@ -310,6 +310,77 @@
         "title": "AnalyticsTotalsOut",
         "type": "object"
       },
+      "AugmentIn": {
+        "properties": {
+          "count": {
+            "default": 20,
+            "maximum": 40.0,
+            "minimum": 1.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "id": {
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "intent",
+              "faq"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "title": "AugmentIn",
+        "type": "object"
+      },
+      "AugmentOut": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ProposalOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "ms": {
+            "title": "Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bot",
+          "kind",
+          "id",
+          "model",
+          "ms",
+          "items"
+        ],
+        "title": "AugmentOut",
+        "type": "object"
+      },
       "BasicCard": {
         "additionalProperties": false,
         "properties": {
@@ -1177,6 +1248,14 @@
             "minLength": 1,
             "title": "Question",
             "type": "string"
+          },
+          "similar": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Similar",
+            "type": "array"
           }
         },
         "required": [
@@ -2325,6 +2404,46 @@
           "entities"
         ],
         "title": "ParseOut",
+        "type": "object"
+      },
+      "ProposalOut": {
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "duplicate",
+              "invalid",
+              "conflict"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "typo",
+              "casual",
+              "paraphrase",
+              "synonym"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "type",
+          "status",
+          "detail"
+        ],
+        "title": "ProposalOut",
         "type": "object"
       },
       "QuickReply": {
@@ -4156,6 +4275,73 @@
           }
         },
         "summary": "Analytics Report"
+      }
+    },
+    "/v1/builder/bots/{bot}/augment": {
+      "post": {
+        "description": "Sentences the LLM proposes for a block's examples or an FAQ's similar questions, screened by\nthe engine (duplicate / invalid / conflict / ok). Nothing is saved: the builder adds what a\nperson keeps (docs/engine-core-plan.md \"빌더 단계 E-H\").",
+        "operationId": "augment_proposals_v1_builder_bots__bot__augment_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Bot",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AugmentIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AugmentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Augment Proposals"
       }
     },
     "/v1/builder/bots/{bot}/deploy": {
