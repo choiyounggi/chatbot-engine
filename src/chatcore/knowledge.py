@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -47,6 +47,12 @@ ID = r"^[A-Za-z0-9_-]{1,64}$"
 MAX_PDF_PAGES = 500
 CHUNKER = 3  # stored with an index: a different chunker means the index is stale (built again)
 FloatArray = NDArray[np.float32]
+# a rejected generation answers nothing (docs/benchmarks/rag.md: fewer answers to unanswerable questions)
+ON_REJECT: Literal["extract", "fallback"] = "fallback"
+LLM_FAILURES = ("timeout", "error")  # generation outcomes where the LLM did not answer (chatcore.generation)
+
+if TYPE_CHECKING:  # chatcore.generation imports this module
+    from chatcore.generation import Generator
 
 
 class KnowledgeError(ValueError):
@@ -83,6 +89,7 @@ class KbDocument(_Model):
 class KbSettings(_Model):
     mode: Literal["instant", "suggest"] = "instant"  # 즉문즉답형 / 답안 추천형
     suggest_text: str = Field("이런 답을 찾았어요. 골라 주세요.", min_length=1, max_length=200)
+    generate: bool = False  # 즉문즉답형 answers written by the server's LLM from the passing passages (E-F)
 
 
 class KnowledgeBase(_Model):
@@ -305,10 +312,14 @@ class KbResult:
     answers: tuple[Hit, ...]  # passing candidates, best first ([] = no answer)
     candidates: tuple[Hit, ...]  # every judged candidate, best first
     exact: bool = False  # the sentence was an entry's title
+    generated: dict[str, Any] | None = None  # the LLM's attempt (Generated.to_log), when one was made
 
     def to_log(self) -> dict[str, Any]:
-        return {"answered": [h.entry.id for h in self.answers], "exact": self.exact,
-                "candidates": [[h.entry.id, round(h.cosine, 4), round(h.score, 4)] for h in self.candidates]}
+        log = {"answered": [h.entry.id for h in self.answers], "exact": self.exact,
+               "candidates": [[h.entry.id, round(h.cosine, 4), round(h.score, 4)] for h in self.candidates]}
+        if self.generated is not None:
+            log["generated"] = self.generated
+        return log
 
 
 def _matrix(rows: FloatArray, n: int, dims: int) -> FloatArray:
@@ -457,6 +468,13 @@ def _section(entry: Entry) -> str:
     return entry.section or entry.heading or entry.title  # no section: the document's title
 
 
+def answers_nothing(outcome: str, on_reject: str) -> bool:
+    """Whether a generation that was not kept leaves the turn without a knowledge-base answer: only when
+    the check rejected what the model said, under "fallback". When the LLM did not answer at all
+    (timeout, error) the passage is shown, as if generation were off."""
+    return on_reject == "fallback" and outcome not in LLM_FAILURES
+
+
 def compose(result: KbResult, settings: KbSettings) -> KbAnswer | None:
     """The message for a search result; None when nothing passed. 답안 추천형 offers one button per FAQ
     entry or document section (its best chunk), up to SUGGESTIONS, with labels that differ."""
@@ -485,11 +503,33 @@ def compose(result: KbResult, settings: KbSettings) -> KbAnswer | None:
 
 @dataclass(frozen=True)
 class Knowledge:
-    """A bot's knowledge base as served: its index, the judge, and the NLU's embedder."""
+    """A bot's knowledge base as served: its index, the judge, the NLU's embedder and, when the server
+    has an LLM, the generator (used only when the knowledge base's settings ask for it)."""
 
     index: KnowledgeIndex
     judge: Judge
     embedder: Embedder
+    generator: Generator | None = None
+    on_reject: Literal["extract", "fallback"] = ON_REJECT
+
+    def answer(self, text: str, result: KbResult) -> tuple[KbResult, KbAnswer | None]:
+        """The message for a search result: compose() as before, or — 즉문즉답형 with generation on — the
+        LLM's answer from the passing passages (judge first, so it never answers what the judge refused).
+        A rejected generation shows the extractive answer or nothing (`on_reject`); a failed one (the LLM
+        did not answer) shows the extractive answer."""
+        answer = compose(result, self.index.settings)
+        settings = self.index.settings
+        if (answer is None or self.generator is None or not settings.generate or settings.mode != "instant"
+                or result.exact):  # a chosen button shows exactly what it offered
+            return result, answer
+        made = self.generator.generate(text, [h.entry for h in result.answers])
+        result = replace(result, generated=made.to_log(self.generator.model))
+        if made.text is None:
+            return result, (None if answers_nothing(made.outcome, self.on_reject) else answer)
+        used = [h.entry for h in result.answers if h.entry.id in made.used]
+        sources = list(dict.fromkeys(e.source for e in used if e.kind == "doc"))
+        body = made.text + (f"\n\n출처: {', '.join(sources)}" if sources else "")
+        return result, KbAnswer(body, (), made.used)
 
     def _vector(self, text: str, vector: FloatArray | None) -> FloatArray:
         return vector if vector is not None else self.embedder.encode([normalize(text)])[0]
@@ -518,9 +558,8 @@ class Knowledge:
             top = result.answers[0] if result.answers else None
             if top is None or top.entry.kind != "faq" or top.cosine < similarity + OVERRIDE_MARGIN:
                 return result, None
-            return result, compose(KbResult((top,), result.candidates, result.exact), self.index.settings)
-        result = self.index.search(text, self._vector(text, vector), self.judge)
-        return result, compose(result, self.index.settings)
+            return self.answer(text, KbResult((top,), result.candidates, result.exact))
+        return self.answer(text, self.index.search(text, self._vector(text, vector), self.judge))
 
     def action(self) -> ActionFn:
         """The `knowledge` action: search with `query` (default: the user's sentence) and return
@@ -531,10 +570,12 @@ class Knowledge:
             query = " ".join(str(args.get("query") or (turn.utterance if turn else "")).split())
             if not query or self.index.empty:
                 return dict(NOT_FOUND)
-            result = self.index.search(query, self._vector(query, None), self.judge)
-            if not result.answers:
+            result, answer = self.answer(query, self.index.search(query, self._vector(query, None), self.judge))
+            if not result.answers or answer is None:
                 return dict(NOT_FOUND)
             e = result.answers[0].entry
-            return {"found": "yes", "answer": answer_text(e), "source": e.source, "title": e.title}
+            # 답안 추천형 has no single answer text: the action gives the best entry's own text
+            text = answer.text if not answer.replies else answer_text(e)
+            return {"found": "yes", "answer": text, "source": e.source, "title": e.title}
 
         return run

@@ -39,6 +39,7 @@ from chatcore.bot.repository import RevisionConflict, VersionNotFound
 from chatcore.bot.schema import BasicCard, BotDocument, Carousel, ListCard, SimpleImage
 from chatcore.dialogue.state import fold
 from chatcore.dialogue.turn import MAX_INPUT_CHARS, TurnResult, UnknownBlock
+from chatcore.generation import GENERATION_DEPTH, LLM_TIMEOUT, GenerationError, Generator, LlmClient, LlmConfig
 from chatcore.host import (
     AlreadyDeleting,
     BadExample,
@@ -321,6 +322,22 @@ class KbSearchOut(BaseModel):
     exact: bool  # the query was an entry's title
     answer: KbAnswerOut | None  # what a conversation would say (None: nothing passed)
     candidates: list[KbHitOut]  # best first
+    generated: KbGeneratedOut | None = None  # the LLM's attempt, when the settings ask for generated answers
+
+
+class KbGeneratedOut(BaseModel):
+    model: str
+    ms: int
+    used: list[str]  # entry ids given to the model
+    outcome: Literal["generated", "no_answer", "unsupported_number", "too_long", "empty", "timeout", "error"]
+
+
+class LlmOut(BaseModel):
+    configured: bool  # the server was started with --llm-url
+    model: str | None = None
+    ok: bool | None = None  # a short test answer came back
+    ms: int | None = None
+    error: str | None = None
 
 
 class ExtractOut(BaseModel):
@@ -1113,8 +1130,24 @@ def _builder_routes(app: FastAPI, host: BotHost, admin: Any, jobs: JobRunner) ->
                 "answer": None if answer is None else {
                     "text": answer.text, "items": list(answer.items),
                     "replies": [{"label": label, "message": message} for label, message in answer.replies]},
+                "generated": result.generated,
                 "candidates": [{"id": h.entry.id, "kind": h.entry.kind, "title": h.entry.title, "cosine": h.cosine,
                                 "score": h.score, "passed": h.entry.id in passed} for h in result.candidates]}
+
+    @app.get("/v1/builder/llm", dependencies=deps, response_model=LlmOut)
+    def llm_status() -> Any:
+        """Whether this server has an LLM for generated knowledge-base answers, and whether it answers now
+        (one very short generation)."""
+        generator = getattr(host, "generator", None)
+        if generator is None:
+            return {"configured": False}
+        start = time.monotonic()
+        try:
+            generator.client.chat([{"role": "user", "content": "'네'라고만 답하세요."}], max_tokens=8)
+        except GenerationError as exc:
+            return {"configured": True, "model": generator.model, "ok": False, "error": exc.detail}
+        ms = round((time.monotonic() - start) * 1000)
+        return {"configured": True, "model": generator.model, "ok": True, "ms": ms}
 
     @app.get("/v1/builder/bots/{bot}/analytics", dependencies=deps, response_model=AnalyticsOut)
     def analytics_report(bot: str = BOT_ID, from_date: str | None = Query(None, alias="from"),
@@ -1192,6 +1225,35 @@ def deploy_errors(what: str) -> Iterator[None]:
         raise unusable_kb(exc) from exc
 
 
+def llm_generator(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Generator | None:
+    """The generator the --llm-* options describe, or None without --llm-url."""
+    import math
+    import os
+    import urllib.parse
+
+    if args.llm_url is None:
+        return None
+    try:
+        url = urllib.parse.urlsplit(args.llm_url)
+        if url.port is not None and not 0 < url.port:  # url.port: ValueError when not a number
+            raise ValueError("port 0")
+    except ValueError:
+        url = urllib.parse.urlsplit("")
+    if url.scheme not in ("http", "https") or not url.hostname:
+        parser.error("--llm-url must be an http(s) URL")
+    if url.username or url.password:
+        parser.error("--llm-url must not hold a user or password (use --llm-api-key-env)")
+    if not args.llm_model:
+        parser.error("--llm-model is required with --llm-url")
+    if not (math.isfinite(args.llm_timeout) and 0 < args.llm_timeout <= 60):
+        parser.error("--llm-timeout must be more than 0 and at most 60 seconds")
+    key = os.environ.get(args.llm_api_key_env) if args.llm_api_key_env else None
+    if args.llm_api_key_env and not key:
+        parser.error(f"environment variable {args.llm_api_key_env} is not set")
+    log.info("generated knowledge-base answers: %s at %s", args.llm_model, args.llm_url)
+    return Generator(LlmClient(LlmConfig(args.llm_url, args.llm_model, args.llm_timeout, key)), depth=GENERATION_DEPTH)
+
+
 def unusable_kb(exc: KnowledgeError) -> HTTPException:
     return HTTPException(409, {"detail": "the knowledge base cannot be used here", "errors": exc.problems})
 
@@ -1225,6 +1287,15 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
                              "downloads it once) or the cosine (default with --embedder hashing)")
     parser.add_argument("--kb-threshold", type=float, default=None,
                         help="the judge's bar (default: 0.11 cross-encoder, 0.5 cosine; docs/benchmarks/kb.md)")
+    parser.add_argument("--llm-url", default=None,
+                        help="an OpenAI-compatible server (POST <url>/v1/chat/completions) for knowledge bases whose "
+                             "settings ask for generated answers; without it they answer with the passage itself")
+    parser.add_argument("--llm-model", default=None, help="the model name to send (required with --llm-url)")
+    parser.add_argument("--llm-timeout", type=float, default=LLM_TIMEOUT,
+                        help="seconds for one generated answer in all; slower ones show the passage instead "
+                             "(the server must answer without a thinking block)")
+    parser.add_argument("--llm-api-key-env", default=None,
+                        help="the NAME of an environment variable holding the server's API key (never the key itself)")
     parser.add_argument("--keep-warm-ms", type=float, default=None,
                         help="when idle, run the model this often so the first request after a pause stays fast "
                              "(keeps the GPU busy; see docs/benchmarks/api_latency.md)")
@@ -1249,7 +1320,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
 
     judge = embedder.judge() or CosineJudge(args.kb_threshold if args.kb_threshold is not None else COSINE_THRESHOLD)
     host = BotHost(default_repository(), default_store(), embedder, args.artifacts, bulk_embedder=embedder.bulk(),
-                   min_f1=args.min_f1, skill_allow_private=args.skill_allow_private, judge=judge)
+                   min_f1=args.min_f1, skill_allow_private=args.skill_allow_private, judge=judge,
+                   generator=llm_generator(parser, args))
     if args.skill_allow_private:
         log.warning("--skill-allow-private: HTTP skills may call internal addresses; never use this on a shared server")
     host.start()

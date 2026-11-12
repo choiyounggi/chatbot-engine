@@ -7,7 +7,7 @@ intents with example sentences, entities with synonyms, scenarios, response temp
 engine understands Korean input with a frozen sentence-embedding model plus a small classifier,
 then follows the scenario deterministically. A builder UI for editing that data comes later.
 
-> Status: builder step E-E — HTTP API (`make serve`), terminal chat (`make chat`) and a builder API (`/v1/builder/...`: drafts with ETag, background training jobs with SSE progress, test builds with a test chat, deploy with notes and version numbers, roll back, an edit history, a training queue of what users said grouped by sentence with "add as an example" / ignore, HTTP skills (actions a bot defines by URL, with write-only secrets, internal addresses blocked, a test run and an error log), a knowledge base (FAQ, documents and PDFs answered when no block fits, or offered as suggestions; a cross-encoder decides whether to answer; versioned apart from the bot and deployed with it), analytics (users, sessions, block calls, knowledge-base answer rate, retention, by Korean day), creating bots (empty or a copy) and deleting them after a 7-day wait, and ML settings: a 5-step similarity level that sets thresholds per bot, exact-only intents, confusable-intent warnings, optional keyword match). Bots can have Kakao-style welcome / escape blocks, a session timeout, optional and validated slots, quick replies and buttons that start a block directly, image / card / list / carousel responses, and 16 system entities (dates, times, numbers, periods, ordinals, ages, percents, URLs, units, free text) over the scenario engine with Korean NLU. Set `CHATCORE_ADMIN_TOKEN` to protect the builder API. The builder UI lives in [chatbot-builder](https://github.com/choiyounggi/chatbot-builder).
+> Status: builder step E-F — HTTP API (`make serve`), terminal chat (`make chat`) and a builder API (`/v1/builder/...`: drafts with ETag, background training jobs with SSE progress, test builds with a test chat, deploy with notes and version numbers, roll back, an edit history, a training queue of what users said grouped by sentence with "add as an example" / ignore, HTTP skills (actions a bot defines by URL, with write-only secrets, internal addresses blocked, a test run and an error log), a knowledge base (FAQ, documents and PDFs answered when no block fits, or offered as suggestions; a cross-encoder decides whether to answer; versioned apart from the bot and deployed with it; optionally a short answer written by an LLM you run, from the passage that passed, kept only when every number in it is in the passage), analytics (users, sessions, block calls, knowledge-base answer rate, retention, by Korean day), creating bots (empty or a copy) and deleting them after a 7-day wait, and ML settings: a 5-step similarity level that sets thresholds per bot, exact-only intents, confusable-intent warnings, optional keyword match). Bots can have Kakao-style welcome / escape blocks, a session timeout, optional and validated slots, quick replies and buttons that start a block directly, image / card / list / carousel responses, and 16 system entities (dates, times, numbers, periods, ordinals, ages, percents, URLs, units, free text) over the scenario engine with Korean NLU. Set `CHATCORE_ADMIN_TOKEN` to protect the builder API. The builder UI lives in [chatbot-builder](https://github.com/choiyounggi/chatbot-builder).
 > Design and roadmap: [docs/engine-core-plan.md](docs/engine-core-plan.md).
 
 ## Quick start
@@ -29,6 +29,19 @@ make openapi # write docs/openapi.json — the builder generates its API types f
 # a fast test server without the model (CI, end-to-end tests; NOT for real users):
 uv run python -m chatcore.api --bot bots/sample --embedder hashing --min-f1 0 --artifacts .e2e-artifacts
 ```
+
+Generated knowledge-base answers (a bot turns them on in its knowledge-base settings) need an
+OpenAI-compatible server (`POST <url>/v1/chat/completions`) that answers without a thinking block:
+
+```sh
+uv tool install mlx-lm   # Apple Silicon; llama.cpp, Ollama, vLLM, LM Studio work the same way
+mlx_lm.server --model mlx-community/Qwen3-8B-4bit --port 8800 --chat-template-args '{"enable_thinking": false}'
+uv run python -m chatcore.api --bot bots/sample --llm-url http://127.0.0.1:8800 --llm-model mlx-community/Qwen3-8B-4bit
+# --llm-timeout 3.5 (seconds for the whole call, up to 60; slower answers show the passage; redirects are not followed)
+# --llm-api-key-env NAME (the key is read from that environment variable, sent as a Bearer token)
+```
+
+Measured choice of model, passages and handling: [docs/benchmarks/rag.md](docs/benchmarks/rag.md).
 
 ## Layout
 

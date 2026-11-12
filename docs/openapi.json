@@ -1462,6 +1462,46 @@
         "title": "KbEntryOut",
         "type": "object"
       },
+      "KbGeneratedOut": {
+        "properties": {
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "ms": {
+            "title": "Ms",
+            "type": "integer"
+          },
+          "outcome": {
+            "enum": [
+              "generated",
+              "no_answer",
+              "unsupported_number",
+              "too_long",
+              "empty",
+              "timeout",
+              "error"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "used": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Used",
+            "type": "array"
+          }
+        },
+        "required": [
+          "model",
+          "ms",
+          "used",
+          "outcome"
+        ],
+        "title": "KbGeneratedOut",
+        "type": "object"
+      },
       "KbHitOut": {
         "properties": {
           "cosine": {
@@ -1619,6 +1659,16 @@
             "title": "Exact",
             "type": "boolean"
           },
+          "generated": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/KbGeneratedOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "judge": {
             "title": "Judge",
             "type": "string"
@@ -1647,6 +1697,11 @@
       "KbSettings": {
         "additionalProperties": false,
         "properties": {
+          "generate": {
+            "default": false,
+            "title": "Generate",
+            "type": "boolean"
+          },
           "mode": {
             "default": "instant",
             "enum": [
@@ -1896,6 +1951,63 @@
           "live"
         ],
         "title": "LiveOut",
+        "type": "object"
+      },
+      "LlmOut": {
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ms"
+          },
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          }
+        },
+        "required": [
+          "configured"
+        ],
+        "title": "LlmOut",
         "type": "object"
       },
       "MarkOut": {
@@ -6027,6 +6139,53 @@
           }
         },
         "summary": "Job Events"
+      }
+    },
+    "/v1/builder/llm": {
+      "get": {
+        "description": "Whether this server has an LLM for generated knowledge-base answers, and whether it answers now\n(one very short generation).",
+        "operationId": "llm_status_v1_builder_llm_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Llm Status"
       }
     }
   }
