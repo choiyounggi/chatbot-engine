@@ -66,7 +66,8 @@ def test_parse_takes_the_first_json_value_and_never_ships_fragments_of_broken_js
     # a trailing comma breaks the object; the sentences inside still read, never the fragment `casual": [...`
     assert parse_items('{"casual": ["a b", "c d"],}') == [("a b", "paraphrase"), ("c d", "paraphrase")]
     assert parse_items('{"casual": ["a b",') == []  # cut off: nothing whole to read, asked again
-    assert parse_items("[" * 5000 + "]" * 5000) == []  # too deep to read
+    assert parse_items('{"items": ' + "[" * 100_000 + "]" * 100_000 + "}") == []  # too deep to read
+    assert parse_items('{"casual": [\n  "a b",\n  "c d"') == []  # cut off mid-list: no `a b",` lines
     assert parse_items('설명 [1, 2] 다음\n{"casual": ["진짜"]}') == [("진짜", "casual")]
 
 
@@ -268,7 +269,7 @@ def test_augment_refuses_without_an_llm_an_unknown_target_bad_input_and_a_failed
 def test_a_draft_with_an_odd_shape_is_404_not_500(make_host) -> None:
     host = make_host(FakeLlm(reply({"typo": ["x"]})))
     doc = host.repository.get_draft("sample")
-    host.repository.save_draft("sample", {**doc, "intents": []})
+    host.repository.save_draft("sample", {**doc, "intents": ["weather"]})
     assert TestClient(create_app(host)).post(f"{B}/augment", json={"kind": "intent", "id": "weather"}).status_code == 404
 
 
