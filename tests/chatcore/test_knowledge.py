@@ -561,7 +561,7 @@ def test_every_judge_view_has_a_measured_threshold() -> None:
 
     from chatcore.knowledge import JUDGE_THRESHOLDS, JUDGE_VIEWS, JudgeViews
 
-    assert set(JUDGE_THRESHOLDS) == set(get_args(JudgeViews)) and JUDGE_VIEWS == "whole"
+    assert set(JUDGE_THRESHOLDS) == set(get_args(JudgeViews)) and JUDGE_VIEWS == "mean"
     assert JUDGE_THRESHOLDS == {"whole": 0.11, "geo": 0.2, "mean": 0.41}  # docs/benchmarks/judge.md
 
 
@@ -573,3 +573,19 @@ def test_score_candidates_refuses_a_scorer_that_loses_texts() -> None:
         score_candidates(lambda texts: np.array([0.1]), "q", [faq], "mean")  # the parts call
     negative = score_candidates(lambda texts: np.array([-0.2] if len(texts) == 1 else [0.5, 0.1]), "q", [faq], "geo")
     assert negative.tolist() == [0.0]
+
+
+def test_the_cross_encoder_judge_takes_the_threshold_measured_for_its_views(monkeypatch) -> None:
+    import sys
+    import types
+
+    from chatcore.knowledge import JUDGE_THRESHOLDS, CrossEncoderJudge
+
+    fake = types.ModuleType("sentence_transformers")
+    fake.CrossEncoder = lambda *args, **kwargs: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+    default = CrossEncoderJudge()
+    assert (default.views, default.threshold) == ("mean", JUDGE_THRESHOLDS["mean"])
+    assert CrossEncoderJudge(None, "whole").threshold == 0.11 and CrossEncoderJudge(0.3, "geo").threshold == 0.3
+    with pytest.raises(KeyError):
+        CrossEncoderJudge(None, "both")  # type: ignore[arg-type]

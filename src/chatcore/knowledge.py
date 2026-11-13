@@ -43,8 +43,8 @@ OVERRIDE_MARGIN = 0.05  # an FAQ beats a sure block only by this much over its n
 CROSS_ENCODER_THRESHOLD = 0.11  # chosen on the dev half (docs/benchmarks/kb.md)
 JudgeViews = Literal["whole", "geo", "mean"]
 PART_SENTENCES = 8  # a chunk's first sentences read in parts (15 parts at most; the measured chunks have <= 8)
-JUDGE_VIEWS: JudgeViews = "whole"  # (docs/engine-core-plan.md "빌더 단계 E-J", docs/benchmarks/judge.md)
-# per views, chosen on the dev half; "mean" answers 0.138 more questions right but its p95 is 343 ms (bar 200)
+JUDGE_VIEWS: JudgeViews = "mean"  # 영기 2026-11-13: p95 343 ms for +0.138 answered right (docs/benchmarks/judge.md)
+# per views, chosen on the dev half (docs/benchmarks/judge.md)
 JUDGE_THRESHOLDS: dict[str, float] = {"whole": CROSS_ENCODER_THRESHOLD, "geo": 0.2, "mean": 0.41}
 COSINE_THRESHOLD = 0.5  # hashing mode only (surface overlap; never used to serve real users)
 MAX_FAQ, MAX_DOCUMENTS, MAX_DOCUMENT_CHARS = 2000, 200, 200_000
@@ -353,12 +353,13 @@ class CrossEncoderJudge:  # pragma: no cover - needs the real model; measured by
     name = "cross-encoder"
     model_id = "dragonkue/bge-reranker-v2-m3-ko"
 
-    def __init__(self, threshold: float = CROSS_ENCODER_THRESHOLD, views: JudgeViews = JUDGE_VIEWS) -> None:
+    def __init__(self, threshold: float | None = None, views: JudgeViews = JUDGE_VIEWS) -> None:
+        """`threshold`: default the one measured for `views` (JUDGE_THRESHOLDS)."""
         import torch
         from sentence_transformers import CrossEncoder
 
         mps = torch.backends.mps.is_available()
-        self.threshold, self.views = threshold, views
+        self.threshold, self.views = JUDGE_THRESHOLDS[views] if threshold is None else threshold, views
         self._model = CrossEncoder(self.model_id, device="mps" if mps else "cpu", max_length=256,
                                    model_kwargs={"torch_dtype": torch.float16 if mps else torch.float32})
 
