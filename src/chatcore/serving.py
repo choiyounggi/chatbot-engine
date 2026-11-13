@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from chatcore.knowledge import Candidate, CrossEncoderJudge, Judge
+from chatcore.knowledge import Candidate, CrossEncoderJudge, Judge, JudgeViews, score_candidates
 from chatcore.nlu.model import Embedder, encode_passages
 
 log = logging.getLogger(__name__)
@@ -221,7 +221,9 @@ class BatchedEmbedder:
 
     def judge(self) -> Judge | None:
         """The cross-encoder judge running on this worker thread, or None without one."""
-        return _BatchedJudge(self, self.cross_encoder.threshold) if self.cross_encoder is not None else None
+        if self.cross_encoder is None:
+            return None
+        return _BatchedJudge(self, self.cross_encoder.threshold, self.cross_encoder.views)
 
     def bulk(self) -> Embedder:
         """The same model in the low-priority lane: for training, so chat stays fast meanwhile."""
@@ -249,11 +251,11 @@ class _BulkLane:
 class _BatchedJudge:
     name = CrossEncoderJudge.name
 
-    def __init__(self, owner: BatchedEmbedder, threshold: float) -> None:
-        self._owner, self.threshold = owner, threshold
+    def __init__(self, owner: BatchedEmbedder, threshold: float, views: JudgeViews = "whole") -> None:
+        self._owner, self.threshold, self._views = owner, threshold, views
 
     def score(self, query: str, candidates: Sequence[Candidate]) -> NDArray[np.float64]:
-        if not candidates:
-            return np.zeros(0)
-        return np.asarray(self._owner._batcher([Pair(query, c.judge_input) for c in candidates]),
-                          dtype=np.float64).ravel()
+        def pairs(texts: list[tuple[str, str]]) -> NDArray[np.float64]:
+            return np.asarray(self._owner._batcher([Pair(q, t) for q, t in texts]), dtype=np.float64).ravel()
+
+        return score_candidates(pairs, query, candidates, self._views)

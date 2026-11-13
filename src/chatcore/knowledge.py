@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -41,6 +41,11 @@ JUDGE_DEPTH = 3  # per pool
 SUGGESTIONS = 3  # 답안 추천형: at most this many buttons
 OVERRIDE_MARGIN = 0.05  # an FAQ beats a sure block only by this much over its nearest example
 CROSS_ENCODER_THRESHOLD = 0.11  # chosen on the dev half (docs/benchmarks/kb.md)
+JudgeViews = Literal["whole", "geo", "mean"]
+PART_SENTENCES = 8  # a chunk's first sentences read in parts (15 parts at most; the measured chunks have <= 8)
+JUDGE_VIEWS: JudgeViews = "whole"  # (docs/engine-core-plan.md "빌더 단계 E-J", docs/benchmarks/judge.md)
+# per views, chosen on the dev half; "mean" answers 0.138 more questions right but its p95 is 343 ms (bar 200)
+JUDGE_THRESHOLDS: dict[str, float] = {"whole": CROSS_ENCODER_THRESHOLD, "geo": 0.2, "mean": 0.41}
 COSINE_THRESHOLD = 0.5  # hashing mode only (surface overlap; never used to serve real users)
 MAX_FAQ, MAX_DOCUMENTS, MAX_DOCUMENT_CHARS = 2000, 200, 200_000
 ID = r"^[A-Za-z0-9_-]{1,64}$"
@@ -276,6 +281,49 @@ class Candidate:
     def judge_input(self) -> str:
         return f"{self.key}\n{self.entry.body}" if self.key else self.entry.judge_text
 
+    @property
+    def parts(self) -> tuple[str, ...]:
+        """Smaller pieces the judge also reads (E-J): an FAQ's question (the one that matched) and its
+        answer apart; a chunk's sentences and each two neighbouring ones, under its heading. A chunk of
+        one sentence has none (its whole is that sentence)."""
+        e = self.entry
+        if e.kind == "faq":
+            return (self.key or e.title, e.body)
+        s = sentences(e.body)[:PART_SENTENCES]  # a list of short lines must not make a turn slow for everyone
+        if len(s) < 2:
+            return ()
+        head = e.heading or e.title
+        return tuple(f"{head}\n{w}" for w in [*s, *(f"{a} {b}" for a, b in zip(s, s[1:], strict=False))])
+
+
+def score_candidates(score_pairs: Callable[[list[tuple[str, str]]], NDArray[np.float64]], query: str,
+                     candidates: Sequence[Candidate], views: JudgeViews) -> NDArray[np.float64]:
+    """One score per candidate from a (query, text) scorer: each candidate read whole ("whole"); or, in
+    a second call, the best of them also read in parts, its score becoming the geometric ("geo") or
+    arithmetic ("mean") mean of its whole and its best part (E-J: as accurate on the dev half as reading
+    every candidate's parts, at a fraction of the time)."""
+    if not candidates:
+        return np.zeros(0)
+    whole = _scores(score_pairs, [(query, c.judge_input) for c in candidates])
+    if views == "whole":
+        return whole
+    best = int(np.argmax(whole))
+    parts = candidates[best].parts
+    if not parts:
+        return whole
+    part = float(_scores(score_pairs, [(query, t) for t in parts]).max())
+    out = whole.copy()
+    out[best] = (np.sqrt(max(whole[best], 0.0) * max(part, 0.0)) if views == "geo" else (whole[best] + part) / 2)
+    return out
+
+
+def _scores(score_pairs: Callable[[list[tuple[str, str]]], NDArray[np.float64]],
+            pairs: list[tuple[str, str]]) -> NDArray[np.float64]:
+    raw = np.asarray(score_pairs(pairs), dtype=np.float64).ravel()
+    if len(raw) != len(pairs):
+        raise ValueError(f"the judge returned {len(raw)} scores for {len(pairs)} texts")
+    return raw
+
 
 class Judge(Protocol):
     name: str
@@ -305,12 +353,12 @@ class CrossEncoderJudge:  # pragma: no cover - needs the real model; measured by
     name = "cross-encoder"
     model_id = "dragonkue/bge-reranker-v2-m3-ko"
 
-    def __init__(self, threshold: float = CROSS_ENCODER_THRESHOLD) -> None:
+    def __init__(self, threshold: float = CROSS_ENCODER_THRESHOLD, views: JudgeViews = JUDGE_VIEWS) -> None:
         import torch
         from sentence_transformers import CrossEncoder
 
         mps = torch.backends.mps.is_available()
-        self.threshold = threshold
+        self.threshold, self.views = threshold, views
         self._model = CrossEncoder(self.model_id, device="mps" if mps else "cpu", max_length=256,
                                    model_kwargs={"torch_dtype": torch.float16 if mps else torch.float32})
 
@@ -320,7 +368,7 @@ class CrossEncoderJudge:  # pragma: no cover - needs the real model; measured by
         return np.asarray(self._model.predict(list(pairs), batch_size=32), dtype=np.float64)
 
     def score(self, query: str, candidates: Sequence[Candidate]) -> NDArray[np.float64]:
-        return self.score_pairs([(query, c.judge_input) for c in candidates])
+        return score_candidates(self.score_pairs, query, candidates, self.views)
 
 
 # ---------------------------------------------------------------- index

@@ -1474,8 +1474,13 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
     parser.add_argument("--kb-judge", choices=("cross-encoder", "cosine"), default=None,
                         help="what decides whether a knowledge-base entry answers: the cross-encoder (default; "
                              "downloads it once) or the cosine (default with --embedder hashing)")
+    parser.add_argument("--kb-judge-views", choices=("whole", "geo", "mean"), default=None,
+                        help="what the cross-encoder reads: each candidate whole, or whole and its best sentence "
+                             "(FAQ: question, answer) combined by geometric or arithmetic mean "
+                             "(docs/benchmarks/judge.md)")
     parser.add_argument("--kb-threshold", type=float, default=None,
-                        help="the judge's bar (default: 0.11 cross-encoder, 0.5 cosine; docs/benchmarks/kb.md)")
+                        help="the judge's bar (default: chatcore.knowledge.JUDGE_THRESHOLDS for the cross-encoder's "
+                             "--kb-judge-views, 0.5 cosine; docs/benchmarks/kb.md, judge.md)")
     parser.add_argument("--llm-url", default=None,
                         help="an OpenAI-compatible server (POST <url>/v1/chat/completions) for knowledge bases whose "
                              "settings ask for generated answers; without it they answer with the passage itself")
@@ -1495,6 +1500,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
                         help="when idle, run the model this often so the first request after a pause stays fast "
                              "(keeps the GPU busy; see docs/benchmarks/api_latency.md)")
     args = parser.parse_args(argv)
+    if args.kb_judge_views not in (None, "whole") and (args.kb_judge or ("cosine" if args.embedder == "hashing"
+                                                                      else "cross-encoder")) != "cross-encoder":
+        parser.error("--kb-judge-views geo/mean needs the cross-encoder judge")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     if args.embedder == "hashing":  # tests / CI / demos: instant, no model, NOT semantic
         from chatcore.nlu.hashing import HashingEmbedder
@@ -1506,10 +1514,11 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - starts
     judge_kind = args.kb_judge or ("cosine" if args.embedder == "hashing" else "cross-encoder")
     cross_encoder = None
     if judge_kind == "cross-encoder":
-        from chatcore.knowledge import CROSS_ENCODER_THRESHOLD, CrossEncoderJudge
+        from chatcore.knowledge import JUDGE_THRESHOLDS, JUDGE_VIEWS, CrossEncoderJudge
 
+        views = args.kb_judge_views or JUDGE_VIEWS
         cross_encoder = CrossEncoderJudge(args.kb_threshold if args.kb_threshold is not None
-                                          else CROSS_ENCODER_THRESHOLD)
+                                          else JUDGE_THRESHOLDS[views], views)
     embedder = BatchedEmbedder(inner, keepalive_ms=args.keep_warm_ms, cross_encoder=cross_encoder)
     from chatcore.knowledge import COSINE_THRESHOLD, CosineJudge
 
