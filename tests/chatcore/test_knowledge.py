@@ -11,6 +11,7 @@ from chatcore.knowledge import (
     CHUNK_MAX,
     JUDGE_DEPTH,
     OVERRIDE_MARGIN,
+    Candidate,
     CosineJudge,
     Entry,
     KbResult,
@@ -24,6 +25,7 @@ from chatcore.knowledge import (
     extract_text,
     kb_version,
     parse_kb,
+    score_candidates,
 )
 from chatcore.nlu.entities import normalize
 from chatcore.nlu.hashing import HashingEmbedder
@@ -501,3 +503,73 @@ def test_a_section_name_survives_a_document_title_with_a_dash() -> None:
     hits = tuple(__import__("chatcore.knowledge", fromlist=["Hit"]).Hit(c, 0.9, 0.9) for c in idx.chunks)
     labels = [label for label, _ in compose(KbResult(hits, hits), KbSettings(mode="suggest")).replies]
     assert labels == ["우산 대여", "주차", "2024 - 공지.md"]
+
+
+def test_judge_parts_are_an_faqs_question_and_answer_and_a_chunks_sentences() -> None:
+    faq = Entry("f1", "faq", "환불 되나요", "7일 안에 됩니다.")
+    assert Candidate(faq, 0.5, "환불 가능해요?").parts == ("환불 가능해요?", "7일 안에 됩니다.")
+    assert Candidate(faq, 0.5).parts == ("환불 되나요", "7일 안에 됩니다.")
+    doc = Entry("d#0", "doc", "안내 - 환불", "가. 나. 다.", "안내.md", "안내 - 환불")
+    assert Candidate(doc, 0.5).parts == ("안내 - 환불\n가.", "안내 - 환불\n나.", "안내 - 환불\n다.",
+                                        "안내 - 환불\n가. 나.", "안내 - 환불\n나. 다.")
+    assert Candidate(Entry("d#1", "doc", "안내", "한 문장뿐.", "안내.md"), 0.5).parts == ()
+    lines = Entry("d#2", "doc", "목록", " ".join(f"{i}번." for i in range(40)), "목록.md")
+    assert len(Candidate(lines, 0.5).parts) == 8 + 7  # the first 8 sentences and their 7 neighbours
+
+
+def test_a_best_candidate_its_own_parts_do_not_back_gives_way_to_the_next(index) -> None:
+    class Judge:
+        name, threshold = "cross-encoder", 0.4
+
+        def score(self, query, candidates):  # wholes 0.9, 0.5, 0.1 ...; every part 0
+            return score_candidates(lambda texts: np.array([0.0] * len(texts)) if self.parts else self.first(texts),
+                                    query, candidates, "mean")
+
+        def first(self, texts):
+            self.parts = True
+            return np.array([0.9, 0.5] + [0.1] * (len(texts) - 2))
+
+    judge = Judge()
+    judge.parts = False
+    result = index.search("환불 기간", EMB.encode([normalize("환불 기간")])[0], judge)
+    assert [round(h.score, 2) for h in result.candidates][:2] == [0.5, 0.45]  # 0.9 whole, 0 parts: (0.9 + 0) / 2
+    assert len(result.answers) == 2 and result.answers[0].score == 0.5
+
+
+def test_score_candidates_reads_the_best_candidate_in_parts_and_combines_them() -> None:
+    faq = Candidate(Entry("f1", "faq", "환불 되나요", "7일 안에 됩니다."), 0.5)
+    one = Candidate(Entry("d#1", "doc", "안내", "한 문장뿐.", "안내.md"), 0.5)
+    table = {faq.judge_input: 0.6, "환불 되나요": 0.25, "7일 안에 됩니다.": 0.64, one.judge_input: 0.5}
+    calls = []
+
+    def pairs(texts):
+        calls.append([t for _, t in texts])
+        return np.array([table[t] for _, t in texts])
+
+    assert score_candidates(pairs, "q", [faq, one], "whole").tolist() == [0.6, 0.5] and len(calls) == 1
+    assert np.allclose(score_candidates(pairs, "q", [faq, one], "mean"), [(0.6 + 0.64) / 2, 0.5])
+    assert calls[-1] == ["환불 되나요", "7일 안에 됩니다."]  # a second call: the best one's parts only
+    assert np.allclose(score_candidates(pairs, "q", [faq, one], "geo"), [(0.6 * 0.64) ** 0.5, 0.5])
+    table[one.judge_input] = 0.9  # the best has no parts: its whole stands, one call
+    calls.clear()
+    assert score_candidates(pairs, "q", [faq, one], "mean").tolist() == [0.6, 0.9] and len(calls) == 1
+    assert score_candidates(pairs, "q", [], "mean").shape == (0,)
+
+
+def test_every_judge_view_has_a_measured_threshold() -> None:
+    from typing import get_args
+
+    from chatcore.knowledge import JUDGE_THRESHOLDS, JUDGE_VIEWS, JudgeViews
+
+    assert set(JUDGE_THRESHOLDS) == set(get_args(JudgeViews)) and JUDGE_VIEWS == "whole"
+    assert JUDGE_THRESHOLDS == {"whole": 0.11, "geo": 0.2, "mean": 0.41}  # docs/benchmarks/judge.md
+
+
+def test_score_candidates_refuses_a_scorer_that_loses_texts() -> None:
+    faq = Candidate(Entry("f1", "faq", "환불 되나요", "7일 안에 됩니다."), 0.5)
+    with pytest.raises(ValueError, match="for 1 texts"):
+        score_candidates(lambda texts: np.array([0.1, 0.2]), "q", [faq], "whole")
+    with pytest.raises(ValueError, match="for 2 texts"):
+        score_candidates(lambda texts: np.array([0.1]), "q", [faq], "mean")  # the parts call
+    negative = score_candidates(lambda texts: np.array([-0.2] if len(texts) == 1 else [0.5, 0.1]), "q", [faq], "geo")
+    assert negative.tolist() == [0.0]

@@ -110,6 +110,7 @@ def test_a_new_knowledge_base_alone_never_restarts_a_running_scenario(sample_bot
 
 class FakeCrossEncoder:
     threshold = 0.2
+    views = "whole"
 
     def __init__(self):
         self.pairs = []
@@ -157,6 +158,16 @@ def test_the_batched_embedder_runs_passages_and_the_judge_on_its_worker() -> Non
         assert judge.threshold == 0.2 and judge.name == "cross-encoder"
         assert scores.tolist() == [0.9 if "환불" in h.entry.judge_text else 0.1 for h in cands]
         assert judge.score("환불", []).shape == (0,)
+        ce.views = "mean"  # the best candidate's parts go to the worker too
+        before = len(ce.pairs)
+        listed = [Candidate(h.entry, h.cosine) for h in cands]
+        mixed = judged.judge().score("환불", listed)
+        best = listed[int(np.argmax(scores))]
+        assert len(ce.pairs) - before == len(cands) + len(best.parts) and len(best.parts) > 0
+        i = int(np.argmax(scores))
+        expected = scores.copy()
+        expected[i] = (scores[i] + max(0.9 if "환불" in t else 0.1 for t in best.parts)) / 2
+        assert np.allclose(mixed, expected)  # only the best one is combined with its parts
     finally:
         judged.close()
 
@@ -437,3 +448,13 @@ def test_concurrent_cold_loads_of_one_index_build_it_once(host, client, monkeypa
     for t in threads:
         t.join(5)
     assert len(builds) == 1 and len(got) == 4 and all(g is got[0] for g in got)  # one index, shared
+
+
+@pytest.mark.parametrize("argv", [["--embedder", "hashing", "--kb-judge-views", "mean"],
+                                  ["--kb-judge", "cosine", "--kb-judge-views", "geo"]])
+def test_reading_parts_needs_the_cross_encoder_and_is_refused_before_any_model_loads(argv, capsys) -> None:
+    from chatcore.api import main
+
+    with pytest.raises(SystemExit) as exit_:
+        main(argv)
+    assert exit_.value.code == 2 and "needs the cross-encoder" in capsys.readouterr().err

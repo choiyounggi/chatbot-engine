@@ -51,6 +51,10 @@ typos: `--augment-llm-model mlx-community/Qwen3-14B-4bit` (same server). Measure
 when the Korean analyzer finds the bot's word clearly more likely. Off by default: safe on every measured set, but
 the gain on naturally written typos was not significant. Measured: [docs/benchmarks/spelling.md](docs/benchmarks/spelling.md).
 
+`--kb-judge-views mean` lets the knowledge-base judge also read the best candidate sentence by sentence
+(FAQ: question and answer apart): 0.598 → 0.736 questions answered right, no more wrong or unanswerable
+answers, but knowledge-base turns take p95 343 ms instead of 202 ms. Measured: [docs/benchmarks/judge.md](docs/benchmarks/judge.md).
+
 ## Layout
 
 | Path | What |
